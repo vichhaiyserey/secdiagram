@@ -129,3 +129,91 @@ from secdiagram_core.high_level import build_high_level_architecture, render_mer
 high_level_arch = build_high_level_architecture(result.graph, repo_dir=".")
 c4_mermaid_text = render_mermaid_highlevel(high_level_arch)
 ```
+
+---
+
+## 6. Pluggable Extension SPI (Custom Languages, Rules & Exporters)
+
+Extend `secdiagram` privately, commercially, or internally without forking or modifying the core open-source engine.
+
+### A. Custom Language Indexers (`LanguageIndexer`)
+Index proprietary or new languages (e.g. Go, Rust, Kotlin, COBOL) and attach their definitions, endpoints, and calls to the unified graph:
+
+```python
+from pathlib import Path
+from secdiagram_core import Graph, Node, register_indexer
+
+class GoLanguageIndexer:
+    @property
+    def name(self) -> str:
+        return "go"
+
+    @property
+    def supported_suffixes(self) -> tuple[str, ...]:
+        return (".go",)
+
+    def index_repo(self, root: Path, rel_files: list[str], graph: Graph) -> None:
+        for rel in rel_files:
+            if rel.endswith(".go"):
+                # Parse Go file and attach nodes/edges to graph
+                node = Node(id=f"go:{rel}", kind="module", name=rel, qualname=rel, path=rel)
+                graph.add_node(node)
+
+# Register before running analysis:
+register_indexer(GoLanguageIndexer())
+```
+
+### B. Custom Security Rule Providers (`SecurityRuleProvider`)
+Enforce internal enterprise policies, proprietary compliance checks, or custom taint sinks:
+
+```python
+from pathlib import Path
+from secdiagram_core import Finding, Graph, Loc, register_security_provider
+
+class EnterprisePciRuleProvider:
+    @property
+    def name(self) -> str:
+        return "pci-dss-custom"
+
+    def analyze(self, graph: Graph, root: Path, rel_files: list[str]) -> list[Finding]:
+        findings = []
+        for node in graph.nodes.values():
+            if "card_number" in node.name.lower():
+                findings.append(Finding(
+                    id="PCI-001",
+                    category="compliance",
+                    severity="high",
+                    title="PCI Cardholder Data In Cleartext",
+                    message=f"Node `{node.name}` references unencrypted cardholder data.",
+                    evidence=[Loc(node.path, node.line)] if node.path else [],
+                    recommendation="Encrypt or tokenize primary account numbers.",
+                ))
+        return findings
+
+# Register before analysis:
+register_security_provider(EnterprisePciRuleProvider())
+```
+
+### C. Custom Report & Diagram Exporters (`ReportExporter`)
+Render the graph into custom enterprise formats (e.g. Miro, Confluence, D2, draw.io, or proprietary dashboards):
+
+```python
+from pathlib import Path
+from secdiagram_core import Graph, register_exporter
+
+class ConfluenceDocExporter:
+    @property
+    def name(self) -> str:
+        return "confluence"
+
+    def export(self, graph: Graph, out_dir: Path, **kwargs) -> Path:
+        out_file = out_dir / "confluence_page.xml"
+        out_file.write_text(f"<page><title>Architecture</title><body>Nodes: {len(graph.nodes)}</body></page>")
+        return out_file
+
+# Register exporter:
+register_exporter(ConfluenceDocExporter())
+
+# Now CLI accepts --format confluence, or can be invoked directly:
+# secdiagram --dir . --format confluence
+```
