@@ -14,6 +14,7 @@ from .baseline import apply_baseline, ignore_baseline, load_baseline, write_base
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .llm import NarrativeError, generate_narrative
 from .model import SEVERITY_RANK
+from .protocols import get_registered_exporters
 from .render_html import render_html
 from .render_image import ImageRenderError, render_image
 from .render_json import write_json
@@ -29,6 +30,7 @@ FORMATS = {"json", "md", "mermaid", "sarif", "png", "svg", "pdf", "image", "html
 
 def _parse_formats(value: str) -> list[str]:
     formats = []
+    custom_exporters = get_registered_exporters()
     for item in value.split(","):
         item = item.strip().lower()
         if item == "markdown":
@@ -37,7 +39,7 @@ def _parse_formats(value: str) -> list[str]:
             item = "image"
         elif item in {"web", "report"}:
             item = "html"
-        if item and item not in FORMATS:
+        if item and item not in FORMATS and item not in custom_exporters:
             raise argparse.ArgumentTypeError(f"unknown format: {item}")
         if item and item not in formats:
             formats.append(item)
@@ -832,6 +834,17 @@ def main(argv: list[str] | None = None) -> int:
                 newline="\n",
             )
             written.append(path)
+
+        for exp_name, exporter in get_registered_exporters().items():
+            if exp_name in args.format:
+                try:
+                    exp_result = exporter.export(graph, out)
+                    if isinstance(exp_result, list):
+                        written.extend(exp_result)
+                    elif isinstance(exp_result, Path):
+                        written.append(exp_result)
+                except Exception as exc:
+                    print(f"secdiagram: custom exporter '{exp_name}' failed: {exc}", file=sys.stderr)
     except (OSError, ImageRenderError) as exc:
         print(f"secdiagram: could not write output: {exc}", file=sys.stderr)
         return 1

@@ -26,6 +26,21 @@ from .model import (
     Node,
     TaintTrace,
 )
+from .protocols import (
+    LanguageIndexer,
+    ReportExporter,
+    SecurityRuleProvider,
+    get_registered_exporters,
+    get_registered_indexers,
+    get_registered_security_providers,
+    register_exporter,
+    register_indexer,
+    register_security_provider,
+    reset_registries,
+    unregister_exporter,
+    unregister_indexer,
+    unregister_security_provider,
+)
 from .render_image import ImageRenderError, render_image
 from .render_mermaid import render_mermaid as _render_mermaid_graph
 from .render_vex import render_vex
@@ -104,4 +119,17 @@ __all__ = [
     "SecdiagramConfig",
     "BasicAuthenticator",
     "NoOpAuthenticator",
+    "LanguageIndexer",
+    "SecurityRuleProvider",
+    "ReportExporter",
+    "register_indexer",
+    "unregister_indexer",
+    "get_registered_indexers",
+    "register_security_provider",
+    "unregister_security_provider",
+    "get_registered_security_providers",
+    "register_exporter",
+    "unregister_exporter",
+    "get_registered_exporters",
+    "reset_registries",
 ]
