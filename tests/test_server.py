@@ -277,6 +277,16 @@ class ServerAuthAndReadOnlyTests(unittest.TestCase):
                 self.assertEqual(resp.status, 200)
                 data = json.loads(resp.read().decode("utf-8"))
                 self.assertEqual(data["auth_mode"], "basic")
+
+            # 3. Invalid credentials with lowercase header is rejected with 401
+            bad_creds = base64.b64encode(b"alice:wrongpassword").decode("ascii")
+            req_bad = urllib.request.Request(
+                f"{base_url}/api/v1/health",
+                headers={"authorization": f"Basic {bad_creds}"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx_bad:
+                urllib.request.urlopen(req_bad, timeout=5)
+            self.assertEqual(ctx_bad.exception.code, 401)
         finally:
             server.shutdown()
             server.server_close()

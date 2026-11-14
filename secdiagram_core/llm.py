@@ -6,11 +6,13 @@ import json
 import os
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from typing import Any
 
 from .model import Graph
+from .redaction import redact_secrets
 
 TEMPLATES: dict[str, str] = {
     "comprehensive": """You are a Principal DevSecOps Architect and Application Security Expert performing a rigorous security architecture review.
@@ -597,21 +599,31 @@ def generate_narrative(
         final_key = (
             api_key
             or os.environ.get("SECDIAGRAM_LLM_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("OLLAMA_API_KEY")
             or "ollama"
         )
     else:
         final_base = target_base or "https://api.openai.com/v1"
         final_model = model or os.environ.get("SECDIAGRAM_LLM_MODEL") or "gpt-4o-mini"
-        final_key = (
-            api_key
-            or os.environ.get("SECDIAGRAM_LLM_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
-        )
+        parsed_host = (urllib.parse.urlparse(final_base).hostname or "").lower()
+        is_openai_host = parsed_host == "api.openai.com" or parsed_host.endswith(".openai.com")
+        if is_openai_host or chosen_provider == "openai":
+            final_key = (
+                api_key
+                or os.environ.get("SECDIAGRAM_LLM_API_KEY")
+                or os.environ.get("OPENAI_API_KEY")
+            )
+        else:
+            final_key = api_key or os.environ.get("SECDIAGRAM_LLM_API_KEY")
+
         if not final_key:
+            if is_openai_host or chosen_provider == "openai":
+                raise NarrativeError(
+                    "no LLM key found; set SECDIAGRAM_LLM_API_KEY or OPENAI_API_KEY, "
+                    "or use local Ollama with --ollama"
+                )
             raise NarrativeError(
-                "no LLM key found; set SECDIAGRAM_LLM_API_KEY or OPENAI_API_KEY, "
-                "or use local Ollama with --ollama"
+                f"no LLM key found for endpoint '{final_base}'; set SECDIAGRAM_LLM_API_KEY or use --llm-api-key"
             )
 
     repo_name = graph.meta.get("name") or "Repository"
@@ -695,7 +707,7 @@ def generate_narrative(
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="replace").strip()
+        err_body = redact_secrets(exc.read().decode("utf-8", errors="replace").strip())
         if exc.code == 404 and is_ollama:
             raise NarrativeError(
                 f"Ollama returned 404 for model '{final_model}'. "
@@ -717,15 +729,17 @@ def generate_narrative(
                     "Try increasing the timeout with '--llm-timeout 600' (or setting SECDIAGRAM_LLM_TIMEOUT=600), "
                     "or try a lighter model like 'qwen2.5-coder:1.5b'."
                 ) from exc
-            raise NarrativeError(f"LLM request timed out after {timeout:.0f}s: {exc}") from exc
+            clean_err = redact_secrets(str(exc))
+            raise NarrativeError(f"LLM request timed out after {timeout:.0f}s: {clean_err}") from exc
+        clean_err = redact_secrets(str(exc))
         if is_ollama:
             raise NarrativeError(
-                f"Could not connect to Ollama at {final_base} ({exc}). "
+                f"Could not connect to Ollama at {final_base} ({clean_err}). "
                 "Ensure your Docker container is running: "
                 f"docker run -d -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama && "
                 f"docker exec -it ollama ollama pull {final_model}"
             ) from exc
-        raise NarrativeError(f"LLM request failed: {exc}") from exc
+        raise NarrativeError(f"LLM request failed: {clean_err}") from exc
     except json.JSONDecodeError as exc:
         raise NarrativeError(f"LLM request failed: malformed JSON response: {exc}") from exc
 
