@@ -396,7 +396,7 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             remote=self._client_key(),
             path=self._request_path(),
             user=self._auth_username(),
-            credential_present=bool(self.headers.get("Authorization")),
+            credential_present=bool(self.headers.get("Authorization") or self.headers.get("authorization")),
         )
         challenge = authenticator.challenge_header()
         body = json.dumps({"error": "Unauthorized", "message": "Authentication required."})
