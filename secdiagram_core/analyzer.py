@@ -20,6 +20,8 @@ from .graph_builder import BuildStats, GraphBuilder
 from .iac import analyze_iac
 from .java_index import analyze_java_security, build_java_graph, index_java
 from .model import DependencyReachabilitySummary, Finding, Graph, TaintTrace, stable_id
+from .polyglot_index import build_polyglot_graph, index_polyglot
+from .polyglot_security import analyze_polyglot_security
 from .protocols import get_registered_indexers, get_registered_security_providers
 from .redaction import redact_secrets
 from .resolver import Resolver
@@ -51,7 +53,7 @@ LANGUAGE_BY_SUFFIX = {
     ".swift": "swift",
 }
 
-SECURITY_LANGUAGES = ("java", "python")
+SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "typescript")
 
 
 @dataclass(slots=True)
@@ -242,6 +244,10 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if java_index.files:
         build_java_graph(graph, java_index)
 
+    polyglot_index = index_polyglot(repo.root, repo.rel_files)
+    if polyglot_index.files:
+        build_polyglot_graph(graph, polyglot_index)
+
     plugin_errors: list[dict[str, str]] = []
     for custom_indexer in sorted(get_registered_indexers(), key=lambda item: str(item.name)):
         snapshot = (copy.deepcopy(graph.nodes), list(graph.edges), list(graph.features))
@@ -259,6 +265,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         findings.extend(analyze_security(graph, indexes, resolver, repo.root, repo.rel_files))
         if java_index.files:
             findings.extend(analyze_java_security(graph, java_index, repo.root, repo.name))
+        if polyglot_index.files:
+            findings.extend(analyze_polyglot_security(graph, polyglot_index))
         for custom_provider in sorted(get_registered_security_providers(), key=lambda item: str(item.name)):
             try:
                 provider_findings = list(custom_provider.analyze(graph, repo.root, repo.rel_files))
@@ -324,6 +332,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             "is_git": repo.is_git,
             "python_files": len(indexes),
             "java_files": len(java_index.files),
+            "polyglot_files": polyglot_index.language_counts(),
             "iac_files": len(repo.iac_files),
             "files_discovered": len(repo.rel_files),
             "files_skipped": len(repo.skipped),

@@ -1,0 +1,8 @@
+{
+  "name": "polyglot-node-api",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "99.0.0",
+    "pg": "99.0.0"
+  }
+}

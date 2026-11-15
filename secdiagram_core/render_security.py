@@ -375,8 +375,8 @@ def render_security_markdown(report: SecurityReport) -> str:
     lines.append(f"| Security analysis | {'enabled' if coverage['security_enabled'] else 'disabled'} |")
     lines.append(f"| Files discovered / skipped | {coverage['files_discovered']} / {coverage['files_skipped']} |")
     lines.append(
-        f"| Python / Java / IaC files | {coverage['python_files']} / "
-        f"{coverage['java_files']} / {coverage['iac_files']} |"
+        f"| Python / Java / C#+JS+TS+PHP+Go / IaC files | {coverage['python_files']} / "
+        f"{coverage['java_files']} / {coverage.get('polyglot_files', 0)} / {coverage['iac_files']} |"
     )
     lines.append(f"| Unresolved dynamic references | {coverage['unresolved_count']} |")
     lines.append(f"| Parse errors | {len(coverage['parse_errors'])} |")
@@ -861,8 +861,9 @@ def render_security_html(report: SecurityReport) -> str:
         ["Security analysis", "enabled" if coverage["security_enabled"] else "disabled"],
         ["Files discovered / skipped", f"{coverage['files_discovered']} / {coverage['files_skipped']}"],
         [
-            "Python / Java / IaC files",
-            f"{coverage['python_files']} / {coverage['java_files']} / {coverage['iac_files']}",
+            "Python / Java / C#+JS+TS+PHP+Go / IaC files",
+            f"{coverage['python_files']} / {coverage['java_files']} / "
+            f"{coverage.get('polyglot_files', 0)} / {coverage['iac_files']}",
         ],
         ["Unresolved dynamic references", str(coverage["unresolved_count"])],
         ["Parse errors", str(len(coverage["parse_errors"]))],

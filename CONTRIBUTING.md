@@ -192,6 +192,8 @@ secdiagram/
 │   ├── iac.py                   # Infrastructure-as-Code audits (Dockerfile, Compose, K8s, TF)
 │   ├── llm.py                   # Citation-preserving LLM narrative review generator
 │   ├── model.py                 # Graph, Node, Edge, Finding, and stable_id data models
+│   ├── polyglot_index.py        # C#/.NET, JS/TS, PHP, Go lexical indexer (routes, DI, edges)
+│   ├── polyglot_security.py     # Function-scoped taint SAST rules for C#, JS/TS, PHP, Go
 │   ├── render_image.py          # PNG, SVG, PDF image generation (local mmdc / Kroki / ink)
 │   ├── render_json.py           # Structured JSON output serializer
 │   ├── render_markdown.py       # Architecture document generator (ARCHITECTURE.md)
