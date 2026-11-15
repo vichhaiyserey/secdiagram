@@ -4,9 +4,9 @@
 
 ### *Small but Gold* — Deterministic Architecture Diagrams, Polyglot System Mapping, and Security Intelligence.
 
-[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-success.svg?style=flat-square)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/Tests-254%2F254%20Passing-brightgreen.svg?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-353%2F353%20Passing-brightgreen.svg?style=flat-square)](tests/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=flat-square&logo=docker&logoColor=white)](Dockerfile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Cross Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Ubuntu%20%7C%20RHEL%20%7C%20Windows-blueviolet.svg?style=flat-square)](docs/CONTAINER_AND_COMPOSE.md)
@@ -26,6 +26,9 @@
 - **High-Level C4 System Diagrams**: Automatically compiles clean C4 tier diagrams (`diagram-highlevel.mmd` & `diagram-highlevel.png`) showing Ingress, Gateways, Core Services, Databases, Caches, Brokers, and External APIs.
 - **Multi-Format Image Rendering**: Export diagrams directly to **PNG**, **SVG**, or **PDF** offline via bundled Mermaid CLI (`mmdc`) or zero-dependency HTTP fallbacks (Kroki, mermaid.ink).
 - **Security & IaC SAST Overlay**: Discovers entrypoints, traces taint dataflows **across functions and files** (controller → service → repository) to dangerous sinks (CWE-78, CWE-89, CWE-502), draws them as an attack-path diagram, catches hardcoded secrets, and audits Dockerfile, Kubernetes, Terraform, and GitHub Actions configurations.
+- **Web/API Misconfiguration Checks**: Flags broken JWT validation (`alg=none`, signature/expiry checks off), CORS that trusts any origin **with credentials**, disabled CSRF protection, cookies without `HttpOnly`/`Secure`, XXE-prone XML parsers, non-cryptographic RNGs used for tokens, and JS prototype pollution across C#, JS/TS, PHP, Go, and Java.
+- **Risk-Ranked "Fix First" List**: Scores every finding 0–10 by impact × exposure (anonymous, authenticated, or internal entry point, detected from framework auth markers) × evidence × confidence × CISA KEV, and groups them P0–P3 in reports, SARIF, and diagrams.
+- **STRIDE Threat Model**: Generates `THREAT_MODEL.md` per trust boundary (Internet, data stores, external services, host, supply chain) with evidence-backed statuses, priorities, and mitigations — and states honestly what static analysis cannot assess.
 - **CycloneDX 1.6 VEX & SARIF Export**: Generates industry-standard `security.sarif` and CycloneDX 1.6 VEX documents (`vex.json`) with automated reachability justifications (`code_not_reachable`) for dead/internal code.
 - **AI Architectural & Threat Modeling Reviews**: Integrates with local/containerized **Ollama (Qwen, LLaMA, DeepSeek)** or OpenAI endpoints to generate evidence-grounded architectural reviews citing exact `path:line` with zero hallucinations.
 - **100% Deterministic & Air-Gapped**: Byte-for-byte reproducible outputs across runs. Fully functional in offline, isolated, or air-gapped environments.
@@ -85,9 +88,11 @@ if result.has_taint_at("app/api.py", line=42):
 
 | Ecosystem | Manifests Inspected | Architectural & Security Elements Detected |
 | :--- | :--- | :--- |
-| **.NET (C# / F#)** | `*.sln`, `*.csproj`, `*.fsproj` | Project dependencies, ASP.NET Core controllers, Minimal APIs, EF Core DbContexts, MediatR CQRS, MassTransit/RabbitMQ, Redis, Cloud SDKs |
-| **Node.js / TypeScript** | `package.json`, workspaces, `schema.prisma` | Express, Fastify, NestJS, Next.js, Hono; Prisma, TypeORM, Mongoose; Redis, BullMQ, Kafka; Stripe, OpenAI SDK |
-| **Java / Spring Boot** | `pom.xml`, `build.gradle(.kts)` | Stereotypes (`@RestController`, `@Service`, `@Repository`), DI (`@Autowired`), injection/call edges; SQLi, command injection, deserialization, SSRF, XSS |
+| **.NET (C# / F#)** | `*.sln`, `*.csproj`, `*.fsproj`, `*.cs` | Project dependencies, ASP.NET Core controllers & Minimal APIs (routes, `[Authorize]`), EF Core DbContexts, MediatR CQRS, constructor DI; interprocedural taint to SQL, command, SSRF, path, redirect sinks; JWT/CORS/CSRF/cookie/XXE checks |
+| **Node.js / TypeScript** | `package.json`, workspaces, `schema.prisma`, `*.js`/`*.ts` | Express, Fastify, Koa, Hono, NestJS, Next.js routes & auth middleware; Prisma, TypeORM, Mongoose; interprocedural taint to SQL/NoSQL, `child_process`, `eval`, XSS, path, SSRF sinks; prototype pollution; JWT/CORS/cookie checks |
+| **PHP** | `composer.json`, `*.php` | Laravel routes & middleware, Symfony `#[Route]`/`#[IsGranted]`, Slim, legacy page scripts; constructor DI; taint to SQL, `system`/`exec`, `include`, `unserialize`, XSS, path, SSRF; CSRF/CORS/cookie/XXE checks |
+| **Go** | `go.mod`, `*.go` | `net/http` (incl. Go 1.22 `"GET /path"`), Gin, Echo, Chi routes & auth middleware; structs, receiver methods, `NewX` injection; taint to SQL, `exec.Command`, path, SSRF, XSS; JWT/CORS/cookie/TLS checks |
+| **Java / Spring Boot** | `pom.xml`, `build.gradle(.kts)` | Stereotypes (`@RestController`, `@Service`, `@Repository`), DI (`@Autowired`), injection/call edges, `@PreAuthorize`/`@PermitAll`; SQLi, command injection, deserialization, SSRF, XSS, XXE; JWT/CORS/CSRF/cookie checks |
 | **Python** | `pyproject.toml`, `requirements.txt`, `*.py` AST | FastAPI, Flask, Django, Celery; SQLAlchemy, Tortoise-ORM, asyncpg, pymongo; AST taint tracking from sources to dangerous execution sinks |
 | **Infrastructure & IaC** | `docker-compose.yml`, `Dockerfile`, K8s, Terraform | Compose service ports & links; Dockerfile unpinned tags & root user; Kubernetes capabilities & security contexts; Terraform public ACLs |
 
@@ -102,10 +107,13 @@ By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 - `diagram-taint.mmd` / `.png` — Attack-path diagram: untrusted input → entry points → every function on the path → vulnerable sink.
 - `ARCHITECTURE.md` — Complete markdown architecture report with embedded diagrams and a risk-ranked "Fix first" table.
 - `THREAT_MODEL.md` — STRIDE threat model per trust boundary, backed by findings and their risk priority.
-- `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings).
-- `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`.
+- `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings with hop-by-hop `metadata.flow` and `metadata.risk`).
+- `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`; `rank` and `riskScore`/`riskPriority` follow the risk model.
 - `vex.json` — CycloneDX 1.6 VEX document with automated reachability justifications.
-- `report.html` — Zero-dependency interactive HTML report with dark mode and filtering.
+- `report.html` — Zero-dependency interactive HTML report with dark mode, filtering, and an "Attack paths" view.
+- `SECURITY_REVIEW.md` / `security-report.html` — Standalone security review (`--security-report md|html|both`).
+- `NARRATIVE.md` — Optional evidence-grounded AI review (`--llm` / `--ollama`).
+- `security.baseline.json` — Accepted-findings baseline (`--create-baseline`, then `--baseline`).
 
 ---
 
@@ -117,7 +125,7 @@ For comprehensive guides, references, and deployment patterns, see:
 | :--- | :--- |
 | [**Architecture Diagrams & Image Rendering**](docs/ARCHITECTURE_DIAGRAMS.md) | C4 high-level diagrams, visual tiering, detail modes, PNG/SVG/PDF rendering, and providers. |
 | [**Container & Docker Compose Guide**](docs/CONTAINER_AND_COMPOSE.md) | Standalone Docker & Podman, Windows Git Bash tips, SELinux mode, and local Ollama Compose. |
-| [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST rules, IaC checks, SonarQube/Xray import, CycloneDX VEX, and custom framework registries. |
+| [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
 | [**Hardened Platform Server & REST API**](docs/SERVER_API.md) | Daemon mode (`secdiagram serve`), authentication, rate limits, request caps, and config schema. |
 | [**CLI Reference Manual**](docs/CLI_REFERENCE.md) | Complete command-line syntax, options breakdown table, and exit codes. |
 | [**Python Public Facade & Developer API**](docs/PYTHON_API.md) | Stable facade (`secdiagram_core`), taint/reachability queries, SCA bridge, and cache serialization. |
@@ -127,7 +135,7 @@ For comprehensive guides, references, and deployment patterns, see:
 
 ## 🧪 Verification & Testing
 
-`secdiagram` maintains a comprehensive test suite (250+ unit tests) covering AST indexers, graph builders, security heuristics, image rendering, and deterministic CLI behaviors:
+`secdiagram` maintains a comprehensive test suite (350+ unit tests) covering AST and lexical indexers for seven languages, interprocedural taint, misconfiguration rules, risk scoring, the threat model, graph builders, image rendering, and deterministic CLI behaviors:
 
 ```bash
 # Run unit test suite:
