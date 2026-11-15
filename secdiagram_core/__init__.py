@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 SCHEMA_VERSION = 1
 
 from .analyzer import AnalysisConfig, AnalysisResult, analyze, run_analysis
@@ -25,6 +25,21 @@ from .model import (
     Loc,
     Node,
     TaintTrace,
+)
+from .protocols import (
+    LanguageIndexer,
+    ReportExporter,
+    SecurityRuleProvider,
+    get_registered_exporters,
+    get_registered_indexers,
+    get_registered_security_providers,
+    register_exporter,
+    register_indexer,
+    register_security_provider,
+    reset_registries,
+    unregister_exporter,
+    unregister_indexer,
+    unregister_security_provider,
 )
 from .render_image import ImageRenderError, render_image
 from .render_mermaid import render_mermaid as _render_mermaid_graph
@@ -104,4 +119,17 @@ __all__ = [
     "SecdiagramConfig",
     "BasicAuthenticator",
     "NoOpAuthenticator",
+    "LanguageIndexer",
+    "SecurityRuleProvider",
+    "ReportExporter",
+    "register_indexer",
+    "unregister_indexer",
+    "get_registered_indexers",
+    "register_security_provider",
+    "unregister_security_provider",
+    "get_registered_security_providers",
+    "register_exporter",
+    "unregister_exporter",
+    "get_registered_exporters",
+    "reset_registries",
 ]

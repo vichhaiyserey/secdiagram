@@ -269,6 +269,94 @@ class LLMTests(unittest.TestCase):
                     elif tpl == "comprehensive":
                         self.assertIn("Security Architecture Review", user_prompt)
 
+    def test_ollama_does_not_forward_openai_key(self) -> None:
+        fake_response = {"message": {"content": "# Ollama Narrative"}}
+        response_bytes = json.dumps(fake_response).encode("utf-8")
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-secret-leaked-key-12345"}, clear=True):
+            with mock.patch("urllib.request.urlopen", return_value=DummyHTTPResponse(response_bytes)) as mock_urlopen:
+                generate_narrative(self.graph, provider="ollama")
+                req = mock_urlopen.call_args[0][0]
+                auth_header = req.headers.get("Authorization")
+                self.assertIsNone(auth_header)
+
+    def test_custom_endpoint_does_not_forward_openai_key(self) -> None:
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-secret-leaked-key-12345"}, clear=True):
+            with self.assertRaises(NarrativeError) as ctx:
+                generate_narrative(self.graph, base_url="http://custom-proxy.internal:8000/v1")
+            self.assertIn("no LLM key found for endpoint", str(ctx.exception))
+            self.assertNotIn("sk-secret-leaked-key", str(ctx.exception))
+
+    def test_openai_provider_with_custom_base_does_not_forward_openai_key(self) -> None:
+        env = {"OPENAI_API_KEY": "mock_openai_key_12345", "SECDIAGRAM_LLM_PROVIDER": "openai"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch("urllib.request.urlopen") as mock_urlopen:
+                with self.assertRaises(NarrativeError) as ctx:
+                    generate_narrative(self.graph, provider="openai", base_url="https://attacker.example/v1")
+            mock_urlopen.assert_not_called()
+            self.assertIn("no LLM key found for endpoint", str(ctx.exception))
+            self.assertNotIn("mock_openai_key_12345", str(ctx.exception))
+
+    def test_openai_host_still_uses_openai_key(self) -> None:
+        fake_response = {"choices": [{"message": {"content": "# OpenAI Narrative"}}]}
+        response_bytes = json.dumps(fake_response).encode("utf-8")
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": "mock_openai_key_12345"}, clear=True):
+            with mock.patch("urllib.request.urlopen", return_value=DummyHTTPResponse(response_bytes)) as mock_urlopen:
+                generate_narrative(self.graph, provider="openai")
+                req = mock_urlopen.call_args[0][0]
+                self.assertEqual(req.headers.get("Authorization"), "Bearer mock_openai_key_12345")
+
+    def test_error_messages_strip_base_url_credentials(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(NarrativeError) as ctx:
+                generate_narrative(self.graph, base_url="https://proxyuser:dummy-pass-123@proxy.internal:8443/v1?sig=abc")
+        message = str(ctx.exception)
+        self.assertNotIn("dummy-pass-123", message)
+        self.assertNotIn("proxyuser", message)
+        self.assertNotIn("sig=abc", message)
+        self.assertIn("https://proxy.internal:8443/v1", message)
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch(
+                "urllib.request.urlopen", side_effect=urllib.error.URLError("connection refused")
+            ):
+                with self.assertRaises(NarrativeError) as ctx:
+                    generate_narrative(
+                        self.graph, provider="ollama", base_url="http://:dummy-pass-123@ollama.internal:11434"
+                    )
+        self.assertNotIn("dummy-pass-123", str(ctx.exception))
+        self.assertIn("http://ollama.internal:11434", str(ctx.exception))
+
+    def test_custom_endpoint_accepts_explicit_or_neutral_key(self) -> None:
+        fake_response = {"choices": [{"message": {"content": "# Custom Narrative"}}]}
+        response_bytes = json.dumps(fake_response).encode("utf-8")
+        with mock.patch("urllib.request.urlopen", return_value=DummyHTTPResponse(response_bytes)) as mock_urlopen:
+            narrative = generate_narrative(
+                self.graph,
+                base_url="http://custom-proxy.internal:8000/v1",
+                api_key="proxy-token-123",
+            )
+            self.assertIn("# Custom Narrative", narrative)
+            req = mock_urlopen.call_args[0][0]
+            self.assertEqual(req.headers.get("Authorization"), "Bearer proxy-token-123")
+
+    def test_http_error_redacts_credentials_in_message(self) -> None:
+        leak_msg = b'{"error": "invalid key: sk-ant-api03-abcdef1234567890abcdef"}'
+        with mock.patch.dict(os.environ, {"SECDIAGRAM_LLM_API_KEY": "test-key"}):
+            with mock.patch(
+                "urllib.request.urlopen",
+                side_effect=urllib.error.HTTPError(
+                    url="https://api.openai.com/v1/chat/completions",
+                    code=401,
+                    msg="Unauthorized",
+                    hdrs={},  # type: ignore
+                    fp=io.BytesIO(leak_msg),
+                ),
+            ):
+                with self.assertRaises(NarrativeError) as ctx:
+                    generate_narrative(self.graph)
+                self.assertNotIn("abcdef1234567890abcdef", str(ctx.exception))
+                self.assertIn("[REDACTED]", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

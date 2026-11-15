@@ -22,7 +22,7 @@ from .analyzer import AnalysisConfig, AnalysisResult, run_analysis
 from .config import SecdiagramConfig, load_config
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .model import SEVERITY_RANK, Finding, Graph
-from .redaction import redact_secrets, sanitize_path_text
+from .redaction import redact_secrets, sanitize_path_text, sanitize_url_path
 from .render_html import render_html
 from .render_json import render_json
 from .render_mermaid import render_mermaid
@@ -141,6 +141,10 @@ class AuditLogger:
     Logging failures are swallowed so auditing can never take down the server.
     """
 
+    # Fields holding HTTP request paths (URL routes, not filesystem paths).
+    URL_PATH_FIELDS = frozenset({"path"})
+    MAX_FIELD_LEN = 512
+
     def __init__(self, destination: str | None, root: Path) -> None:
         self.root = root.resolve()
         self._lock = threading.Lock()
@@ -162,8 +166,12 @@ class AuditLogger:
             "event": event,
         }
         for key, value in fields.items():
-            text = sanitize_path_text(redact_secrets(str(value)), self.root)
-            record[key] = text[:512]
+            raw = str(value)
+            if key in self.URL_PATH_FIELDS:
+                record[key] = sanitize_url_path(raw, self.MAX_FIELD_LEN)
+                continue
+            text = sanitize_path_text(redact_secrets(raw[: self.MAX_FIELD_LEN * 8]), self.root)
+            record[key] = text[: self.MAX_FIELD_LEN]
         line = json.dumps(record, sort_keys=True, ensure_ascii=True)
         with self._lock:
             try:
@@ -396,7 +404,7 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             remote=self._client_key(),
             path=self._request_path(),
             user=self._auth_username(),
-            credential_present=bool(self.headers.get("Authorization")),
+            credential_present=bool(self.headers.get("Authorization") or self.headers.get("authorization")),
         )
         challenge = authenticator.challenge_header()
         body = json.dumps({"error": "Unauthorized", "message": "Authentication required."})
@@ -605,7 +613,7 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                     self.platform_server.audit.log(
                         "scan_rejected",
                         remote=self._client_key(),
-                        path=requested,
+                        scan_path=requested,
                         reason="path_not_allowlisted",
                     )
                     self._send_json(
@@ -630,7 +638,7 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                     self.platform_server.audit.log(
                         "scan_rejected",
                         remote=self._client_key(),
-                        path=requested,
+                        scan_path=requested,
                         reason="path_not_allowlisted",
                     )
                     self._send_json(

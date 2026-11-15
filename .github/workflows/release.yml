@@ -121,21 +121,24 @@ jobs:
           platforms: linux/amd64
           push: false
           load: true
-          tags: secdiagram:release
+          tags: |
+            secdiagram:release
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test CLI
-        run: docker run --rm secdiagram:release --help
+        run: docker run --rm ${{ env.IMAGE_NAME }}:${{ github.ref_name }} --help
       - name: Verify containerized diagram generation
         run: |
-          docker run --rm -v "${{ github.workspace }}:/repo" secdiagram:release --dir /repo/tests/fixtures/sample_app --out /tmp/verify-out --format mermaid --image png --no-security
+          docker run --rm -v "${{ github.workspace }}:/repo" ${{ env.IMAGE_NAME }}:${{ github.ref_name }} --dir /repo/tests/fixtures/sample_app --out /tmp/verify-out --format mermaid --image png --no-security
       # Blocking gate: every ignored finding is reviewed and expiring in
       # .trivyignore.yaml. Fixable or unclassified CRITICAL/HIGH fails the
       # release, so a vulnerable image can never reach Docker Hub.
+      # Scans are explicitly bound to the published image repository and tag.
       - name: Trivy image scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: secdiagram:release
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
           scanners: vuln,secret
           severity: CRITICAL,HIGH
           format: sarif
@@ -173,11 +176,53 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=latest
           labels: |
             org.opencontainers.image.title=secdiagram
             org.opencontainers.image.description=Deterministic architecture, relationship, and security diagrams for Python repositories.
             org.opencontainers.image.licenses=MIT
+      # Blocking gate (AGENTS.md Rule 7): build and Trivy-scan EVERY published
+      # platform locally BEFORE anything is pushed. The final multi-arch push
+      # below runs on the same buildx builder, so its layers come from the
+      # build cache these scanned images populated.
+      - name: Build linux/amd64 image for pre-push scan
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: secdiagram:prepush-amd64
+          cache-from: type=gha
+      - name: Trivy scan linux/amd64 (pre-push gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: secdiagram:prepush-amd64
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          format: table
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+      - name: Build linux/arm64 image for pre-push scan
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          load: true
+          tags: secdiagram:prepush-arm64
+          cache-from: type=gha
+      - name: Trivy scan linux/arm64 (pre-push gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: secdiagram:prepush-arm64
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          format: table
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
       - name: Build and push multi-arch image
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
@@ -189,3 +234,29 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+      # Post-publication audit (NOT a gate: the push above already happened).
+      # Re-scans each platform of the published digest to detect any drift
+      # from the pre-push scans; a failure here means the release must be
+      # investigated and the tags rolled back.
+      - name: Audit published image (linux/amd64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          format: table
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"
+      - name: Audit published image (linux/arm64)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          format: table
+          trivyignores: .trivyignore.yaml
+          exit-code: "1"

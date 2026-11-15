@@ -19,6 +19,7 @@ from .graph_builder import BuildStats, GraphBuilder
 from .iac import analyze_iac
 from .java_index import analyze_java_security, build_java_graph, index_java
 from .model import DependencyReachabilitySummary, Finding, Graph, TaintTrace, stable_id
+from .protocols import get_registered_indexers, get_registered_security_providers
 from .resolver import Resolver
 from .sca import build_dependency_reachability, check_package_reachable
 from .security import analyze as analyze_security
@@ -204,12 +205,23 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if java_index.files:
         build_java_graph(graph, java_index)
 
+    for custom_indexer in get_registered_indexers():
+        try:
+            custom_indexer.index_repo(repo.root, repo.rel_files, graph)
+        except Exception:
+            pass
+
     findings: list[Finding] = []
     if config.security:
         findings.extend(analyze_iac(graph, repo))
         findings.extend(analyze_security(graph, indexes, resolver, repo.root, repo.rel_files))
         if java_index.files:
             findings.extend(analyze_java_security(graph, java_index, repo.root, repo.name))
+        for custom_provider in get_registered_security_providers():
+            try:
+                findings.extend(custom_provider.analyze(graph, repo.root, repo.rel_files))
+            except Exception:
+                pass
         external, external_summaries = load_external_reports(
             repo.root,
             repo.rel_files,
