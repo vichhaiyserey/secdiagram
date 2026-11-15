@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from secdiagram_core.redaction import (
     redact_secrets,
     redact_snippet_line,
     sanitize_path_text,
+    sanitize_url_path,
 )
 
 
@@ -136,6 +138,34 @@ class RedactionTests(unittest.TestCase):
 
         relative_path = "secdiagram_core/model.py"
         self.assertEqual(sanitize_path_text(relative_path, root), relative_path)
+
+        self.assertEqual(sanitize_path_text("/.ssh/id_rsa", root), "[external-path]")
+        self.assertEqual(sanitize_path_text("/../etc/passwd", root), "[external-path]")
+
+    def test_sanitize_url_path_keeps_routes(self) -> None:
+        self.assertEqual(sanitize_url_path("/api/scan"), "/api/scan")
+        self.assertEqual(sanitize_url_path("/api/v1/findings"), "/api/v1/findings")
+        self.assertEqual(len(sanitize_url_path("/a" * 5000)), 512)
+        self.assertNotIn("ghp_" + "a" * 36, sanitize_url_path("/x/ghp_" + "a" * 36))
+
+    def test_key_assignment_regex_is_linear(self) -> None:
+        # Regression: an unbounded key pattern made these inputs quadratic
+        # ('a.' * 4000 took ~3s). 200k chars must finish well under a second.
+        hostile_inputs = (
+            "a." * 100_000,
+            "a-" * 100_000,
+            "token." * 30_000,
+            "x" * 200_000,
+            "-----BEGIN PRIVATE KEY-----" * 7_000,
+        )
+        for hostile in hostile_inputs:
+            start = time.perf_counter()
+            redact_secrets(hostile)
+            self.assertLess(time.perf_counter() - start, 1.0, hostile[:12])
+
+    def test_dotted_and_prefixed_keys_still_redacted(self) -> None:
+        self.assertEqual(redact_secrets("app.db.password=hunter2hunter2"), f"app.db.password={REDACTED}")
+        self.assertEqual(redact_secrets("x;DB_PASSWORD=hunter2hunter2"), f"x;DB_PASSWORD={REDACTED}")
 
 
 if __name__ == "__main__":

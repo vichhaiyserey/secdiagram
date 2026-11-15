@@ -13,10 +13,9 @@ from pathlib import Path
 
 REDACTED = "[REDACTED]"
 
-_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----.*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----",
-    re.DOTALL,
-)
+_PRIVATE_KEY_LABEL = r"(?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----"
+_PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN " + _PRIVATE_KEY_LABEL)
+_PRIVATE_KEY_END_RE = re.compile(r"-----END " + _PRIVATE_KEY_LABEL)
 _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bA[SK]IA[0-9A-Z]{16}\b"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})\b"),
@@ -43,15 +42,22 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdapi[a-f0-9]{32}\b"),
     re.compile(r"\bPMAK-[a-f0-9]{24}-[a-f0-9]{34}\b"),
 )
+# Scheme anchored at the start of a run and length-bounded so that long
+# ``a.a.a...`` inputs cannot trigger quadratic backtracking.
 _URL_CREDENTIAL_RE = re.compile(
-    r"(?i)(\b[a-z][a-z0-9+.-]*://[^:\s/@]+:)([^@\s/]+)(@)"
+    r"(?i)((?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]{0,31}://[^:\s/@]+:)([^@\s/]+)(@)"
 )
 _AUTH_HEADER_RE = re.compile(
     r"(?i)(\bauthorization\b\s*[:=]\s*['\"]?(?:bearer|basic|token)\s+)([A-Za-z0-9._~+/=-]{8,})"
 )
+# The key may only start at the beginning of an identifier run (negative
+# lookbehind instead of ``\b``, which also matches at every ``.``/``-``), and
+# its prefix/suffix are length-bounded. Both constraints keep matching linear
+# in the input length; unbounded ``[\w.\-]*`` on either side of the keyword
+# made attacker-controlled text (e.g. ``'a.' * 4000``) quadratic.
 _KEY_PATTERN = (
-    r"\b[\w.\-]*(?:secret|password|passwd|pwd|token|api[_-]?key|access[_-]?key|"
-    r"credential|private[_-]?key|client[_-]?secret|auth[_-]?token)[\w.\-]*"
+    r"(?<![\w.\-])[\w.\-]{0,64}?(?:secret|password|passwd|pwd|token|api[_-]?key|access[_-]?key|"
+    r"credential|private[_-]?key|client[_-]?secret|auth[_-]?token)[\w.\-]{0,64}"
 )
 
 _ASSIGNMENT_QUOTED_RE = re.compile(
@@ -64,11 +70,34 @@ _ASSIGNMENT_UNQUOTED_RE = re.compile(
 )
 
 
+def _redact_private_keys(text: str) -> str:
+    """Replace each BEGIN...END private key block with the marker.
+
+    A single forward scan replaces a lazy ``BEGIN.*?END`` regex, which is
+    quadratic when many BEGIN headers have no matching END: if one BEGIN has
+    no END after it, no later BEGIN can either, so the scan stops there.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        begin = _PRIVATE_KEY_BEGIN_RE.search(text, pos)
+        if begin is None:
+            break
+        end = _PRIVATE_KEY_END_RE.search(text, begin.end())
+        if end is None:
+            break
+        out.append(text[pos : begin.start()])
+        out.append(REDACTED)
+        pos = end.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def redact_secrets(text: str) -> str:
     """Return *text* with recognized credentials replaced by a marker."""
     if not text:
         return text
-    cleaned = _PRIVATE_KEY_RE.sub(REDACTED, text)
+    cleaned = _redact_private_keys(text)
     cleaned = _URL_CREDENTIAL_RE.sub(lambda m: m.group(1) + REDACTED + m.group(3), cleaned)
     cleaned = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + REDACTED, cleaned)
     cleaned = _ASSIGNMENT_QUOTED_RE.sub(lambda m: m.group(1) + REDACTED + m.group("q"), cleaned)
@@ -92,9 +121,24 @@ def sanitize_path_text(text: str, root: Path | None = None) -> str:
         return "[external-path]"
     if cleaned.startswith("\\\\"):
         return "[external-path]"
-    if cleaned.startswith("/") and not cleaned.startswith("/."):
+    if cleaned.startswith("/"):
         return "[external-path]"
     return cleaned
+
+
+def sanitize_url_path(text: str, max_len: int = 512) -> str:
+    """Return a loggable HTTP request path: truncated and secret-redacted.
+
+    Request paths are URL routes (``/api/scan``), not filesystem paths, so they
+    must not go through :func:`sanitize_path_text`, which would hide every one
+    of them as ``[external-path]``. The input is cut to a small multiple of
+    *max_len* before redaction to bound the work done on attacker-controlled
+    input, while leaving enough context that a secret near the cut is still
+    recognized.
+    """
+    if not text:
+        return text
+    return redact_secrets(text[: max_len * 4])[:max_len]
 
 
 def redact_snippet_line(line: str) -> str:
