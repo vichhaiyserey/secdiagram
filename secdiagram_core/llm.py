@@ -216,6 +216,20 @@ _META_KEYS = (
 )
 
 
+def _display_url(url: str) -> str:
+    """Return *url* safe for error messages: userinfo, query, and fragment removed."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        port = parts.port
+    except ValueError:
+        return "[invalid-url]"
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def _truncate(value: Any, limit: int) -> str:
     text = "" if value is None else str(value)
     if len(text) <= limit:
@@ -607,7 +621,9 @@ def generate_narrative(
         final_model = model or os.environ.get("SECDIAGRAM_LLM_MODEL") or "gpt-4o-mini"
         parsed_host = (urllib.parse.urlparse(final_base).hostname or "").lower()
         is_openai_host = parsed_host == "api.openai.com" or parsed_host.endswith(".openai.com")
-        if is_openai_host or chosen_provider == "openai":
+        # OPENAI_API_KEY is an OpenAI credential: forward it only to OpenAI's
+        # own hosts, never to a custom base URL even when provider == "openai".
+        if is_openai_host:
             final_key = (
                 api_key
                 or os.environ.get("SECDIAGRAM_LLM_API_KEY")
@@ -617,13 +633,14 @@ def generate_narrative(
             final_key = api_key or os.environ.get("SECDIAGRAM_LLM_API_KEY")
 
         if not final_key:
-            if is_openai_host or chosen_provider == "openai":
+            if is_openai_host:
                 raise NarrativeError(
                     "no LLM key found; set SECDIAGRAM_LLM_API_KEY or OPENAI_API_KEY, "
                     "or use local Ollama with --ollama"
                 )
             raise NarrativeError(
-                f"no LLM key found for endpoint '{final_base}'; set SECDIAGRAM_LLM_API_KEY or use --llm-api-key"
+                f"no LLM key found for endpoint '{_display_url(final_base)}'; "
+                "set SECDIAGRAM_LLM_API_KEY or use --llm-api-key"
             )
 
     repo_name = graph.meta.get("name") or "Repository"
@@ -734,7 +751,7 @@ def generate_narrative(
         clean_err = redact_secrets(str(exc))
         if is_ollama:
             raise NarrativeError(
-                f"Could not connect to Ollama at {final_base} ({clean_err}). "
+                f"Could not connect to Ollama at {_display_url(final_base)} ({clean_err}). "
                 "Ensure your Docker container is running: "
                 f"docker run -d -p 11434:11434 -v ollama:/root/.ollama --name ollama ollama/ollama && "
                 f"docker exec -it ollama ollama pull {final_model}"

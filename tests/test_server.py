@@ -11,6 +11,7 @@ from pathlib import Path
 
 from secdiagram_core.config import SecdiagramConfig
 from secdiagram_core.server import (
+    AuditLogger,
     BasicAuthenticator,
     NoOpAuthenticator,
     RateLimiter,
@@ -55,6 +56,32 @@ class AuthenticatorTests(unittest.TestCase):
         ok, user = auth.authenticate({"Authorization": f"Basic {good_b64}"})
         self.assertTrue(ok)
         self.assertEqual(user, "admin")
+
+
+class AuditLoggerTests(unittest.TestCase):
+    def _records(self, emit) -> list[dict[str, str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_path = root / "audit.jsonl"
+            logger = AuditLogger(str(log_path), root)
+            emit(logger, root)
+            return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+
+    def test_request_path_is_kept_not_masked(self) -> None:
+        records = self._records(lambda log, _root: log.log("auth_failure", remote="127.0.0.1", path="/api/scan"))
+        self.assertEqual(records[0]["path"], "/api/scan")
+
+    def test_scan_path_outside_root_is_masked(self) -> None:
+        records = self._records(lambda log, _root: log.log("scan_rejected", scan_path="/etc/shadow"))
+        self.assertEqual(records[0]["scan_path"], "[external-path]")
+
+    def test_hostile_request_path_is_bounded_and_fast(self) -> None:
+        import time
+
+        start = time.perf_counter()
+        records = self._records(lambda log, _root: log.log("rate_limited", path="/a." * 30_000))
+        self.assertLess(time.perf_counter() - start, 1.0)
+        self.assertLessEqual(len(records[0]["path"]), 512)
 
 
 class LimitPrimitiveTests(unittest.TestCase):
