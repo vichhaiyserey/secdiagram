@@ -194,6 +194,18 @@ class EnterprisePciRuleProvider:
 register_security_provider(EnterprisePciRuleProvider())
 ```
 
+**Finding ids and failures.** Built-in findings are deduplicated by `id`. If a
+provider reuses one rule id for several distinct findings (as above), each
+finding after the first gets a deterministic id derived with `stable_id()`, and
+the original id is kept in `finding.metadata["rule_id"]`. Nothing is dropped.
+For stable ids that you control, derive them yourself, e.g.
+`stable_id("PCI-001", node.id)`.
+
+If an indexer, security provider, or exporter raises, the error is recorded in
+`graph.meta["plugin_errors"]`, a failed indexer's partial graph changes are
+rolled back, the CLI prints a warning, and it exits `1` (or `2` if
+`--fail-on` is triggered), so a crashed rule never looks like a clean scan.
+
 ### C. Custom Report & Diagram Exporters (`ReportExporter`)
 Render the graph into custom enterprise formats (e.g. Miro, Confluence, D2, draw.io, or proprietary dashboards):
 
@@ -214,6 +226,8 @@ class ConfluenceDocExporter:
 # Register exporter:
 register_exporter(ConfluenceDocExporter())
 
-# Now CLI accepts --format confluence, or can be invoked directly:
-# secdiagram --dir . --format confluence
+# Plugins are registered in-process; the standalone `secdiagram` command does
+# not auto-discover them. Call the CLI from the same process to use the format:
+from secdiagram_core.cli import main
+main(["--dir", ".", "--format", "confluence"])
 ```

@@ -15,6 +15,7 @@ from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .llm import NarrativeError, generate_narrative
 from .model import SEVERITY_RANK
 from .protocols import get_registered_exporters
+from .redaction import redact_secrets
 from .render_html import render_html
 from .render_image import ImageRenderError, render_image
 from .render_json import write_json
@@ -843,8 +844,15 @@ def main(argv: list[str] | None = None) -> int:
                         written.extend(exp_result)
                     elif isinstance(exp_result, Path):
                         written.append(exp_result)
-                except Exception as exc:
-                    print(f"secdiagram: custom exporter '{exp_name}' failed: {exc}", file=sys.stderr)
+                except Exception as exc:  # plugin failure: report, keep other outputs, exit non-zero
+                    plugin_errors = graph.meta.setdefault("plugin_errors", [])
+                    plugin_errors.append(
+                        {
+                            "kind": "exporter",
+                            "plugin": exp_name,
+                            "error": f"{type(exc).__name__}: {redact_secrets(str(exc))[:300]}",
+                        }
+                    )
     except (OSError, ImageRenderError) as exc:
         print(f"secdiagram: could not write output: {exc}", file=sys.stderr)
         return 1
@@ -883,6 +891,13 @@ def main(argv: list[str] | None = None) -> int:
         for path in written:
             print(f"  wrote {path}")
 
+    plugin_failures = graph.meta.get("plugin_errors") or []
+    for failure in plugin_failures:
+        print(
+            f"secdiagram: warning: {failure['kind']} plugin '{failure['plugin']}' failed: {failure['error']}",
+            file=sys.stderr,
+        )
+
     if args.fail_on != "none":
         threshold = SEVERITY_RANK[args.fail_on]
         if any(
@@ -890,4 +905,8 @@ def main(argv: list[str] | None = None) -> int:
             for finding in graph.findings
         ):
             return 2
+    if plugin_failures:
+        # Results are incomplete (a security provider may not have run), so a
+        # clean exit would be a silent false negative in CI security gates.
+        return 1
     return 0

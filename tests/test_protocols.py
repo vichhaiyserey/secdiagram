@@ -84,6 +84,57 @@ class MockCustomExporter:
         return out_file
 
 
+class FailingIndexer:
+    @property
+    def name(self) -> str:
+        return "failing-lang"
+
+    @property
+    def supported_suffixes(self) -> tuple[str, ...]:
+        return (".fail",)
+
+    def index_repo(self, root: Path, rel_files: list[str], graph: Graph) -> None:
+        graph.add_node(Node(id="partial:node", kind="service", name="partial", qualname="partial", path="p.fail", line=1))
+        raise RuntimeError("indexer blew up with token=mock_token_12345")
+
+
+class FailingProvider:
+    @property
+    def name(self) -> str:
+        return "failing-policy"
+
+    def analyze(self, graph: Graph, root: Path, rel_files: list[str]) -> list[Finding]:
+        raise ValueError("provider crashed")
+
+
+class RepeatedIdProvider:
+    @property
+    def name(self) -> str:
+        return "pci-dss-custom"
+
+    def analyze(self, graph: Graph, root: Path, rel_files: list[str]) -> list[Finding]:
+        return [
+            Finding(
+                id="PCI-001",
+                category="compliance",
+                severity="high",
+                title="PCI Cardholder Data In Cleartext",
+                message=f"match {index}",
+                evidence=[Loc(f"app/card_{index}.py", index + 1)],
+            )
+            for index in range(5)
+        ]
+
+
+class FailingExporter:
+    @property
+    def name(self) -> str:
+        return "broken-doc"
+
+    def export(self, graph: Graph, out_dir: Path, **kwargs: Any) -> Path:
+        raise OSError("disk full")
+
+
 class ProtocolTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_registries()
@@ -182,6 +233,60 @@ class ProtocolTests(unittest.TestCase):
                 ])
             self.assertEqual(code, 0)
             self.assertTrue((out_dir / "custom-output.txt").is_file())
+
+    def test_failing_indexer_is_recorded_and_rolled_back(self) -> None:
+        register_indexer(FailingIndexer())
+        result = run_analysis(AnalysisConfig(root=SAMPLE_APP_DIR, security=False))
+        self.assertNotIn("partial:node", result.graph.nodes)
+        errors = result.graph.meta["plugin_errors"]
+        self.assertEqual([(e["kind"], e["plugin"]) for e in errors], [("indexer", "failing-lang")])
+        self.assertIn("RuntimeError", errors[0]["error"])
+        self.assertNotIn("mock_token_12345", errors[0]["error"])
+
+    def test_failing_security_provider_is_recorded(self) -> None:
+        register_security_provider(FailingProvider())
+        register_security_provider(MockCustomRuleProvider())
+        result = run_analysis(AnalysisConfig(root=SAMPLE_APP_DIR, security=True))
+        errors = result.graph.meta["plugin_errors"]
+        self.assertEqual([(e["kind"], e["plugin"]) for e in errors], [("security_provider", "failing-policy")])
+        # The healthy provider still ran.
+        self.assertIn("CUSTOM-RULE-001", [f.id for f in result.graph.findings])
+
+    def test_repeated_plugin_finding_ids_are_kept_deterministically(self) -> None:
+        register_security_provider(RepeatedIdProvider())
+        first = run_analysis(AnalysisConfig(root=SAMPLE_APP_DIR, security=True))
+        pci = [f for f in first.graph.findings if f.title == "PCI Cardholder Data In Cleartext"]
+        self.assertEqual(len(pci), 5)
+        self.assertEqual(len({f.id for f in pci}), 5)
+        self.assertIn("PCI-001", [f.id for f in pci])
+        self.assertTrue(all(f.metadata.get("rule_id", f.id) == "PCI-001" for f in pci))
+
+        second = run_analysis(AnalysisConfig(root=SAMPLE_APP_DIR, security=True))
+        again = [f for f in second.graph.findings if f.title == "PCI Cardholder Data In Cleartext"]
+        self.assertEqual(sorted(f.id for f in pci), sorted(f.id for f in again))
+
+    def test_cli_plugin_failure_warns_and_exits_nonzero(self) -> None:
+        import contextlib
+        import io
+
+        from secdiagram_core.cli import main
+
+        register_security_provider(FailingProvider())
+        register_exporter(FailingExporter())
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main([
+                    "--dir", str(SAMPLE_APP_DIR),
+                    "--out", str(Path(tmp_dir) / "out"),
+                    "--format", "json,broken-doc",
+                    "--quiet",
+                ])
+            self.assertEqual(code, 1)
+            self.assertIn("security_provider plugin 'failing-policy' failed", stderr.getvalue())
+            self.assertIn("exporter plugin 'broken-doc' failed: OSError: disk full", stderr.getvalue())
+            # Other outputs are still written.
+            self.assertTrue((Path(tmp_dir) / "out" / "graph.json").is_file())
 
 
 if __name__ == "__main__":

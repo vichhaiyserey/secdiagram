@@ -167,6 +167,40 @@ class RedactionTests(unittest.TestCase):
         self.assertEqual(redact_secrets("app.db.password=hunter2hunter2"), f"app.db.password={REDACTED}")
         self.assertEqual(redact_secrets("x;DB_PASSWORD=hunter2hunter2"), f"x;DB_PASSWORD={REDACTED}")
 
+    def test_url_credentials_edge_cases(self) -> None:
+        self.assertEqual(redact_secrets("redis://:dummy-pass-123@localhost:6379/0"), f"redis://:{REDACTED}@localhost:6379/0")
+        self.assertEqual(redact_secrets("postgres://u:p/ss@h/db"), f"postgres://u:{REDACTED}@h/db")
+        self.assertEqual(redact_secrets("http://host:8080/path"), "http://host:8080/path")
+
+    def test_multi_word_and_ssh2_private_keys(self) -> None:
+        ssh2 = "---- BEGIN SSH2 ENCRYPTED PRIVATE KEY ----\nMOCKKEY\n---- END SSH2 ENCRYPTED PRIVATE KEY ----"
+        pem = "-----BEGIN SSH2 ENCRYPTED PRIVATE KEY-----\nMOCKKEY\n-----END SSH2 ENCRYPTED PRIVATE KEY-----"
+        self.assertEqual(redact_secrets(ssh2), REDACTED)
+        self.assertEqual(redact_secrets(pem), REDACTED)
+
+    def test_benign_token_like_keys_are_not_redacted(self) -> None:
+        for text in ("max_tokens=4096000 tokenizer=AutoTokenizer", "max_tokens=128000 exceeds context", "num_tokens: 123456"):
+            self.assertEqual(redact_secrets(text), text)
+
+    def test_sensitive_key_spellings_still_redacted(self) -> None:
+        for key in ("githubToken", "apiKey", "x-api-key", "dbpassword", "client_secret", "access_token", "AUTH_TOKEN"):
+            self.assertEqual(redact_secrets(f"{key}=mock_value_123"), f"{key}={REDACTED}")
+        self.assertEqual(redact_secrets("max_tokens=password=mock_value_123"), f"max_tokens=password={REDACTED}")
+
+    def test_new_patterns_are_linear(self) -> None:
+        hostile_inputs = (
+            "a://b:" * 30_000,
+            "redis://:" * 25_000,
+            "x_tokens=" * 25_000,
+            "tokens=tokens=tokens" * 10_000,
+            "token='" * 30_000,
+            "---- BEGIN A PRIVATE KEY ----" * 6_000,
+        )
+        for hostile in hostile_inputs:
+            start = time.perf_counter()
+            redact_secrets(hostile)
+            self.assertLess(time.perf_counter() - start, 1.0, hostile[:12])
+
 
 if __name__ == "__main__":
     unittest.main()
