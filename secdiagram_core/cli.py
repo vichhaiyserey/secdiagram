@@ -432,11 +432,18 @@ def _normalize_cli_path(path_str: str) -> Path:
             if candidate_rel.exists() or candidate_rel.parent.exists():
                 return candidate_rel
 
-    parts = Path(path_str.replace("\\", "/")).parts
-    for i in range(1, len(parts)):
-        cand = Path("/" + "/".join(parts[i:]))
-        if cand.exists() or cand.parent.exists():
-            return cand
+        # Last resort for converted paths only (e.g. another Git install root):
+        # strip leading components, preferring a target that already exists.
+        parts = Path(path_str.replace("\\", "/")).parts
+        candidates = [Path("/" + "/".join(parts[i:])) for i in range(1, len(parts))]
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        for cand in candidates:
+            if cand.parent.exists() and cand.parent != Path("/"):
+                return cand
+    # Any other path is taken literally; the caller creates missing parents.
+    # (Rewriting it here once turned `--out build/reports/x` into `/x`.)
     return p
 
 

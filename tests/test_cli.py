@@ -285,6 +285,24 @@ class CliTests(unittest.TestCase):
                     resolved = _normalize_cli_path(fake_git_bash_path)
                     self.assertTrue(str(resolved).endswith(tmp_path.name))
 
+    def test_normalize_cli_path_keeps_new_nested_paths(self) -> None:
+        # Regression for #42: a path whose parent does not exist yet must be
+        # taken literally, not truncated to an existing ancestor such as "/".
+        from secdiagram_core.cli import _normalize_cli_path
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("os.name", "posix"):
+            nested = Path(tmp) / "det" / "a"
+            self.assertEqual(_normalize_cli_path(str(nested)), nested)
+            self.assertEqual(_normalize_cli_path("build/reports/secdiagram"), Path("build/reports/secdiagram"))
+            self.assertEqual(_normalize_cli_path("~/reports/out"), Path("~/reports/out").expanduser())
+
+    def test_cli_writes_into_new_nested_out_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "fresh" / "reports" / "secdiagram"
+            code, _, _ = self._run(["--dir", str(FIXTURE), "--out", str(out), "--format", "json", "--quiet"])
+            self.assertEqual(code, 0)
+            self.assertTrue((out / "graph.json").is_file())
+
     def test_llm_timeout_cli_arg(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
