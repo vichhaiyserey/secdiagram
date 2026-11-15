@@ -43,6 +43,7 @@ CATEGORY_LABELS = {
     "xpath": "XPath injection",
     "template": "Template injection",
     "log": "Log injection",
+    "prototype-pollution": "Prototype pollution",
 }
 
 
