@@ -172,11 +172,15 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ env.IMAGE_NAME }}
+          # latest=auto: `latest` is added only for stable semver tags, never
+          # for prereleases such as v2.0.0-rc1. {{major}} / {{major}}.{{minor}}
+          # are likewise skipped for prereleases by metadata-action.
+          flavor: |
+            latest=auto
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest
           labels: |
             org.opencontainers.image.title=secdiagram
             org.opencontainers.image.description=Deterministic architecture, relationship, and security diagrams for Python repositories.

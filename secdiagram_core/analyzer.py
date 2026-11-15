@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from .iac import analyze_iac
 from .java_index import analyze_java_security, build_java_graph, index_java
 from .model import DependencyReachabilitySummary, Finding, Graph, TaintTrace, stable_id
 from .protocols import get_registered_indexers, get_registered_security_providers
+from .redaction import redact_secrets
 from .resolver import Resolver
 from .sca import build_dependency_reachability, check_package_reachable
 from .security import analyze as analyze_security
@@ -184,6 +186,41 @@ class AnalysisResult:
         raise ValueError(f"Could not load AnalysisResult from source: {source}")
 
 
+def _plugin_error(kind: str, name: str, exc: BaseException, root: Path) -> dict[str, str]:
+    """Return a deterministic, redacted record of a plugin failure."""
+    message = redact_secrets(str(exc)).replace(str(root), ".")
+    return {"kind": kind, "plugin": str(name), "error": f"{type(exc).__name__}: {message[:300]}"}
+
+
+def _finding_identity(finding: Finding) -> tuple[str, ...]:
+    evidence = tuple(f"{loc.path}:{loc.line}" for loc in finding.evidence)
+    return (finding.node_id or "", finding.title, *evidence)
+
+
+def _disambiguate_plugin_findings(
+    provider_name: str, new: list[Finding], existing: list[Finding]
+) -> list[Finding]:
+    """Give colliding plugin findings unique, deterministic ids.
+
+    Built-in findings are deduplicated by id, so a plugin that reuses one id
+    for several distinct findings (e.g. one rule id per match) would silently
+    lose all but the first. A finding whose id is already taken by a finding
+    with a different identity gets ``stable_id(provider, id, identity...)``;
+    the original id is kept in ``metadata["rule_id"]``.
+    """
+    seen: dict[str, tuple[str, ...]] = {item.id: _finding_identity(item) for item in existing}
+    out: list[Finding] = []
+    for finding in new:
+        identity = _finding_identity(finding)
+        prior = seen.get(finding.id)
+        if prior is not None and prior != identity:
+            finding.metadata.setdefault("rule_id", finding.id)
+            finding.id = stable_id(str(provider_name), finding.id, *identity)
+        seen.setdefault(finding.id, identity)
+        out.append(finding)
+    return out
+
+
 def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     load_frameworks_config(config.root)
     repo = discover(
@@ -205,11 +242,16 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if java_index.files:
         build_java_graph(graph, java_index)
 
-    for custom_indexer in get_registered_indexers():
+    plugin_errors: list[dict[str, str]] = []
+    for custom_indexer in sorted(get_registered_indexers(), key=lambda item: str(item.name)):
+        snapshot = (copy.deepcopy(graph.nodes), list(graph.edges), list(graph.features))
         try:
             custom_indexer.index_repo(repo.root, repo.rel_files, graph)
-        except Exception:
-            pass
+        except Exception as exc:  # plugin code is untrusted to be well-behaved
+            # Roll back partial changes so a failing indexer cannot leave a
+            # half-built graph behind, and record the failure loudly.
+            graph.nodes, graph.edges, graph.features = snapshot
+            plugin_errors.append(_plugin_error("indexer", custom_indexer.name, exc, repo.root))
 
     findings: list[Finding] = []
     if config.security:
@@ -217,11 +259,13 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         findings.extend(analyze_security(graph, indexes, resolver, repo.root, repo.rel_files))
         if java_index.files:
             findings.extend(analyze_java_security(graph, java_index, repo.root, repo.name))
-        for custom_provider in get_registered_security_providers():
+        for custom_provider in sorted(get_registered_security_providers(), key=lambda item: str(item.name)):
             try:
-                findings.extend(custom_provider.analyze(graph, repo.root, repo.rel_files))
-            except Exception:
-                pass
+                provider_findings = list(custom_provider.analyze(graph, repo.root, repo.rel_files))
+            except Exception as exc:  # a crashed provider must not look like a clean scan
+                plugin_errors.append(_plugin_error("security_provider", custom_provider.name, exc, repo.root))
+                continue
+            findings.extend(_disambiguate_plugin_findings(custom_provider.name, provider_findings, findings))
         external, external_summaries = load_external_reports(
             repo.root,
             repo.rel_files,
@@ -235,6 +279,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     for finding in findings:
         merged.setdefault(finding.id, finding)
     graph.findings = list(merged.values())
+    if plugin_errors:
+        graph.meta["plugin_errors"] = plugin_errors
     if config.advisory_dbs:
         advisory_index, advisory_summaries = load_advisories(config.advisory_dbs)
         validated = apply_advisories(graph.findings, advisory_index)

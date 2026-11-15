@@ -13,9 +13,11 @@ from pathlib import Path
 
 REDACTED = "[REDACTED]"
 
-_PRIVATE_KEY_LABEL = r"(?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----"
-_PRIVATE_KEY_BEGIN_RE = re.compile(r"-----BEGIN " + _PRIVATE_KEY_LABEL)
-_PRIVATE_KEY_END_RE = re.compile(r"-----END " + _PRIVATE_KEY_LABEL)
+# Up to three label words (``RSA``, ``ENCRYPTED``, ``SSH2 ENCRYPTED``...) and
+# both PEM (``-----BEGIN X-----``) and SSH2 (``---- BEGIN X ----``) framing.
+_PRIVATE_KEY_LABEL = r"(?:[A-Z0-9_-]+ ){0,3}PRIVATE KEY(?: BLOCK)? ?-{4,5}"
+_PRIVATE_KEY_BEGIN_RE = re.compile(r"-{4,5} ?BEGIN " + _PRIVATE_KEY_LABEL)
+_PRIVATE_KEY_END_RE = re.compile(r"-{4,5} ?END " + _PRIVATE_KEY_LABEL)
 _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bA[SK]IA[0-9A-Z]{16}\b"),
     re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{20,})\b"),
@@ -44,8 +46,11 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 # Scheme anchored at the start of a run and length-bounded so that long
 # ``a.a.a...`` inputs cannot trigger quadratic backtracking.
+# The username may be empty (``redis://:pass@host``) and the password may
+# contain an unencoded ``/``; the password stops at the first ``@``. Both parts
+# are length-bounded so repeated ``a://b:`` input stays linear.
 _URL_CREDENTIAL_RE = re.compile(
-    r"(?i)((?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]{0,31}://[^:\s/@]+:)([^@\s/]+)(@)"
+    r"(?i)((?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]{0,31}://[^:\s/@]{0,256}:)([^@\s]{1,256}?)(@)"
 )
 _AUTH_HEADER_RE = re.compile(
     r"(?i)(\bauthorization\b\s*[:=]\s*['\"]?(?:bearer|basic|token)\s+)([A-Za-z0-9._~+/=-]{8,})"
@@ -61,13 +66,38 @@ _KEY_PATTERN = (
 )
 
 _ASSIGNMENT_QUOTED_RE = re.compile(
-    rf"({_KEY_PATTERN}\s*[:=]\s*(?P<q>['\"]))([^'\"]+)(?P=q)",
+    rf"((?P<key>{_KEY_PATTERN})\s*[:=]\s*(?P<q>['\"]))([^'\"]+)(?P=q)",
     re.IGNORECASE,
 )
-_ASSIGNMENT_UNQUOTED_RE = re.compile(
-    rf"({_KEY_PATTERN}\s*[:=]\s*)([^\s'\";,]{{6,}})",
-    re.IGNORECASE,
+# Unquoted assignments are scanned in two steps (key prefix, then value only
+# for sensitive keys) so benign keys never trigger a scan of their value.
+_ASSIGNMENT_PREFIX_RE = re.compile(rf"(?P<key>{_KEY_PATTERN})\s*[:=]\s*", re.IGNORECASE)
+_UNQUOTED_VALUE_RE = re.compile(r"[^\s'\";,]{6,}")
+
+# Precise key check applied after the broad regex match. A key is sensitive
+# only if one of its segments (split on ``_ . -`` and camelCase) or two
+# adjacent segments joined is a credential word, or a segment ends with one.
+# This keeps ``DB_PASSWORD``, ``app.db.password``, ``githubToken``, ``apiKey``
+# and ``dbpassword`` redacted while leaving ``max_tokens`` and ``tokenizer``.
+_SENSITIVE_SEGMENTS = frozenset(
+    {
+        "secret", "secrets", "password", "passwd", "pwd", "token", "apikey",
+        "accesskey", "credential", "credentials", "privatekey", "clientsecret",
+        "authtoken", "secretkey", "passphrase",
+    }
 )
+_SENSITIVE_SUFFIXES = ("password", "passwd", "secret", "token", "apikey", "credential", "credentials", "privatekey")
+_SEGMENT_SPLIT_RE = re.compile(r"[_.\-]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _is_sensitive_key(key: str) -> bool:
+    segments = [part.lower() for part in _SEGMENT_SPLIT_RE.split(key) if part]
+    for index, segment in enumerate(segments):
+        if segment in _SENSITIVE_SEGMENTS or segment.endswith(_SENSITIVE_SUFFIXES):
+            return True
+        if index + 1 < len(segments) and segment + segments[index + 1] in _SENSITIVE_SEGMENTS:
+            return True
+    return False
 
 
 def _redact_private_keys(text: str) -> str:
@@ -93,6 +123,32 @@ def _redact_private_keys(text: str) -> str:
     return "".join(out)
 
 
+def _redact_unquoted_assignments(text: str) -> str:
+    """Redact unquoted ``key=value`` pairs whose key is sensitive.
+
+    Scanning resumes right after each key prefix, so a sensitive pair nested
+    in a benign value (``max_tokens=password=...``) is still found, and a
+    value is only scanned when it is about to be redacted. The position only
+    moves forward, which keeps the scan linear.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        prefix = _ASSIGNMENT_PREFIX_RE.search(text, pos)
+        if prefix is None:
+            break
+        out.append(text[pos : prefix.end()])
+        pos = prefix.end()
+        if not _is_sensitive_key(prefix.group("key")):
+            continue
+        value = _UNQUOTED_VALUE_RE.match(text, pos)
+        if value is not None:
+            out.append(REDACTED)
+            pos = value.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def redact_secrets(text: str) -> str:
     """Return *text* with recognized credentials replaced by a marker."""
     if not text:
@@ -100,8 +156,11 @@ def redact_secrets(text: str) -> str:
     cleaned = _redact_private_keys(text)
     cleaned = _URL_CREDENTIAL_RE.sub(lambda m: m.group(1) + REDACTED + m.group(3), cleaned)
     cleaned = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + REDACTED, cleaned)
-    cleaned = _ASSIGNMENT_QUOTED_RE.sub(lambda m: m.group(1) + REDACTED + m.group("q"), cleaned)
-    cleaned = _ASSIGNMENT_UNQUOTED_RE.sub(lambda m: m.group(1) + REDACTED, cleaned)
+    cleaned = _ASSIGNMENT_QUOTED_RE.sub(
+        lambda m: m.group(1) + REDACTED + m.group("q") if _is_sensitive_key(m.group("key")) else m.group(0),
+        cleaned,
+    )
+    cleaned = _redact_unquoted_assignments(cleaned)
     for pattern in _TOKEN_PATTERNS:
         cleaned = pattern.sub(REDACTED, cleaned)
     return cleaned
