@@ -28,7 +28,6 @@ from typing import Any
 from .model import Graph, Loc, Node, stable_id
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
-MAX_SCAN_CHARS = 20_000
 
 LANGUAGE_BY_SUFFIX: dict[str, str] = {
     ".cs": "csharp",
@@ -114,6 +113,8 @@ class PgFile:
     _class_by_brace: dict[int, PgSymbol] = field(default_factory=dict)
     _sorted_opens: list[int] = field(default_factory=list)
     _tree_built: bool = False
+    _paren_close: dict[int, int] = field(default_factory=dict)
+    _parens_built: bool = False
 
     def line_of(self, pos: int) -> int:
         return bisect.bisect_right(self._line_starts, pos)
@@ -254,18 +255,21 @@ def _brace_pairs(masked: str) -> dict[int, int]:
     return pairs
 
 
-def _match_paren(masked: str, open_pos: int) -> int:
-    depth = 0
-    limit = min(len(masked), open_pos + MAX_SCAN_CHARS)
-    for k in range(open_pos, limit):
-        ch = masked[k]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-            if depth == 0:
-                return k
-    return -1
+def _match_paren(pf: PgFile, open_pos: int) -> int:
+    """Offset of the ``)`` matching the ``(`` at *open_pos* (``-1`` if unmatched).
+
+    All pairs are computed once per file with a stack, so lookups are O(1)
+    even for adversarial input full of unclosed calls.
+    """
+    if not pf._parens_built:
+        stack: list[int] = []
+        for match in re.finditer(r"[()]", pf.masked):
+            if match.group(0) == "(":
+                stack.append(match.start())
+            elif stack:
+                pf._paren_close[stack.pop()] = match.start()
+        pf._parens_built = True
+    return pf._paren_close.get(open_pos, -1)
 
 
 _BODY_RE = re.compile(r"\{|;|=>")
@@ -526,7 +530,7 @@ def _parse_csharp(pf: PgFile) -> None:
         primary = re.match(r"\s*(?:<[^>{;]*>)?\s*\(", after)
         if primary:
             open_pos = pos + primary.end() - 1
-            close = _match_paren(pf.masked, open_pos)
+            close = _match_paren(pf, open_pos)
             if close != -1:
                 params = _split_params(pf.code[open_pos + 1 : close])
                 pos = close + 1
@@ -573,7 +577,7 @@ def _parse_csharp(pf: PgFile) -> None:
         if name in CALL_STOPLIST and name not in {"Add", "Remove", "Count"}:
             continue
         open_pos = pf.line_start(idx + 1) + match.end() - 1
-        close = _match_paren(pf.masked, open_pos)
+        close = _match_paren(pf, open_pos)
         if close == -1:
             continue
         container = _container_for(pf, open_pos)
@@ -731,7 +735,7 @@ def _route_handler_symbol(
     csharp: bool = False,
 ) -> PgSymbol:
     """Create an endpoint for a route registration call ``x.get('/p', handler)``."""
-    close = _match_paren(pf.masked, call_open)
+    close = _match_paren(pf, call_open)
     if close == -1:
         close = min(len(pf.masked), call_open + 200)
     args_masked = pf.masked[call_open + 1 : close]
@@ -744,7 +748,7 @@ def _route_handler_symbol(
         head = args_masked[: inline.start()]
         paren = head.rfind("(")
         if paren != -1:
-            p_close = _match_paren(pf.masked, call_open + 1 + paren)
+            p_close = _match_paren(pf, call_open + 1 + paren)
             if p_close != -1 and p_close < call_open + 1 + inline.start() + 1:
                 params = _split_params(pf.code[call_open + 2 + paren : p_close])
         if inline.group(0) == "=>":
@@ -752,7 +756,7 @@ def _route_handler_symbol(
         else:
             fn_paren = inline.end() - 1 if inline.group(0).endswith("(") else args_masked.find("(", inline.end())
             if fn_paren != -1:
-                p_close = _match_paren(pf.masked, call_open + 1 + fn_paren)
+                p_close = _match_paren(pf, call_open + 1 + fn_paren)
                 if p_close != -1:
                     params = _split_params(pf.code[call_open + 2 + fn_paren : p_close])
                     body = _body_after(pf.masked, pairs, p_close + 1)
@@ -927,7 +931,7 @@ def _parse_js(pf: PgFile) -> None:
             container = owner
         params: list[str] = []
         if open_pos >= 0:
-            close = _match_paren(pf.masked, open_pos)
+            close = _match_paren(pf, open_pos)
             if close == -1:
                 continue
             if arrow and arrow.group(3):
@@ -1116,7 +1120,7 @@ def _parse_php(pf: PgFile) -> None:
             continue
         name = match.group(2)
         open_pos = pf.line_start(idx + 1) + match.end() - 1
-        close = _match_paren(pf.masked, open_pos)
+        close = _match_paren(pf, open_pos)
         if close == -1:
             continue
         params = _split_params(pf.code[open_pos + 1 : close])
@@ -1275,7 +1279,7 @@ def _parse_go(pf: PgFile) -> None:
         if not match:
             continue
         open_pos = pf.line_start(idx + 1) + match.end() - 1
-        close = _match_paren(pf.masked, open_pos)
+        close = _match_paren(pf, open_pos)
         if close == -1:
             continue
         body = _body_after(pf.masked, pairs, close + 1)

@@ -30,6 +30,7 @@ from .polyglot_index import (
     PgFile,
     PgSymbol,
     PolyglotIndex,
+    _match_paren,
     symbol_node_id,
 )
 from .redaction import redact_secrets
@@ -393,23 +394,17 @@ class _ScopeLocator:
 
 def _argument_text(pf: PgFile, match_end: int, assignment: bool) -> str:
     code = pf.code
-    if assignment or not code[match_end - 1 : match_end] == "(":
+    if assignment or code[match_end - 1 : match_end] != "(":
         stop = code.find(";", match_end)
         newline = code.find("\n", match_end)
         candidates = [c for c in (stop, newline) if c != -1]
         return code[match_end : min(candidates) if candidates else len(code)]
-    depth = 1
-    k = match_end
-    limit = min(len(code), match_end + 4000)
-    masked = pf.masked
-    while k < limit and depth:
-        ch = masked[k]
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        k += 1
-    return code[match_end : k - 1 if depth == 0 else k]
+    close = _match_paren(pf, match_end - 1)
+    if close == -1:
+        # Unbalanced call: fall back to the rest of the line.
+        newline = code.find("\n", match_end)
+        return code[match_end : newline if newline != -1 else len(code)]
+    return code[match_end:close]
 
 
 INTERP_RE = re.compile(r"\$\{([^}]*)\}|(?<![\w$])\{([A-Za-z_][\w.]*)\}|(\$\w+)")

@@ -9,7 +9,14 @@ from pathlib import Path
 
 from secdiagram_core.analyzer import AnalysisConfig, AnalysisResult, run_analysis
 from secdiagram_core.high_level import build_high_level_architecture
-from secdiagram_core.polyglot_index import _views, parse_polyglot_file
+from secdiagram_core.model import Graph
+from secdiagram_core.polyglot_index import (
+    PolyglotIndex,
+    _views,
+    build_polyglot_graph,
+    parse_polyglot_file,
+)
+from secdiagram_core.polyglot_security import analyze_polyglot_security
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "polyglot"
 
@@ -85,16 +92,24 @@ class TokenizerTests(unittest.TestCase):
         self.assertIsNone(parse_polyglot_file("types/index.d.ts", "export declare function f(): void;"))
 
     def test_adversarial_input_is_bounded(self) -> None:
+        # Thousands of unclosed calls/braces and sinks: indexing, graph and SAST
+        # must stay linear (bracket pairs are computed once per file).
         hostile = {
             "h.ts": "app.get('/x', (req, res) => {" * 3000 + "\"'`" * 20000,
             "h.cs": "public void M(" * 5000 + "{" * 20000,
             "h.php": "<?php " + "Route::get('/a', function () {" * 3000,
             "h.go": "package h\n" + "r.GET(\"/x\", func(c *gin.Context) {\n" * 3000,
+            "s.ts": "exec(" * 20000 + "fetch(req.query.x" * 5000,
         }
         for path, text in hostile.items():
             start = time.perf_counter()
-            parse_polyglot_file(path, text)
-            self.assertLess(time.perf_counter() - start, 10.0, path)
+            pf = parse_polyglot_file(path, text)
+            assert pf is not None
+            index = PolyglotIndex(files={path: pf})
+            graph = Graph()
+            build_polyglot_graph(graph, index)
+            analyze_polyglot_security(graph, index)
+            self.assertLess(time.perf_counter() - start, 5.0, path)
 
 
 class CSharpTests(unittest.TestCase):
