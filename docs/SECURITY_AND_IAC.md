@@ -100,7 +100,26 @@ and the sink end are always kept). JavaScript regex literals and PHP heredocs
 are not tokenized specially. Router mount prefixes (`app.use('/api', router)`,
 Laravel `Route::prefix`) are not prepended.
 
-### 1.2 Attack-path diagram (`diagram-taint.mmd`)
+### 1.2 Web/API misconfiguration (C#, JS/TS, PHP, Go, Java)
+
+`misconfig.py` brings the configuration checks that Python already had to every
+other language. Each rule is a comment-free line match; some require a companion
+pattern nearby (CORS wildcard **and** credentials) or are suppressed by a
+mitigation elsewhere in the file (`jwt.decode` next to `jwt.verify`, a
+developer page behind `IsDevelopment()`).
+
+| Category | CWE | Examples detected |
+| :--- | :--- | :--- |
+| JWT validation | CWE-347 / 287 / 613 | `ValidateIssuerSigningKey = false`, `ValidateLifetime = false`; `algorithms: ['none']`, `jwt.decode` without `jwt.verify`, `ignoreExpiration: true`; PHP `'alg' => 'none'`; Go `ParseUnverified`, `SigningMethodNone`; Java `parseClaimsJwt`, `Algorithm.none()`, `JWT.decode` without `JWT.require` |
+| CORS with credentials | CWE-942 | `SetIsOriginAllowed(_ => true)` + `AllowCredentials()`; `cors({ origin: true, credentials: true })`, reflected `req.headers.origin`; PHP `Access-Control-Allow-Origin: *` / reflected `HTTP_ORIGIN` + credentials, Laravel `allowed_origins => ['*']` + `supports_credentials`; Go `AllowAllOrigins` / `AllowOriginFunc ... return true` + `AllowCredentials`; Spring `allowedOriginPatterns("*")` + `allowCredentials(true)` |
+| CSRF disabled | CWE-352 | `[IgnoreAntiforgeryToken]`; Laravel `$except = ['*']` / `validateCsrfTokens(except: ['*'])`; Spring `csrf(AbstractHttpConfigurer::disable)` |
+| Cookie flags | CWE-1004 / 614 | `HttpOnly = false`, `CookieSecurePolicy.None`; `httpOnly: false` in cookie/session options; `session.cookie_httponly = 0`; `http.Cookie{HttpOnly: false}`; `setHttpOnly(false)` |
+| XXE | CWE-611 | `DtdProcessing.Parse`, `XmlUrlResolver`; libxmljs `noent: true`; `LIBXML_NOENT` (Java XXE is covered by the Java rules) |
+| Insecure randomness | CWE-338 | `new Random()`, `Math.random()`, `mt_rand`/`uniqid`, `math/rand`, `java.util.Random` on lines that build tokens, secrets, OTPs, session ids or reset codes |
+| Prototype pollution | CWE-1321 | `_.merge(target, req.body)`, `$.extend(true, ...)`, `deepmerge(...)` when a *source* argument carries request data (taint rule) |
+| Debug exposure | CWE-209 | `UseDeveloperExceptionPage()` without an environment guard |
+
+### 1.3 Attack-path diagram (`diagram-taint.mmd`)
 
 Every tainted finding, in every language (Python and Java flows are derived from
 their traces), becomes an attack path: **untrusted input -> entry point ->

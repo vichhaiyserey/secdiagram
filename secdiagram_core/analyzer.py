@@ -19,6 +19,7 @@ from .frameworks import annotate, load_frameworks_config
 from .graph_builder import BuildStats, GraphBuilder
 from .iac import analyze_iac
 from .java_index import analyze_java_security, build_java_graph, index_java
+from .misconfig import analyze_misconfig
 from .model import DependencyReachabilitySummary, Finding, Graph, TaintTrace, stable_id
 from .polyglot_index import build_polyglot_graph, index_polyglot
 from .polyglot_security import analyze_polyglot_security
@@ -268,6 +269,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             findings.extend(analyze_java_security(graph, java_index, repo.root, repo.name))
         if polyglot_index.files:
             findings.extend(analyze_polyglot_security(graph, polyglot_index))
+        findings.extend(analyze_misconfig(graph, repo.root, repo.rel_files))
         for custom_provider in sorted(get_registered_security_providers(), key=lambda item: str(item.name)):
             try:
                 provider_findings = list(custom_provider.analyze(graph, repo.root, repo.rel_files))

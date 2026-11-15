@@ -191,6 +191,7 @@ secdiagram/
 │   ├── high_level.py            # Compiles C4 high-level tier overview diagrams
 │   ├── iac.py                   # Infrastructure-as-Code audits (Dockerfile, Compose, K8s, TF)
 │   ├── llm.py                   # Citation-preserving LLM narrative review generator
+│   ├── misconfig.py             # Web/API misconfiguration rules for C#, JS/TS, PHP, Go, Java
 │   ├── model.py                 # Graph, Node, Edge, Finding, and stable_id data models
 │   ├── polyglot_index.py        # C#/.NET, JS/TS, PHP, Go lexical indexer (routes, DI, edges)
 │   ├── polyglot_security.py     # Function-scoped taint SAST rules for C#, JS/TS, PHP, Go
@@ -200,6 +201,7 @@ secdiagram/
 │   ├── render_mermaid.py        # Mermaid flowchart code generator (diagram.mmd)
 │   ├── render_sarif.py          # OASIS SARIF v2.1.0 security report serializer
 │   ├── resolver.py              # Qualified symbol resolution and call attribution
+│   ├── taint_flows.py           # Language-neutral taint flows and attack-path diagram
 │   └── security.py              # SAST security rules (taint flow, hardcoded secrets, injection)
 ├── tests/                       # Test suite
 │   ├── fixtures/                # Sample applications (Python, .NET, Node.js)

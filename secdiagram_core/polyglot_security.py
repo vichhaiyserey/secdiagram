@@ -68,6 +68,8 @@ RECOMMEND = {
     "crypto": "Use modern primitives (SHA-256+, AES-GCM, bcrypt/Argon2 for passwords) instead of MD5/SHA-1/DES/RC4/ECB.",
     "nosql": "Cast filter values to expected primitive types and reject operator objects ($ne, $gt...) from input.",
     "file-inclusion": "Never include files based on user input; map identifiers to a fixed allowlist of files.",
+    "prototype-pollution": "Do not deep-merge request objects; copy allowlisted keys, use Object.create(null) or "
+    "Map, and reject __proto__/constructor/prototype keys.",
 }
 
 
@@ -85,6 +87,7 @@ class Rule:
     requires: re.Pattern[str] | None = None
     sanitizer: re.Pattern[str] | None = None
     assignment: bool = False
+    skip_first_arg: bool = False  # deep-merge: the target may be tainted; only sources matter
 
 
 def _r(pattern: str) -> re.Pattern[str]:
@@ -173,6 +176,10 @@ RULES: tuple[Rule, ...] = (
     Rule("PG-JS-REDIRECT", JS, "redirect", "CWE-601", "Open redirect",
          _r(r"\b(?:res|reply|ctx|Response|NextResponse)\.redirect\s*\(|\b(?:window\.)?location(?:\.href)?\s*=(?!=)|\blocation\.(?:assign|replace)\s*\("),
          "taint", "medium", sanitizer=REDIRECT_SANITIZER),
+    Rule("PG-JS-PROTO", JS, "prototype-pollution", "CWE-1321", "Prototype pollution",
+         _r(r"\b(?:_|lodash)\.(?:merge|mergeWith|defaultsDeep|set|setWith|zipObjectDeep)\s*\(|"
+            r"\$\.extend\s*\(\s*true\s*,|\bjQuery\.extend\s*\(\s*true\s*,|\b(?:deepmerge|mergeDeep|deepMerge)\s*\("),
+         "taint", "high", skip_first_arg=True),
     Rule("PG-JS-DESER", JS, "deserialization", "CWE-502", "Unsafe deserialization",
          _r(r"\b(?:serialize\.)?unserialize\s*\("), "always", "high", requires=_r(r"node-serialize|serialize-javascript")),
     Rule("PG-JS-TLS", JS, "tls", "CWE-295", "TLS certificate validation disabled",
@@ -595,6 +602,11 @@ def _collect_facts(graph: Graph, index: PolyglotIndex) -> list[_Fn]:
                     parts = _split_top_level(pf, arg_start, arg_end)
                     if parts:
                         arg_end = parts[0][1]
+                elif rule.skip_first_arg and not assignment:
+                    parts = _split_top_level(pf, arg_start, arg_end)
+                    if len(parts) < 2:
+                        continue
+                    arg_start = parts[1][0]
                 items.append(
                     (pos, 4 + order, "sink",
                      _Sink(pos=pos, line=line_no, rule=rule, order=order, arg_start=arg_start, arg_end=arg_end,
