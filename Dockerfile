@@ -1,5 +1,5 @@
 # Stage 1: Install Mermaid CLI in official Node.js image
-FROM node:24-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS mermaid-builder
+FROM node:24-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS mermaid-builder
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 WORKDIR /opt/mermaid
 COPY docker/mermaid/package.json docker/mermaid/package-lock.json ./
@@ -7,7 +7,7 @@ RUN npm ci --omit=dev --ignore-scripts \
     && npm cache clean --force
 
 # Stage 2: Final runtime image
-FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 # Labels following OCI specifications
 LABEL org.opencontainers.image.title="secdiagram" \
