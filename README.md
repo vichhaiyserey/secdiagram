@@ -25,7 +25,7 @@
 - **Pure Python Standard Library (`zero dependencies`)**: Runs instantly without downloading hundreds of megabytes of third-party wheels. Zero supply chain attack surface.
 - **High-Level C4 System Diagrams**: Automatically compiles clean C4 tier diagrams (`diagram-highlevel.mmd` & `diagram-highlevel.png`) showing Ingress, Gateways, Core Services, Databases, Caches, Brokers, and External APIs.
 - **Multi-Format Image Rendering**: Export diagrams directly to **PNG**, **SVG**, or **PDF** offline via bundled Mermaid CLI (`mmdc`) or zero-dependency HTTP fallbacks (Kroki, mermaid.ink).
-- **Security & IaC SAST Overlay**: Discovers entrypoints, traces taint dataflows to dangerous sinks (CWE-78, CWE-89, CWE-502), catches hardcoded secrets, and audits Dockerfile, Kubernetes, Terraform, and GitHub Actions configurations.
+- **Security & IaC SAST Overlay**: Discovers entrypoints, traces taint dataflows **across functions and files** (controller → service → repository) to dangerous sinks (CWE-78, CWE-89, CWE-502), draws them as an attack-path diagram, catches hardcoded secrets, and audits Dockerfile, Kubernetes, Terraform, and GitHub Actions configurations.
 - **CycloneDX 1.6 VEX & SARIF Export**: Generates industry-standard `security.sarif` and CycloneDX 1.6 VEX documents (`vex.json`) with automated reachability justifications (`code_not_reachable`) for dead/internal code.
 - **AI Architectural & Threat Modeling Reviews**: Integrates with local/containerized **Ollama (Qwen, LLaMA, DeepSeek)** or OpenAI endpoints to generate evidence-grounded architectural reviews citing exact `path:line` with zero hallucinations.
 - **100% Deterministic & Air-Gapped**: Byte-for-byte reproducible outputs across runs. Fully functional in offline, isolated, or air-gapped environments.
@@ -98,7 +98,8 @@ if result.has_taint_at("app/api.py", line=42):
 By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 
 - `diagram-highlevel.mmd` / `.png` — High-level C4 system tier diagram (`secdiagram.com` style).
-- `diagram.mmd` / `.png` — Detailed architecture flowchart and component relationships.
+- `diagram.mmd` / `.png` — Detailed architecture flowchart and component relationships (taint paths highlighted in red).
+- `diagram-taint.mmd` / `.png` — Attack-path diagram: untrusted input → entry points → every function on the path → vulnerable sink.
 - `ARCHITECTURE.md` — Complete markdown architecture report with embedded diagrams.
 - `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings).
 - `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`.

@@ -41,15 +41,36 @@ Route registrations that name their handler (`app.get('/x', listUsers)`,
 are linked to that handler, even across files, so the handler itself becomes the
 endpoint node.
 
-**Security rules (function-scoped taint)**
+**Security rules (interprocedural taint)**
 
 Request input (ASP.NET action parameters and `Request.*`, `req.query/body/params`,
 NestJS `@Body/@Query/@Param`, `$_GET/$_POST/$request->input()`, Laravel/Symfony
 route parameters, `c.Query/c.Param/r.FormValue/r.URL.Query()` and gin/echo
-binders) is propagated through assignments inside the handling function. Numeric
-casts (`parseInt`, `int.Parse`, `intval`, `strconv.Atoi`) and contextual
-sanitizers (`htmlspecialchars`, `encodeURIComponent`, `basename`,
-`escapeshellarg`, `Url.IsLocalUrl`...) end the chain.
+binders) is followed **across functions and files**:
+
+1. Every value carries labels: `src` (request input) or `p<i>` (came from
+   parameter *i*), each with the hop-by-hop trace that produced it.
+2. Calls are resolved to their targets: same class/file, unique plain
+   functions, `this.x` / `$this->x` / `_x` fields and typed parameters (through
+   the declared type, or its single implementer for interfaces), local
+   `x = new X(...)` / `NewX(...)` instances, static `Class.method` calls and Go
+   receiver fields. Member calls on receivers of unknown type (`pool.query`,
+   `client.find`) are never guessed.
+3. Each function gets a summary (which parameters reach which sinks; whether it
+   returns request input). Summaries are composed along calls with a worklist
+   until a fixed point, so controller -> service -> repository chains of any
+   depth are found, and helpers that *return* input taint their callers.
+4. A sink is reported as tainted only when a real request source reaches it.
+   A service method that builds SQL from a parameter is critical when some
+   endpoint passes request input to it, and a medium "dynamic SQL" review item
+   otherwise.
+
+Numeric casts (`parseInt`, `int.Parse`, `intval`, `strconv.Atoi`), including
+inside call arguments, and contextual sanitizers (`htmlspecialchars`,
+`encodeURIComponent`, `basename`, `escapeshellarg`, `Url.IsLocalUrl`...) end the
+chain. Every tainted finding records its flow in `metadata.flow` (location,
+graph node, role: `source`, `param`, `call`, `propagation`, `return`, `sink`)
+and as SARIF `codeFlows`.
 
 | Category | CWE | Examples |
 | :--- | :--- | :--- |
@@ -71,11 +92,25 @@ input are still reported, at lower severity, unless every spliced value is a
 known numeric cast. Hardcoded secrets in these languages are covered by the
 shared secret scanner.
 
-**Known limits.** Taint is tracked within one function; values passed through
-helper functions, class fields or framework model binding into other methods
-are not followed. JavaScript regex literals and PHP heredocs are not tokenized
-specially. Router mount prefixes (`app.use('/api', router)`, Laravel
-`Route::prefix`) are not prepended.
+**Known limits.** Taint stored in object fields or collections and read later
+by another method, dynamic dispatch through reflection/DI containers resolved at
+runtime, and interfaces with several implementations (at most three candidate
+targets are followed) are approximated. Flows are capped at 14 hops (the source
+and the sink end are always kept). JavaScript regex literals and PHP heredocs
+are not tokenized specially. Router mount prefixes (`app.use('/api', router)`,
+Laravel `Route::prefix`) are not prepended.
+
+### 1.2 Attack-path diagram (`diagram-taint.mmd`)
+
+Every tainted finding, in every language (Python and Java flows are derived from
+their traces), becomes an attack path: **untrusted input -> entry point ->
+each function the data passes through -> vulnerable sink** (category, CWE,
+severity, `path:line`). Shared functions are drawn once, so convergent paths
+and choke points stand out, and every edge on a path is coloured by the worst
+severity that uses it. The same flows are highlighted in red on the detailed
+`diagram.mmd`, listed under **Attack paths** in `ARCHITECTURE.md`, shown as the
+**Attack paths** view in the HTML report, and summarized in
+`graph.json` -> `meta.taint_flows`.
 
 ---
 

@@ -8,6 +8,7 @@ from typing import Any
 from . import __version__
 from .features import feature_for_path
 from .model import Edge, Graph, Node
+from .taint_flows import build_taint_flows, render_taint_mermaid
 
 
 def _esc(text: Any) -> str:
@@ -85,6 +86,44 @@ def _indexed_sources_text(meta: dict[str, Any]) -> str:
     polyglot = meta.get("polyglot_files") or {}
     parts.extend(f"**{polyglot[key]}** {label}" for key, label in _POLYGLOT_LABELS if polyglot.get(key))
     return (", ".join(parts[:-1]) + " and " + parts[-1] + " sources") if len(parts) > 1 else parts[0]
+
+
+def _attack_paths_section(graph: Graph, limit: int = 10) -> list[str]:
+    """Attack paths: request input -> functions on the path -> vulnerable sink."""
+    flows = [flow for flow in build_taint_flows(graph) if not flow.finding.baseline]
+    if not flows:
+        return []
+    out = ["## Attack paths (taint flows)", ""]
+    cross = sum(1 for flow in flows if flow.interprocedural)
+    entries = len({flow.node_path[0] for flow in flows if flow.node_path})
+    out.append(
+        f"**{len(flows)}** source-to-sink flow(s) from **{entries}** entry point(s); "
+        f"**{cross}** cross function or file boundaries. Each path is evidence-backed "
+        "(`path:line` per hop) and drawn in `diagram-taint.mmd`."
+    )
+    out.append("")
+    for number, flow in enumerate(flows[:limit], start=1):
+        finding = flow.finding
+        hops = []
+        for node_id in flow.node_path:
+            node = graph.nodes.get(node_id)
+            if node is None:
+                continue
+            routes = node.attrs.get("routes") or []
+            label = f"{routes[0].get('method', '').upper()} {routes[0].get('path', '')}" if routes else node.name
+            hops.append(f"`{_esc(label)}`")
+        sink = finding.evidence[0].ref if finding.evidence else flow.hops[-1].loc.ref
+        hops.append(f"**{_esc(finding.title)}** ({_esc(finding.cwe or finding.category)}) at `{_esc(sink)}`")
+        line = f"{number}. **{_esc(finding.severity)}** - " + " -> ".join(hops)
+        out.append(line.encode("ascii", "replace").decode("ascii"))
+    if len(flows) > limit:
+        out.append(f"\n_{len(flows) - limit} more flow(s) in `graph.json` (`findings[].metadata.flow`)._")
+    out.append("")
+    out.append("```mermaid")
+    out.append(render_taint_mermaid(graph, flows, max_flows=15, ascii_only=True).rstrip())
+    out.append("```")
+    out.append("")
+    return out
 
 
 def render_markdown(
@@ -285,6 +324,8 @@ def render_markdown(
                     f"{_esc(finding.recommendation)} |"
                 )
             lines.append("")
+
+    lines.extend(_attack_paths_section(graph))
 
     analysis = meta.get("analysis", {})
     lines.append("## Method & limits")

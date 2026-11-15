@@ -13,6 +13,7 @@ func main() {
 	r.GET("/users/search", h.SearchUsers)
 	r.GET("/users/:id", h.GetUser)
 	r.POST("/users/archive", h.Archive)
+	r.GET("/users/lookup", h.Lookup)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /fetch", handlers.Fetch)

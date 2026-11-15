@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -17,6 +18,8 @@ from secdiagram_core.polyglot_index import (
     parse_polyglot_file,
 )
 from secdiagram_core.polyglot_security import analyze_polyglot_security
+from secdiagram_core.render_mermaid import render_mermaid
+from secdiagram_core.taint_flows import build_taint_flows, render_taint_mermaid
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "polyglot"
 
@@ -136,6 +139,7 @@ class CSharpTests(unittest.TestCase):
                 ("PG-CS-SSRF", ctrl, 54),
                 ("PG-CS-REDIRECT", ctrl, 60),
                 ("PG-CS-SQL", "src/Shop.Api/Program.cs", 14),
+                ("PG-CS-SQL", "src/Shop.Api/Data/OrderRepository.cs", 17),
                 ("PG-CS-DESER", svc, 21),
                 ("PG-CS-CRYPTO", svc, 26),
                 ("PG-CS-TLS", svc, 32),
@@ -149,7 +153,7 @@ class CSharpTests(unittest.TestCase):
         )
         self.assertEqual(finding.severity, "critical")
         self.assertEqual(finding.cwe, "CWE-89")
-        self.assertEqual([loc.line for loc in finding.trace], [26, 27])
+        self.assertEqual([loc.line for loc in finding.trace], [23, 26, 27])
         self.assertIsNotNone(finding.node_id)
 
 
@@ -181,6 +185,8 @@ class JavaScriptTests(unittest.TestCase):
                 ("PG-JS-SSRF", "src/nest/orders.controller.ts", 22),
                 ("PG-JS-REDIRECT", "app/api/items/[id]/route.ts", 9),
                 ("PG-JS-TLS", "src/controllers/userController.ts", 9),
+                ("PG-JS-SQL", "src/services/orderService.ts", 6),
+                ("PG-JS-CMD", "src/services/orderService.ts", 24),
             },
         )
 
@@ -200,7 +206,8 @@ class PhpTests(unittest.TestCase):
             _pg_findings(_analyze("php_app")),
             {
                 ("PG-PHP-SQL", "app/Http/Controllers/InvoiceController.php", 18),
-                ("PG-PHP-DESER", "app/Http/Controllers/InvoiceController.php", 32),
+                ("PG-PHP-DESER", "app/Http/Controllers/InvoiceController.php", 39),
+                ("PG-PHP-SQL", "app/Services/InvoiceService.php", 11),
                 ("PG-PHP-INCLUDE", page, 7),
                 ("PG-PHP-XSS", page, 10),
                 ("PG-PHP-CMD", page, 16),
@@ -229,9 +236,10 @@ class GoTests(unittest.TestCase):
             {
                 ("PG-GO-SQL", path, 34),
                 ("PG-GO-CMD", path, 57),
-                ("PG-GO-SSRF", path, 64),
-                ("PG-GO-CRYPTO", path, 73),
-                ("PG-GO-TLS", path, 78),
+                ("PG-GO-SQL", path, 69),
+                ("PG-GO-SSRF", path, 76),
+                ("PG-GO-CRYPTO", path, 85),
+                ("PG-GO-TLS", path, 90),
             },
         )
 
@@ -240,7 +248,7 @@ class IntegrationTests(unittest.TestCase):
     def test_coverage_metadata(self) -> None:
         result = run_analysis(AnalysisConfig(root=FIXTURES, security=True))
         meta = result.graph.meta
-        self.assertEqual(meta["polyglot_files"], {"csharp": 3, "go": 2, "php": 4, "typescript": 5})
+        self.assertEqual(meta["polyglot_files"], {"csharp": 6, "go": 2, "php": 5, "typescript": 7})
         self.assertEqual(meta["unsupported_security_languages"], [])
 
     def test_graph_json_is_deterministic(self) -> None:
@@ -253,12 +261,162 @@ class IntegrationTests(unittest.TestCase):
         go = build_high_level_architecture(FIXTURES / "go_api", _analyze("go_api").graph)
         php_sub = next(s for s in php.subsystems if s.id.startswith("php_"))
         go_sub = next(s for s in go.subsystems if s.id.startswith("go_"))
-        self.assertEqual((php_sub.technology, php_sub.tier, php_sub.details), ("Laravel (PHP)", "gateway", ["5 Routes"]))
-        self.assertEqual((go_sub.technology, go_sub.tier, go_sub.details), ("Go Gin", "gateway", ["5 Routes"]))
+        self.assertEqual((php_sub.technology, php_sub.tier, php_sub.details), ("Laravel (PHP)", "gateway", ["6 Routes"]))
+        self.assertEqual((go_sub.technology, go_sub.tier, go_sub.details), ("Go Gin", "gateway", ["6 Routes"]))
         self.assertIn(("go_shop", "db_postgres"), {(c.src, c.dst) for c in go.connections})
         self.assertIn("PHP", php.languages)
         # Polyglot packages must not be mislabeled as Python subsystems.
         self.assertFalse([s.id for s in php.subsystems + go.subsystems if s.id.startswith("py_")])
+
+
+def _flow_names(result: AnalysisResult, path: str, line: int) -> tuple[str, list[str], dict[str, object]]:
+    finding = next(
+        f for f in result.graph.findings
+        if f.evidence and f.evidence[0].path == path and f.evidence[0].line == line and f.metadata.get("tainted")
+    )
+    names = []
+    for hop in finding.metadata["flow"]:
+        node = result.graph.nodes.get(hop["node"] or "")
+        if node is not None and (not names or names[-1] != node.name):
+            names.append(node.name)
+    return finding.severity, names, finding.metadata
+
+
+class InterproceduralTaintTests(unittest.TestCase):
+    def test_csharp_controller_service_repository(self) -> None:
+        severity, names, meta = _flow_names(_analyze("csharp_api"), "src/Shop.Api/Data/OrderRepository.cs", 17)
+        self.assertEqual(severity, "critical")
+        self.assertEqual(names, ["Search", "FindByCustomer", "QueryByCustomer"])
+        self.assertTrue(meta["interprocedural"])
+        flow = meta["flow"]
+        self.assertEqual((flow[0]["role"], flow[0]["loc"]), ("source", "src/Shop.Api/Controllers/OrdersController.cs:19"))
+        self.assertEqual(flow[-1]["role"], "sink")
+        self.assertIn("call", [hop["role"] for hop in flow])
+        self.assertIn("param", [hop["role"] for hop in flow])
+
+    def test_javascript_route_service_repository_via_new_instance(self) -> None:
+        severity, names, _ = _flow_names(_analyze("node_api"), "src/services/orderService.ts", 6)
+        self.assertEqual(severity, "critical")
+        self.assertEqual(names, ["GET /orders", "search", "findByStatus"])
+
+    def test_javascript_tainted_return_value(self) -> None:
+        severity, names, meta = _flow_names(_analyze("node_api"), "src/services/orderService.ts", 24)
+        self.assertEqual(severity, "critical")
+        # Input is read and returned by the helper, then executed by the caller.
+        self.assertEqual(names, ["reportCommand", "runReport"])
+        self.assertTrue(meta["interprocedural"])
+
+    def test_php_controller_service(self) -> None:
+        severity, names, _ = _flow_names(_analyze("php_app"), "app/Services/InvoiceService.php", 11)
+        self.assertEqual(severity, "critical")
+        self.assertEqual(names, ["search", "searchByCustomer"])
+
+    def test_go_handler_store_via_receiver_field(self) -> None:
+        severity, names, _ = _flow_names(_analyze("go_api"), "internal/handlers/handlers.go", 69)
+        self.assertEqual(severity, "critical")
+        self.assertEqual(names, ["Lookup", "FindByEmail"])
+
+    def _mini(self, files: dict[str, str]) -> list[tuple[str, str, int, bool]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for rel, text in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(text, encoding="utf-8")
+            result = run_analysis(AnalysisConfig(root=root, security=True))
+        return sorted(
+            (f.category, f.severity, f.evidence[0].line, bool(f.metadata.get("tainted")))
+            for f in result.graph.findings
+            if str(f.metadata.get("rule_id", "")).startswith("PG-")
+        )
+
+    def test_numeric_cast_in_call_argument_breaks_chain(self) -> None:
+        findings = self._mini({
+            "routes.ts": (
+                'import { lookup } from "./repo";\n'
+                'app.get("/n", (req, res) => res.json(lookup(parseInt(req.query.id, 10))));\n'
+            ),
+            "repo.ts": "export function lookup(id) {\n  return pool.query(`SELECT * FROM t WHERE id = ${id}`);\n}\n",
+        })
+        # The query is still dynamically built (medium) but never request-tainted.
+        self.assertEqual(findings, [("sql", "medium", 2, False)])
+
+    def test_tainted_parameter_reaches_sink_only_when_a_caller_passes_input(self) -> None:
+        repo = "export function find(name) {\n  return pool.query(`SELECT * FROM t WHERE n = '${name}'`);\n}\n"
+        safe = self._mini({"repo.ts": repo, "job.ts": 'import { find } from "./repo";\nfind("nightly");\n'})
+        self.assertEqual(safe, [("sql", "medium", 2, False)])
+        tainted = self._mini({
+            "repo.ts": repo,
+            "routes.ts": 'import { find } from "./repo";\napp.get("/f", (req, res) => res.json(find(req.query.q)));\n',
+        })
+        self.assertEqual(tainted, [("sql", "critical", 2, True)])
+
+    def test_unknown_receivers_are_not_resolved(self) -> None:
+        # `client.lookup` is a library call on an untyped receiver; the local
+        # function `lookup` with a sink must not be linked to it.
+        findings = self._mini({
+            "repo.ts": "export function lookup(name) {\n  return pool.query(`SELECT * FROM t WHERE n = '${name}'`);\n}\n",
+            "routes.ts": 'app.get("/f", (req, res) => res.json(client.lookup(req.query.q)));\n',
+        })
+        self.assertEqual(findings, [("sql", "medium", 2, False)])
+
+    def test_deep_call_chain_reaches_fixed_point(self) -> None:
+        # 120 service layers: the worklist must compose summaries at any depth,
+        # and trace truncation must keep the origin (source) and the sink.
+        chain = "".join(
+            f"export class Svc{i} {{\n  constructor(private readonly next: Svc{i + 1}) {{}}\n"
+            f"  run(v: string) {{\n    return this.next.run(v);\n  }}\n}}\n"
+            for i in range(119)
+        ) + "export class Svc119 {\n  run(v: string) {\n    return pool.query(`SELECT * FROM t WHERE v = '${v}'`);\n  }\n}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "chain.ts").write_text(chain, encoding="utf-8")
+            (root / "route.ts").write_text(
+                'const svc = new Svc0(null);\napp.get("/deep", (req, res) => res.json(svc.run(req.query.v)));\n',
+                encoding="utf-8",
+            )
+            start = time.perf_counter()
+            result = run_analysis(AnalysisConfig(root=root, security=True))
+            elapsed = time.perf_counter() - start
+        finding = next(f for f in result.graph.findings if f.category == "sql")
+        flow = finding.metadata["flow"]
+        self.assertEqual(finding.severity, "critical")
+        self.assertEqual((flow[0]["loc"], flow[0]["role"]), ("route.ts:2", "source"))
+        self.assertEqual(flow[-1]["role"], "sink")
+        self.assertLess(elapsed, 10.0)
+
+
+class TaintFlowDiagramTests(unittest.TestCase):
+    def test_flows_for_every_language(self) -> None:
+        flows = build_taint_flows(_analyze("csharp_api").graph)
+        self.assertTrue(flows)
+        self.assertEqual(flows[0].finding.severity, "critical")
+        python = run_analysis(AnalysisConfig(root=FIXTURES.parent / "sample_app", security=True)).graph
+        py_flows = build_taint_flows(python)
+        self.assertTrue(any(flow.interprocedural for flow in py_flows))
+        for flow in py_flows:
+            self.assertTrue(all(node in python.nodes for node in flow.node_path))
+        self.assertEqual(python.meta["taint_flows"]["count"], len(py_flows))
+
+    def test_attack_path_diagram(self) -> None:
+        graph = _analyze("csharp_api").graph
+        text = render_taint_mermaid(graph)
+        self.assertIn("Untrusted input", text)
+        self.assertIn("OrderService.FindByCustomer()", text)
+        self.assertIn("OrderRepository.QueryByCustomer()", text)
+        self.assertIn("SQL injection · CWE-89", text)
+        self.assertIn("linkStyle", text)
+        self.assertEqual(text, render_taint_mermaid(graph))
+        render_taint_mermaid(graph, ascii_only=True).encode("ascii")
+
+    def test_detailed_diagram_overlay(self) -> None:
+        graph = _analyze("csharp_api").graph
+        overlay = render_mermaid(graph)
+        plain = render_mermaid(graph, taint_overlay=False)
+        self.assertIn("linkStyle", overlay)
+        self.assertNotIn("linkStyle", plain)
+
+    def test_empty_graph_diagram(self) -> None:
+        self.assertIn("No source-to-sink taint flows detected", render_taint_mermaid(Graph()))
 
 
 if __name__ == "__main__":
