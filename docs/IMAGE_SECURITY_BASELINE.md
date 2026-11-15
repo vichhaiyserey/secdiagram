@@ -8,7 +8,7 @@ reviewed on every release and superseded whenever a newer scan is published.
 
 | Field | Value |
 | --- | --- |
-| Package version | `0.3.1` (maintainer accepted the Chromium residual risk for this release, #33) |
+| Package version | `0.3.2` (maintainer accepted the Chromium residual risk for this release, #33, #36; `v0.3.1` tag was mis-pushed and never published) |
 | Base images | `python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b`, `node:24-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9` |
 | Runtime user | `secdiagram` (`uid 10001`), non-root |
 | Default command | `secdiagram --dir .` (one-shot CLI) |
