@@ -6,7 +6,7 @@
 
 ## 1. Application Security Rules (SAST)
 
-The static analysis engine inspects Python and Java/Spring ASTs to detect security vulnerabilities, untrusted source-to-sink dataflows, and dangerous configurations:
+The static analysis engine inspects Python and Java/Spring sources (and, see 1.1, C#/.NET, JavaScript/TypeScript, PHP and Go) to detect security vulnerabilities, untrusted source-to-sink dataflows, and dangerous configurations:
 
 | Category | CWE | Patterns Detected | Default Severity |
 | :--- | :--- | :--- | :--- |
@@ -20,6 +20,62 @@ The static analysis engine inspects Python and Java/Spring ASTs to detect securi
 | **Cross-Site Scripting** | CWE-79 | Rendering raw user input into HTML/templates without escaping | High / Medium |
 
 Findings carry full source-to-sink taint paths (`codeFlows`), exact `path:line` citations, and stable partial fingerprints.
+
+### 1.1 C#/.NET, JavaScript/TypeScript, PHP and Go
+
+`polyglot_index.py` and `polyglot_security.py` add the same graph and SAST
+outputs for four more ecosystems. Like the Java indexer they are stdlib-only and
+lexical: source is read as text and never compiled or executed.
+
+**Architecture captured**
+
+| Language | Endpoints & routes | Structure & edges |
+| :--- | :--- | :--- |
+| C#/.NET | ASP.NET Core attribute routing (`[Route]`, `[HttpGet]`, `[controller]`/`[action]` tokens, conventional routes), minimal APIs (`MapGet`/`MapPost`... with `MapGroup` prefixes), SignalR hubs | namespaces, classes/records/interfaces, constructor and primary-constructor DI, MediatR `Send`/`Publish` → handler, EF Core `DbSet<T>` entities, inheritance, calls |
+| JavaScript / TypeScript | Express/Koa/Fastify/Hono router calls and `.route()` chains, NestJS `@Controller` + `@Get`..., Next.js app router `route.ts` handlers and `pages/api` | modules, relative `import`/`require` edges, classes, functions, arrow handlers, NestJS constructor DI |
+| PHP | Laravel `Route::get/post/match/resource` (closures, `[Controller::class, 'method']`, `'Controller@method'`), Symfony `#[Route]` (class prefix + methods), Slim/Lumen receivers, legacy page scripts reading superglobals | namespaces, classes/traits/interfaces, `__construct` DI, inheritance, calls |
+| Go | `net/http` `HandleFunc` (incl. Go 1.22 `"GET /path"` patterns), gin/echo/chi/gorilla `.Methods()` | packages, structs/interfaces, methods by receiver, `NewX(...)` constructor injection, calls |
+
+Route registrations that name their handler (`app.get('/x', listUsers)`,
+`Route::get('/x', [UserController::class, 'show'])`, `r.GET("/x", h.Get)`)
+are linked to that handler, even across files, so the handler itself becomes the
+endpoint node.
+
+**Security rules (function-scoped taint)**
+
+Request input (ASP.NET action parameters and `Request.*`, `req.query/body/params`,
+NestJS `@Body/@Query/@Param`, `$_GET/$_POST/$request->input()`, Laravel/Symfony
+route parameters, `c.Query/c.Param/r.FormValue/r.URL.Query()` and gin/echo
+binders) is propagated through assignments inside the handling function. Numeric
+casts (`parseInt`, `int.Parse`, `intval`, `strconv.Atoi`) and contextual
+sanitizers (`htmlspecialchars`, `encodeURIComponent`, `basename`,
+`escapeshellarg`, `Url.IsLocalUrl`...) end the chain.
+
+| Category | CWE | Examples |
+| :--- | :--- | :--- |
+| SQL injection | CWE-89 | `new SqlCommand(sql)`, `FromSqlRaw($"...")`, Dapper; `pool.query(`...${x}`)`, knex `raw`, Prisma `$queryRawUnsafe`; `DB::select("..." . $id)`, `mysqli_query`; `db.Query(fmt.Sprintf(...))`. Only the query text is checked; bound parameters are safe. |
+| Command injection | CWE-78 | `Process.Start`, `child_process.exec/spawn`, `system`/`shell_exec`/backticks, `exec.Command` |
+| Code evaluation / file inclusion | CWE-95 / CWE-98 | `CSharpScript.EvaluateAsync`, `eval`/`new Function`/`vm.run*`, PHP `eval`/`assert`/`include $x` |
+| Unsafe deserialization | CWE-502 | `BinaryFormatter`, `TypeNameHandling.All/Auto`, `unserialize($input)`, `node-serialize` |
+| Cross-site scripting | CWE-79 | `Html.Raw`, `innerHTML`/`dangerouslySetInnerHTML`/`res.send(input)`, PHP `echo`/`<?=`, Go `template.HTML`/`w.Write` |
+| Path traversal | CWE-22 | `File.*`/`PhysicalFile`, `fs.readFile`/`res.sendFile`, `file_get_contents`/`fopen`, `os.Open`/`http.ServeFile` |
+| SSRF | CWE-918 | `HttpClient.Get*Async`, `fetch`/`axios`, `curl_init`/`CURLOPT_URL`, `http.Get`/`http.NewRequest` |
+| Open redirect | CWE-601 | `Redirect(...)`, `res.redirect`/`Response.redirect`, `header('Location: ...')`, `http.Redirect` |
+| NoSQL injection | CWE-943 | Mongo filters taken directly from `req.body`/`req.query` |
+| TLS validation disabled | CWE-295 | certificate callbacks returning `true`, `rejectUnauthorized: false`, `CURLOPT_SSL_VERIFYPEER false`, `InsecureSkipVerify: true` |
+| Weak cryptography | CWE-327/328 | `MD5`/`SHA1`/`DES` creation, `createHash('md5')`, `md5($password)`, `md5.Sum` |
+
+SQL, command and code builders that are assembled dynamically (concatenation,
+interpolation, `string.Format`/`sprintf`/`fmt.Sprintf`) without proven request
+input are still reported, at lower severity, unless every spliced value is a
+known numeric cast. Hardcoded secrets in these languages are covered by the
+shared secret scanner.
+
+**Known limits.** Taint is tracked within one function; values passed through
+helper functions, class fields or framework model binding into other methods
+are not followed. JavaScript regex literals and PHP heredocs are not tokenized
+specially. Router mount prefixes (`app.use('/api', router)`, Laravel
+`Route::prefix`) are not prepended.
 
 ---
 

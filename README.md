@@ -13,7 +13,7 @@
 
 <p align="center">
   <b>Transform codebases into clear, human-friendly system architecture diagrams, publication-quality images, security threat models, and AI reviews.</b><br>
-  <i>100% offline-first. Zero external Python runtime dependencies. Polyglot support across <b>.NET (C#)</b>, <b>Java / Spring Boot</b>, <b>Node.js / TypeScript</b>, <b>Python</b>, and <b>Docker / Kubernetes / Terraform</b>.</i>
+  <i>100% offline-first. Zero external Python runtime dependencies. Polyglot architecture and security analysis across <b>.NET (C#)</b>, <b>Java / Spring Boot</b>, <b>Node.js / TypeScript</b>, <b>PHP</b>, <b>Go</b>, <b>Python</b>, and <b>Docker / Kubernetes / Terraform</b>.</i>
 </p>
 
 ---

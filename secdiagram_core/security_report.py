@@ -400,6 +400,7 @@ def _coverage(meta: dict[str, Any], enabled: bool) -> dict[str, Any]:
         "files_skipped": int(meta.get("files_skipped") or 0),
         "python_files": int(meta.get("python_files") or 0),
         "java_files": int(meta.get("java_files") or 0),
+        "polyglot_files": sum(int(v) for v in (meta.get("polyglot_files") or {}).values()),
         "iac_files": int(meta.get("iac_files") or 0),
         "languages": language_rows,
         "unsupported_security_languages": unsupported,
@@ -418,8 +419,9 @@ def _limitations(coverage: dict[str, Any]) -> list[str]:
         "so runtime behavior, feature flags, and deployed configuration are not proven.",
         "secdiagram findings are evidence-backed heuristics with confidence scores; "
         "they are review prompts, not proof of exploitability or a substitute for manual testing.",
-        "Security rules cover Python and Java sources. Unsupported languages are listed in the "
-        "coverage section and were not assessed.",
+        "Security rules cover Python and Java (AST/lexical data flow) plus C#/.NET, JavaScript/TypeScript, "
+        "PHP and Go (lexical, function-scoped taint). Unsupported languages are listed in the coverage "
+        "section and were not assessed.",
         "Dynamic imports, reflection, metaprogramming, monkey patching, and runtime registries "
         "cannot be fully resolved and are counted rather than guessed.",
         "Imported SonarQube and JFrog Xray reports are accepted as supplied. Advisory validation "

@@ -301,6 +301,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
         "filesAnalyzed": {
             "python": graph.meta.get("python_files"),
             "java": graph.meta.get("java_files"),
+            **{lang: count for lang, count in sorted((graph.meta.get("polyglot_files") or {}).items())},
             "iac": graph.meta.get("iac_files"),
         },
         "filesSkipped": graph.meta.get("files_skipped"),

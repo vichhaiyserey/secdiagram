@@ -75,6 +75,18 @@ def _flows(graph: Graph, endpoints: list[Node], node_by_id: dict[str, Node], lim
     return lines
 
 
+_POLYGLOT_LABELS = (
+    ("csharp", "C#"), ("javascript", "JavaScript"), ("typescript", "TypeScript"), ("php", "PHP"), ("go", "Go"),
+)
+
+
+def _indexed_sources_text(meta: dict[str, Any]) -> str:
+    parts = [f"**{meta.get('python_files', 0)}** Python", f"**{meta.get('java_files', 0)}** Java"]
+    polyglot = meta.get("polyglot_files") or {}
+    parts.extend(f"**{polyglot[key]}** {label}" for key, label in _POLYGLOT_LABELS if polyglot.get(key))
+    return (", ".join(parts[:-1]) + " and " + parts[-1] + " sources") if len(parts) > 1 else parts[0]
+
+
 def render_markdown(
     graph: Graph,
     meta: dict[str, Any] | None = None,
@@ -281,13 +293,13 @@ def render_markdown(
     language_text = ", ".join(f"{name} ({count})" for name, count in sorted(languages.items())) or "none detected"
     lines.append(
         f"- Scope: **{meta.get('files_discovered', '?')}** files discovered, "
-        f"**{meta.get('python_files', 0)}** Python and **{meta.get('java_files', 0)}** Java sources indexed, "
+        f"{_indexed_sources_text(meta)} indexed, "
         f"**{meta.get('files_skipped', 0)}** skipped. Languages: {_esc(language_text)}."
     )
     unsupported = meta.get("unsupported_security_languages") or []
     if unsupported:
         lines.append(
-            "- Security rules cover Python and Java only; no checks were run for: "
+            "- Security rules cover Python, Java, C#, JavaScript/TypeScript, PHP and Go; no checks were run for: "
             + ", ".join(f"`{_esc(name)}`" for name in unsupported)
             + "."
         )
