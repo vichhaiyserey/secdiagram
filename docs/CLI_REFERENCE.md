@@ -43,7 +43,7 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
 | :--- | :--- | :--- |
 | `--dir DIR` | `.` | Target repository directory to inspect |
 | `--out OUT` | `<dir>/.secdiagram` | Output directory for all generated artifacts |
-| `--format FORMAT` | `json,md,mermaid` | Comma-separated outputs: `json`, `md`, `mermaid`, `sarif`, `vex`, `html`, `png`, `svg`, `pdf` |
+| `--format FORMAT` | `json,md,mermaid` | Comma-separated outputs: `json` (`graph.json`), `md` (`ARCHITECTURE.md`, plus `THREAT_MODEL.md` when security analysis is on), `mermaid` (`diagram.mmd`, `diagram-highlevel.mmd`, `diagram-taint.mmd`), `sarif`, `vex`, `html`, `png`, `svg`, `pdf` |
 | `--high-level` | `false` | Generate high-level system overview diagram (`secdiagram.com` style) as primary diagram |
 | `--diagram-detail` | `architecture` | Visual detail level: `architecture`, `full`, `high-level`, `overview` |
 | `--image [FORMAT]` | `png` | Render visual diagrams to image (`png`, `svg`, `pdf`) |
