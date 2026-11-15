@@ -58,6 +58,18 @@ func (h *Handler) Archive(c *gin.Context) {
 	c.Data(http.StatusOK, "application/gzip", out)
 }
 
+// VULNERABLE (interprocedural): handler -> UserStore SQL.
+func (h *Handler) Lookup(c *gin.Context) {
+	email := c.Query("email")
+	h.store.FindByEmail(email)
+	c.Status(http.StatusOK)
+}
+
+func (s *UserStore) FindByEmail(email string) {
+	rows, _ := s.db.Query("SELECT id FROM users WHERE email = '" + email + "'")
+	_ = rows
+}
+
 // VULNERABLE: SSRF in a plain net/http handler.
 func Fetch(w http.ResponseWriter, r *http.Request) {
 	target := r.URL.Query().Get("url")

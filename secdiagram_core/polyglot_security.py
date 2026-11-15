@@ -1,27 +1,39 @@
-"""Taint-aware SAST heuristics for C#/.NET, JavaScript/TypeScript, PHP and Go.
+"""Interprocedural taint SAST for C#/.NET, JavaScript/TypeScript, PHP and Go.
 
 Works on the :mod:`secdiagram_core.polyglot_index` views of each file (source
-text only; nothing is executed). For every sink match the enclosing function
-is used as the taint scope:
+text only; nothing is executed).
 
-1. Seed tainted variables from handler parameters bound to request input
-   (ASP.NET action parameters, NestJS ``@Body``/``@Query``, Laravel/Symfony
-   route parameters) and from assignments whose right-hand side reads a
-   request source (``req.query``, ``Request.Query``, ``$_GET``, ``c.Query``...).
-2. Propagate through plain assignments (bounded passes). Numeric casts such as
-   ``parseInt``/``int.Parse``/``intval``/``strconv.Atoi`` stop propagation.
-3. Report the sink when its argument references a source or tainted variable.
-   ``dynamic`` rules (SQL/command builders) also fire, at lower severity, when
-   the argument is assembled by concatenation, interpolation or formatting.
+1. **Facts.** Every function (and each file's top level) gets its parameters,
+   assignments, call sites, ``return`` expressions and sink hits.
+2. **Calls.** Call sites are resolved to functions: same class / file, unique
+   plain functions, ``this.x`` / ``$this->x`` / ``_x`` fields and typed
+   parameters (through their declared type or its single implementer), static
+   ``Class.method`` calls and Go receiver fields. Member calls on receivers
+   whose type is unknown (``pool.query``) are deliberately left unresolved.
+3. **Labels.** Values carry labels: ``src`` (request input) or ``p<i>``
+   (flows from parameter *i*), each with the hop-by-hop trace that produced
+   it. Numeric casts end a chain; sanitizers suppress the sink.
+4. **Summaries.** Per function: which parameters reach which sinks and
+   whether request input is returned. Summaries are composed along calls until
+   a fixed point, so controller -> service -> repository chains are followed
+   across files.
+5. **Findings.** A sink is tainted when request input reaches it locally or
+   through a call chain; the shortest flow is kept and recorded both as the
+   SARIF trace and as ``metadata["flow"]`` (hop location, graph node, role)
+   for the attack-path diagram.
 
-Severity and CWE choices mirror ``security.py`` so findings from every
-language rank consistently in SARIF and the security report.
+``dynamic`` rules (SQL/command/code builders) also fire, at lower severity,
+when the argument is assembled by concatenation, interpolation or formatting.
+Severity and CWE choices mirror ``security.py``.
 """
 
 from __future__ import annotations
 
+import bisect
 import re
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Any
 
 from .model import Finding, Graph, Loc, stable_id
 from .polyglot_index import (
@@ -275,23 +287,485 @@ def _family(language: str) -> str:
     return "js" if language in JS_LANGS else language
 
 
+# ----------------------------------------------------------------- taint model
+
+MAX_HOPS = 14
+MAX_TARGETS = 3
+MAX_SUMMARY_UPDATES = 200_000  # safety valve; summaries are monotone so this is never hit in practice
+
+
+@dataclass(frozen=True, slots=True)
+class _Hop:
+    """One step of a taint flow: where it is, which graph node, and what happens."""
+
+    path: str
+    line: int
+    node_id: str | None
+    role: str  # source | param | call | propagation | return | sink
+
+
+Trace = tuple[_Hop, ...]
+Labels = dict[str, Trace]  # "src" or "p<i>" -> trace from origin
+
+
+def _extend(trace: Trace, hop: _Hop) -> Trace:
+    if trace and trace[-1].path == hop.path and trace[-1].line == hop.line and trace[-1].node_id == hop.node_id:
+        return trace
+    extended = trace + (hop,)
+    if len(extended) > MAX_HOPS:
+        # Keep the origin (where input enters) and the most recent hops (the sink side).
+        extended = extended[:3] + extended[-(MAX_HOPS - 3) :]
+    return extended
+
+
+def _better(a: Trace | None, b: Trace) -> bool:
+    """True when *b* should replace *a* (shorter, then lexicographically smaller)."""
+    if a is None:
+        return True
+    key_a = (len(a), [(h.path, h.line, h.role) for h in a])
+    key_b = (len(b), [(h.path, h.line, h.role) for h in b])
+    return key_b < key_a
+
+
 @dataclass(slots=True)
-class _Scope:
+class _Call:
+    pos: int
+    line: int
+    name: str
+    receiver: str
+    args: list[tuple[int, int]]
+    targets: list[_Fn] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _Sink:
+    pos: int
+    line: int
+    rule: Rule
+    order: int
+    arg_start: int
+    arg_end: int
+    assignment: bool
+    line_text: str
+
+
+@dataclass(slots=True)
+class _Fn:
+    pf: PgFile
+    sym: PgSymbol | None
     start: int
     end: int
-    symbol: PgSymbol | None
-    tainted: dict[str, int]
-    dynamic: set[str]
-    sanitized: set[str]
+    node_id: str | None
+    owner: str = ""
+    receiver_var: str = ""
+    params: list[list[str]] = field(default_factory=list)
+    param_types: dict[str, str] = field(default_factory=dict)
+    assigns: list[tuple[int, int, list[str], int, int]] = field(default_factory=list)  # pos, line, lhs, rhs s/e
+    binds: list[tuple[int, int, str, bool]] = field(default_factory=list)  # pos, line, var, from binder
+    calls: list[_Call] = field(default_factory=list)
+    call_positions: list[int] = field(default_factory=list)
+    returns: list[tuple[int, int, int]] = field(default_factory=list)  # line, start, end
+    sinks: list[_Sink] = field(default_factory=list)
+    # results
+    env: dict[str, Labels] = field(default_factory=dict)
+    dynamic: set[str] = field(default_factory=set)
+    sanitized: set[str] = field(default_factory=set)
+    returns_src: Trace | None = None
+    param_sinks: dict[int, dict[tuple[str, int, int], Trace]] = field(default_factory=dict)
+
+    @property
+    def family(self) -> str:
+        return _family(self.pf.language)
 
 
-def _var_pattern(names: list[str], family: str) -> re.Pattern[str] | None:
-    if not names:
-        return None
-    escaped = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+# ------------------------------------------------------------------ fact extraction
+
+CALL_SITE_RE = re.compile(
+    r"((?:\$?[A-Za-z_][\w]*\s*(?:\?\.|->|::|\.)\s*)*)(?<![\w$])([A-Za-z_$][\w$]*)\s*\("
+)
+NOT_CALLS = frozenset(
+    {"if", "for", "foreach", "while", "switch", "catch", "function", "return", "typeof", "sizeof", "nameof",
+     "using", "lock", "fixed", "func", "await", "new", "throw", "echo", "print", "isset", "empty", "unset",
+     "array", "list", "elseif", "match", "when", "with", "super", "base"}
+)
+RETURN_RE = re.compile(r"\breturn\b")
+INTERP_RE = re.compile(r"\$\{([^}]*)\}|(?<![\w$])\{([A-Za-z_][\w.]*)\}|(\$\w+)")
+IDENT_RE = re.compile(r"(?<![\w$.>:])[$]?[A-Za-z_$][\w$]*")
+NON_VALUE_WORDS = frozenset({"new", "null", "nil", "true", "false", "this", "self", "await", "string", "String", "fmt",
+                             "Sprintf", "Format", "Concat", "sprintf", "implode", "util", "format", "strings", "Join"})
+NEW_VAR_RE = re.compile(
+    r"(?:\b(?:const|let|var|final|readonly)\s+|\b[A-Z][\w<>,.?]*\s+)?(\$?[A-Za-z_]\w*)\s*(?::=|=)\s*"
+    r"(?:new\s+([A-Za-z_][\w.\\]*)|&?([A-Z]\w*)\s*\{|New([A-Z]\w*)\s*\()"
+)
+GO_RECEIVER_RE = re.compile(r"^\s*func\s*\(\s*(\w+)\s+\*?\s*\w+")
+FIELD_RES: dict[str, tuple[re.Pattern[str], ...]] = {
+    "csharp": (
+        re.compile(
+            r"^\s*(?:\[[^\]]*\]\s*)*(?:(?:public|private|protected|internal|static|readonly|required|volatile)\s+)*"
+            r"([A-Za-z_][\w.]*(?:<[^;=()]*>)?\??)\s+(_?[A-Za-z_]\w*)\s*(?:;|=[^>]|\{\s*get)"
+        ),
+    ),
+    "js": (
+        re.compile(r"(?:private|public|protected|readonly)\s+(?:readonly\s+)?([A-Za-z_$][\w$]*)\s*[!?]?\s*:\s*([A-Za-z_$][\w$.]*)"),
+    ),
+    "php": (
+        re.compile(r"(?:private|public|protected)\s+(?:readonly\s+)?\??([A-Za-z_\\][\w\\]*)\s+\$(\w+)"),
+    ),
+    "go": (re.compile(r"^\s*(\w+)\s+\*?\[?\]?\*?([A-Za-z_][\w.]*)\s*(?:`[^`]*`)?\s*$"),),
+}
+
+
+def _value_text(pf: PgFile, start: int, end: int) -> str:
+    """Argument code with string contents removed but interpolations kept.
+
+    ``"WHERE id = @id"`` must not match a variable ``id``, while ``$"...{id}"``,
+    `` `${id}` `` and PHP ``"$id"`` must.
+    """
+    parts = [pf.masked[start:end]]
+    for groups in INTERP_RE.findall(pf.code[start:end]):
+        parts.extend(group for group in groups if group)
+    return " ".join(parts)
+
+
+def _split_top_level(pf: PgFile, start: int, end: int) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    depth = 0
+    seg = start
+    for k in range(start, end):
+        ch = pf.masked[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            ranges.append((seg, k))
+            seg = k + 1
+    if pf.masked[seg:end].strip():
+        ranges.append((seg, end))
+    return ranges
+
+
+def _argument_range(pf: PgFile, match_end: int, assignment: bool) -> tuple[int, int]:
+    code = pf.code
+    if assignment or code[match_end - 1 : match_end] != "(":
+        stop = code.find(";", match_end)
+        newline = code.find("\n", match_end)
+        candidates = [c for c in (stop, newline) if c != -1]
+        return match_end, (min(candidates) if candidates else len(code))
+    close = _match_paren(pf, match_end - 1)
+    if close == -1:
+        newline = code.find("\n", match_end)
+        return match_end, (newline if newline != -1 else len(code))
+    return match_end, close
+
+
+def _param_names(param: str, family: str) -> tuple[list[str], str]:
+    """Names bound by one declared parameter, plus its declared type (if any)."""
+    text = re.sub(r"@\w+\s*\([^)]*\)\s*", "", param)
+    text = re.sub(r"\[[^\]]*\]\s*", "", text) if family == "csharp" else text
+    text = text.split("=", 1)[0].strip()
     if family == "php":
-        return re.compile(rf"(?:{escaped})\b")
-    return re.compile(rf"(?<![\w$.])(?:{escaped})\b")
+        match = re.search(r"(\??[A-Za-z_\\][\w\\]*)?\s*&?(?:\.\.\.)?(\$\w+)\s*$", re.sub(
+            r"^(?:(?:public|private|protected|readonly)\s+)+", "", text))
+        return ([match.group(2)], (match.group(1) or "").lstrip("?")) if match else ([], "")
+    if family == "js":
+        text = re.sub(r"^(?:(?:public|private|protected|readonly)\s+)+", "", text)
+        if text.startswith(("{", "[")):
+            inner = text[1 : text.find("}" if text.startswith("{") else "]")] if ("}" in text or "]" in text) else ""
+            names = [p.split(":")[-1].strip() for p in inner.split(",")]
+            return [n for n in names if re.match(r"^[A-Za-z_$][\w$]*$", n)], ""
+        name, _, typ = text.partition(":")
+        name = name.strip().rstrip("?").lstrip(".")
+        return ([name] if re.match(r"^[A-Za-z_$][\w$]*$", name) else []), typ.strip()
+    if family == "go":
+        parts = text.split()
+        if not parts:
+            return [], ""
+        typ = parts[1] if len(parts) > 1 else ""
+        return ([parts[0]] if re.match(r"^[A-Za-z_]\w*$", parts[0]) else []), typ.lstrip("*")
+    text = re.sub(r"^(?:this|params|ref|out|in|scoped)\s+", "", text)
+    pieces = text.rsplit(None, 1)
+    if len(pieces) == 2 and re.match(r"^[A-Za-z_]\w*$", pieces[1]):
+        return [pieces[1]], pieces[0]
+    return [], ""
+
+
+def _owner_of(sym: PgSymbol | None, pf: PgFile) -> str:
+    if sym is None:
+        return ""
+    if sym.container:
+        return _simple_type(sym.container)
+    if pf.language == "go" and sym.decl_kind == "method":
+        parts = sym.qualname.split(".")
+        return parts[-2] if len(parts) >= 2 else ""
+    return ""
+
+
+def _simple_type(name: str) -> str:
+    name = re.sub(r"<.*", "", name.strip())
+    name = name.replace("\\", ".").replace("::", ".").rstrip("?*&[] ").lstrip("?*&[] ")
+    # JS/TS qualnames are "path/to/file.ts:ClassName".
+    return re.split(r"[.:/]", name)[-1]
+
+
+def _fn_node_id(graph: Graph, pf: PgFile, sym: PgSymbol | None) -> str | None:
+    if sym is None:
+        module_id = stable_id("pg", pf.language, "module", pf.path, pf.path)
+        return module_id if module_id in graph.nodes else None
+    node_id = symbol_node_id(pf, sym)
+    return node_id if node_id in graph.nodes else None
+
+
+def _collect_facts(graph: Graph, index: PolyglotIndex) -> list[_Fn]:
+    fns: list[_Fn] = []
+    for path in sorted(index.files):
+        pf = index.files[path]
+        family = _family(pf.language)
+        file_fn = _Fn(pf=pf, sym=None, start=0, end=len(pf.code), node_id=_fn_node_id(graph, pf, None))
+        scoped = [
+            _Fn(pf=pf, sym=sym, start=sym.body_start, end=sym.body_end, node_id=_fn_node_id(graph, pf, sym),
+                owner=_owner_of(sym, pf))
+            for sym in pf.symbols
+            if sym.kind != "class" and sym.has_body
+        ]
+        code_lines = pf.code.split("\n")
+        for fn in scoped:
+            assert fn.sym is not None
+            for raw in fn.sym.params:
+                names, typ = _param_names(raw, family)
+                fn.params.append(names)
+                for name in names:
+                    if typ:
+                        fn.param_types[name] = typ
+            if pf.language == "go":
+                receiver = GO_RECEIVER_RE.match(code_lines[fn.sym.line - 1])
+                fn.receiver_var = receiver.group(1) if receiver else ""
+            if pf.masked[fn.start] != "{":
+                fn.returns.append((pf.line_of(fn.start), fn.start + 2, fn.end))
+        items: list[tuple[int, int, str, Any]] = []
+        assign_re = ASSIGN_RES[family]
+        line_start = 0
+        for line_no, masked_line in enumerate(pf.masked.split("\n"), start=1):
+            seg_start = 0
+            for seg in masked_line.split(";"):
+                abs_start = line_start + seg_start
+                code_seg = pf.code[abs_start : abs_start + len(seg)]
+                match = assign_re.search(code_seg)
+                if match and match.group(1) and match.group(2) is not None:
+                    names = _names_from_lhs(match.group(1).strip(), family)
+                    if names:
+                        op_pos = abs_start + match.end(1)
+                        items.append((op_pos, 0, "assign", (line_no, names, abs_start + match.start(2), abs_start + len(seg))))
+                if family == "go":
+                    for bind in GO_BIND_RE.finditer(code_seg):
+                        binder = bool(re.search(r"\.(?:ShouldBind\w*|Bind\w*)\s*\(", code_seg))
+                        items.append((abs_start + bind.start(), 1, "bind", (line_no, bind.group(1), binder, abs_start, abs_start + len(seg))))
+                for ret in RETURN_RE.finditer(seg):
+                    items.append((abs_start + ret.start(), 2, "return", (line_no, abs_start + ret.end(), abs_start + len(seg))))
+                seg_start += len(seg) + 1
+            line_start += len(masked_line) + 1
+        for match in CALL_SITE_RE.finditer(pf.masked):
+            name = match.group(2)
+            if name in NOT_CALLS or pf.masked[max(0, match.start(2) - 4) : match.start(2)] == "new ":
+                continue
+            open_pos = match.end() - 1
+            close = _match_paren(pf, open_pos)
+            if close == -1:
+                continue
+            recv_text = re.sub(r"\s+", "", match.group(1) or "")
+            recv_text = recv_text.replace("?.", ".").replace("->", ".").replace("::", ".").rstrip(".")
+            items.append(
+                (match.start(2), 3, "call",
+                 _Call(pos=match.start(2), line=pf.line_of(match.start(2)), name=name, receiver=recv_text,
+                       args=_split_top_level(pf, open_pos + 1, close)))
+            )
+        rules = [r for r in RULES if pf.language in r.languages and (r.requires is None or r.requires.search(pf.code))]
+        line_starts = [0] + [m.end() for m in re.finditer("\n", pf.code)]
+        for order, rule in enumerate(rules):
+            for match in rule.sink.finditer(pf.code):
+                pos = match.start()
+                if pf.masked[pos] == " " and not pf.code[pos].isspace():
+                    continue  # sink text inside a string literal
+                line_no = pf.line_of(pos)
+                newline = pf.code.find("\n", pos)
+                line_text = pf.code[line_starts[line_no - 1] : newline if newline != -1 else len(pf.code)]
+                assignment = match.group(0).rstrip().endswith("=")
+                arg_start, arg_end = _argument_range(pf, match.end(), assignment)
+                if rule.category == "sql" and not assignment:
+                    parts = _split_top_level(pf, arg_start, arg_end)
+                    if parts:
+                        arg_end = parts[0][1]
+                items.append(
+                    (pos, 4 + order, "sink",
+                     _Sink(pos=pos, line=line_no, rule=rule, order=order, arg_start=arg_start, arg_end=arg_end,
+                           assignment=assignment, line_text=line_text))
+                )
+        _assign_to_scopes(items, scoped, file_fn)
+        for fn in scoped + [file_fn]:
+            fn.call_positions = [call.pos for call in fn.calls]
+        fns.extend(scoped)
+        fns.append(file_fn)
+    return fns
+
+
+def _assign_to_scopes(items: list[tuple[int, int, str, Any]], scoped: list[_Fn], file_fn: _Fn) -> None:
+    """Attach every statement/call/sink to its innermost function (single sweep)."""
+    ordered = sorted(scoped, key=lambda fn: (fn.start, -fn.end))
+    stack: list[_Fn] = []
+    nxt = 0
+    for pos, _prio, kind, payload in sorted(items, key=lambda item: (item[0], item[1])):
+        while nxt < len(ordered) and ordered[nxt].start <= pos:
+            while stack and stack[-1].end < ordered[nxt].start:
+                stack.pop()
+            stack.append(ordered[nxt])
+            nxt += 1
+        while stack and stack[-1].end < pos:
+            stack.pop()
+        fn = stack[-1] if stack else file_fn
+        if kind == "assign":
+            line, names, rhs_start, rhs_end = payload
+            fn.assigns.append((pos, line, names, rhs_start, rhs_end))
+        elif kind == "bind":
+            line, var, binder, seg_start, seg_end = payload
+            fn.binds.append((pos, line, var, binder))
+            fn.assigns.append((pos, line, [], seg_start, seg_end))  # keeps statement order for binds
+        elif kind == "return":
+            line, start, end = payload
+            fn.returns.append((line, start, end))
+        elif kind == "call":
+            fn.calls.append(payload)
+        else:
+            fn.sinks.append(payload)
+
+
+# -------------------------------------------------------------- call resolution
+
+
+def _class_tables(index: PolyglotIndex) -> tuple[dict[tuple[str, str], list[tuple[PgFile, PgSymbol]]], dict[tuple[str, str], list[str]]]:
+    classes: dict[tuple[str, str], list[tuple[PgFile, PgSymbol]]] = {}
+    implementers: dict[tuple[str, str], list[str]] = {}
+    for path in sorted(index.files):
+        pf = index.files[path]
+        family = _family(pf.language)
+        for sym in pf.symbols:
+            if sym.kind != "class":
+                continue
+            classes.setdefault((family, sym.name), []).append((pf, sym))
+            for base in sym.bases:
+                implementers.setdefault((family, _simple_type(base)), []).append(sym.name)
+    return classes, implementers
+
+
+def _field_types(pf: PgFile, cls: PgSymbol) -> dict[str, str]:
+    """Declared field/property/promoted-parameter types of a class (name -> type)."""
+    family = _family(pf.language)
+    types: dict[str, str] = {}
+    if not cls.has_body:
+        return types
+    body_code = pf.code[cls.body_start : cls.body_end]
+    body_masked = pf.masked[cls.body_start : cls.body_end]
+    pattern = FIELD_RES[family][0]
+    if family == "csharp":
+        for line in body_masked.split("\n"):
+            match = pattern.match(line)
+            if match:
+                types.setdefault(match.group(2), match.group(1))
+    elif family == "go":
+        for line in body_masked.split("\n"):
+            match = pattern.match(line)
+            if match:
+                types.setdefault(match.group(1), match.group(2))
+    elif family == "js":
+        for match in pattern.finditer(body_code):
+            types.setdefault(match.group(1), match.group(2))
+    else:
+        for match in pattern.finditer(body_code):
+            types.setdefault("$" + match.group(2), match.group(1))
+    for raw in cls.params:  # C# 12 primary constructors
+        names, typ = _param_names(raw, family)
+        for name in names:
+            if typ:
+                types.setdefault(name, typ)
+    return types
+
+
+class _Resolver:
+    def __init__(self, index: PolyglotIndex, fns: list[_Fn]) -> None:
+        self.classes, self.implementers = _class_tables(index)
+        self.by_owner: dict[tuple[str, str, str], list[_Fn]] = {}
+        self.by_name: dict[tuple[str, str], list[_Fn]] = {}
+        for fn in fns:
+            if fn.sym is None:
+                continue
+            key_name = fn.sym.name
+            if fn.sym.decl_kind == "route":
+                continue
+            if fn.owner:
+                self.by_owner.setdefault((fn.family, fn.owner, key_name), []).append(fn)
+            else:
+                self.by_name.setdefault((fn.family, key_name), []).append(fn)
+        self.local_types: dict[str, dict[str, str]] = {}
+        for path in sorted(index.files):
+            pf = index.files[path]
+            types: dict[str, str] = {}
+            for match in NEW_VAR_RE.finditer(pf.masked):
+                typ = match.group(2) or match.group(3) or match.group(4)
+                if typ:
+                    types.setdefault(match.group(1), typ)
+            self.local_types[path] = types
+        self.fields: dict[tuple[str, str], dict[str, str]] = {}
+        for (family, name), entries in sorted(self.classes.items()):
+            merged: dict[str, str] = {}
+            for pf, cls in entries:
+                for k, v in _field_types(pf, cls).items():
+                    merged.setdefault(k, v)
+            self.fields[(family, name)] = merged
+
+    def _methods_of_type(self, family: str, type_name: str, method: str) -> list[_Fn]:
+        simple = _simple_type(type_name)
+        if not simple:
+            return []
+        owners = [simple] + sorted(set(self.implementers.get((family, simple), [])))
+        out: list[_Fn] = []
+        for owner in owners:
+            out.extend(self.by_owner.get((family, owner, method), []))
+        return out[:MAX_TARGETS]
+
+    def resolve(self, fn: _Fn, call: _Call) -> list[_Fn]:
+        family = fn.family
+        receiver = call.receiver
+        if not receiver:
+            if fn.owner:
+                same = self.by_owner.get((family, fn.owner, call.name), [])
+                if same:
+                    return same[:1]
+            local = [f for f in self.by_name.get((family, call.name), []) if f.pf.path == fn.pf.path]
+            if local:
+                return local[:1]
+            unique = self.by_name.get((family, call.name), [])
+            return unique if len(unique) == 1 else []
+        parts = receiver.split(".")
+        head = parts[0]
+        self_names = {"this", "$this", "self", "static"}
+        if fn.receiver_var:
+            self_names.add(fn.receiver_var)
+        if head in self_names and len(parts) == 1:
+            return self.by_owner.get((family, fn.owner, call.name), [])[:MAX_TARGETS] if fn.owner else []
+        fields = self.fields.get((family, fn.owner), {}) if fn.owner else {}
+        if head in self_names and len(parts) == 2:
+            field_name = parts[1] if family != "php" else "$" + parts[1]
+            typ = fields.get(field_name) or fields.get(parts[1])
+            return self._methods_of_type(family, typ, call.name) if typ else []
+        if len(parts) == 1:
+            typ = fn.param_types.get(head) or fields.get(head) or self.local_types.get(fn.pf.path, {}).get(head)
+            if typ:
+                return self._methods_of_type(family, typ, call.name)
+            if (family, head) in self.classes:  # static call: Class.method / Class::method
+                return self._methods_of_type(family, head, call.name)
+        return []
+
+
+# --------------------------------------------------------------- propagation
 
 
 def _names_from_lhs(lhs: str, family: str) -> list[str]:
@@ -309,145 +783,135 @@ def _names_from_lhs(lhs: str, family: str) -> list[str]:
     return [lhs.strip()] if re.match(r"^[A-Za-z_$][\w$]*$", lhs.strip()) else []
 
 
-def _build_scope(pf: PgFile, start: int, end: int, symbol: PgSymbol | None, code_lines: list[str]) -> _Scope:
-    family = _family(pf.language)
-    source_re = SOURCES[family]
-    assign_re = ASSIGN_RES[family]
-    dynamic_re = DYNAMIC_RES[family]
-    first_line = pf.line_of(start)
-    last_line = pf.line_of(end)
-    lines = code_lines[first_line - 1 : last_line]
-    tainted: dict[str, int] = {}
-    for name in symbol.tainted_params if symbol else []:
-        tainted.setdefault(name, symbol.line if symbol else first_line)
-    dynamic: set[str] = set()
-    sanitized: set[str] = set()
+def _merge(target: Labels, label: str, trace: Trace) -> bool:
+    if _better(target.get(label), trace):
+        target[label] = trace
+        return True
+    return False
+
+
+def _labels_of(fn: _Fn, start: int, end: int) -> Labels:
+    """Taint labels carried by the code in ``[start, end)`` of *fn*."""
+    pf = fn.pf
+    code = pf.code[start:end].strip()
+    if NUMERIC_CAST_RE.match(code) and code.endswith(")"):
+        return {}
+    values = _value_text(pf, start, end)
+    out: Labels = {}
+    line = pf.line_of(start)
+    if SOURCES[fn.family].search(values):
+        out["src"] = (_Hop(pf.path, line, fn.node_id, "source"),)
+    for ident in set(IDENT_RE.findall(values)):
+        for label, trace in fn.env.get(ident, {}).items():
+            _merge(out, label, trace)
+    lo = bisect.bisect_left(fn.call_positions, start)
+    hi = bisect.bisect_left(fn.call_positions, end)
+    for call in fn.calls[lo:hi]:
+        for target in call.targets:
+            if target.returns_src is not None:
+                hop = _Hop(pf.path, call.line, fn.node_id, "call")
+                _merge(out, "src", _extend(target.returns_src, hop))
+    return out
+
+
+def _propagate_fn(fn: _Fn) -> None:
+    """Intra-procedural label propagation using current callee summaries."""
+    pf = fn.pf
+    fn.env = {}
+    for i, names in enumerate(fn.params):
+        for name in names:
+            fn.env.setdefault(name, {})[f"p{i}"] = (_Hop(pf.path, fn.sym.line if fn.sym else 1, fn.node_id, "param"),)
+    if fn.sym is not None:
+        for name in fn.sym.tainted_params:
+            fn.env.setdefault(name, {})["src"] = (_Hop(pf.path, fn.sym.line, fn.node_id, "source"),)
+    fn.dynamic = set()
+    fn.sanitized = set()
+    dynamic_re = DYNAMIC_RES[fn.family]
+    binds = {pos: (line, var, binder) for pos, line, var, binder in fn.binds}
     for _ in range(3):
         changed = False
-        pattern = _var_pattern(list(tainted), family)
-        for offset, line in enumerate(lines):
-            line_no = first_line + offset
-            for statement in line.split(";"):
-                match = assign_re.search(statement)
-                if family == "go":
-                    for bind in GO_BIND_RE.finditer(statement):
-                        # gin/echo binders read the request themselves; json Decode /
-                        # Unmarshal need a request source or tainted value in the call.
-                        binder = re.search(r"\.(?:ShouldBind\w*|Bind\w*)\s*\(", statement)
-                        from_request = binder or source_re.search(statement) or (pattern and pattern.search(statement))
-                        if from_request and bind.group(1) not in tainted:
-                            tainted[bind.group(1)] = line_no
-                            changed = True
-                if not match:
-                    continue
-                rhs = match.group(2)
-                names = _names_from_lhs(match.group(1).strip(), family)
-                if not names:
-                    continue
-                if dynamic_re.search(rhs):
-                    dynamic.update(names)
-                if NUMERIC_CAST_RE.match(rhs):
-                    sanitized.update(names)
-                    continue
-                if source_re.search(rhs) or (pattern is not None and pattern.search(rhs)):
-                    for name in names:
-                        if name not in tainted:
-                            tainted[name] = line_no
-                            changed = True
+        for pos, line, names, rhs_start, rhs_end in fn.assigns:
+            if pos in binds:
+                bline, var, binder = binds[pos]
+                labels = _labels_of(fn, rhs_start, rhs_end)
+                if binder:
+                    labels.setdefault("src", (_Hop(pf.path, bline, fn.node_id, "source"),))
+                for label, trace in labels.items():
+                    changed |= _merge(fn.env.setdefault(var, {}), label, _extend(trace, _Hop(pf.path, bline, fn.node_id, "propagation")))
+                continue
+            rhs_code = pf.code[rhs_start:rhs_end]
+            if dynamic_re.search(rhs_code):
+                fn.dynamic.update(names)
+            if NUMERIC_CAST_RE.match(rhs_code):
+                fn.sanitized.update(names)
+                continue
+            labels = _labels_of(fn, rhs_start, rhs_end)
+            for label, trace in labels.items():
+                hop = _Hop(pf.path, line, fn.node_id, "propagation")
+                for name in names:
+                    changed |= _merge(fn.env.setdefault(name, {}), label, _extend(trace, hop))
         if not changed:
             break
-    return _Scope(start, end, symbol, tainted, dynamic, sanitized)
 
 
-class _ScopeLocator:
-    """Innermost function scope for ascending positions in one linear sweep."""
-
-    def __init__(self, pf: PgFile, code_lines: list[str]) -> None:
-        self.pf = pf
-        self.code_lines = code_lines
-        self.symbols = sorted(
-            (sym for sym in pf.symbols if sym.kind != "class" and sym.has_body),
-            key=lambda sym: (sym.body_start, -sym.body_end),
-        )
-        self.next = 0
-        self.stack: list[PgSymbol] = []
-        self.cache: dict[int, _Scope] = {}
-
-    def scope_at(self, pos: int) -> _Scope:
-        while self.next < len(self.symbols) and self.symbols[self.next].body_start <= pos:
-            sym = self.symbols[self.next]
-            while self.stack and self.stack[-1].body_end < sym.body_start:
-                self.stack.pop()
-            self.stack.append(sym)
-            self.next += 1
-        while self.stack and self.stack[-1].body_end < pos:
-            self.stack.pop()
-        best = self.stack[-1] if self.stack else None
-        key = id(best) if best is not None else 0
-        if key not in self.cache:
-            if best is None:
-                self.cache[key] = _build_scope(self.pf, 0, len(self.pf.code), None, self.code_lines)
-            else:
-                self.cache[key] = _build_scope(self.pf, best.body_start, best.body_end, best, self.code_lines)
-        return self.cache[key]
+def _sink_key(fn: _Fn, sink: _Sink) -> tuple[str, int, int]:
+    return (fn.pf.path, sink.pos, sink.order)
 
 
-def _argument_text(pf: PgFile, match_end: int, assignment: bool) -> str:
-    code = pf.code
-    if assignment or code[match_end - 1 : match_end] != "(":
-        stop = code.find(";", match_end)
-        newline = code.find("\n", match_end)
-        candidates = [c for c in (stop, newline) if c != -1]
-        return code[match_end : min(candidates) if candidates else len(code)]
-    close = _match_paren(pf, match_end - 1)
-    if close == -1:
-        # Unbalanced call: fall back to the rest of the line.
-        newline = code.find("\n", match_end)
-        return code[match_end : newline if newline != -1 else len(code)]
-    return code[match_end:close]
+def _update_summaries(fn: _Fn) -> bool:
+    changed = False
+    pf = fn.pf
+    for line, start, end in fn.returns:
+        labels = _labels_of(fn, start, end)
+        if "src" in labels:
+            trace = _extend(labels["src"], _Hop(pf.path, line, fn.node_id, "return"))
+            if _better(fn.returns_src, trace):
+                fn.returns_src = trace
+                changed = True
+    for sink in fn.sinks:
+        labels = _labels_of(fn, sink.arg_start, sink.arg_end)
+        for label, trace in labels.items():
+            if label.startswith("p"):
+                entry = fn.param_sinks.setdefault(int(label[1:]), {})
+                full = _extend(trace, _Hop(pf.path, sink.line, fn.node_id, "sink"))
+                if _better(entry.get(_sink_key(fn, sink)), full):
+                    entry[_sink_key(fn, sink)] = full
+                    changed = True
+    for call in fn.calls:
+        for target in call.targets:
+            if not target.param_sinks:
+                continue
+            for j, (start, end) in enumerate(call.args):
+                downstream = target.param_sinks.get(j)
+                if not downstream:
+                    continue
+                labels = _labels_of(fn, start, end)
+                for label, trace in labels.items():
+                    if not label.startswith("p"):
+                        continue
+                    entry = fn.param_sinks.setdefault(int(label[1:]), {})
+                    call_hop = _Hop(pf.path, call.line, fn.node_id, "call")
+                    for key, tail in sorted(downstream.items()):
+                        full = _extend(trace, call_hop)
+                        for hop in tail:
+                            full = _extend(full, hop)
+                        if _better(entry.get(key), full):
+                            entry[key] = full
+                            changed = True
+    return changed
 
 
-INTERP_RE = re.compile(r"\$\{([^}]*)\}|(?<![\w$])\{([A-Za-z_][\w.]*)\}|(\$\w+)")
-IDENT_RE = re.compile(r"(?<![\w$.])[$]?[A-Za-z_$][\w$]*")
-NON_VALUE_WORDS = frozenset({"new", "null", "nil", "true", "false", "this", "self", "await", "string", "String", "fmt",
-                             "Sprintf", "Format", "Concat", "sprintf", "implode", "util", "format", "strings", "Join"})
+# ------------------------------------------------------------------ findings
 
 
-def _uses_only_sanitized(pf: PgFile, start: int, end: int, scope: _Scope) -> bool:
+def _uses_only_sanitized(fn: _Fn, start: int, end: int) -> bool:
     """True when every value spliced into a dynamic argument is a known-safe cast."""
-    masked_arg = pf.masked[start:end]
-    code_arg = pf.code[start:end]
-    names = set(IDENT_RE.findall(masked_arg))
-    for groups in INTERP_RE.findall(code_arg):
+    names = set(IDENT_RE.findall(fn.pf.masked[start:end]))
+    for groups in INTERP_RE.findall(fn.pf.code[start:end]):
         for group in groups:
             names.update(IDENT_RE.findall(group))
     values = {n for n in names if n not in NON_VALUE_WORDS and not n[:1].isupper()}
-    return bool(values) and values <= scope.sanitized
-
-
-def _value_text(pf: PgFile, start: int, end: int) -> str:
-    """Code of an argument with string contents removed but interpolations kept.
-
-    ``"WHERE id = @id"`` must not match a tainted variable ``id``, while
-    ``$"...{id}"`` / `` `${id}` `` / ``"$id"`` (PHP) must.
-    """
-    parts = [pf.masked[start:end]]
-    for groups in INTERP_RE.findall(pf.code[start:end]):
-        parts.extend(group for group in groups if group)
-    return " ".join(parts)
-
-
-def _first_arg_end(pf: PgFile, start: int, end: int) -> int:
-    depth = 0
-    for k in range(start, end):
-        ch = pf.masked[k]
-        if ch in "([{":
-            depth += 1
-        elif ch in ")]}":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            return k
-    return end
+    return bool(values) and values <= fn.sanitized
 
 
 def _is_literal_only(arg: str) -> bool:
@@ -455,99 +919,148 @@ def _is_literal_only(arg: str) -> bool:
     return bool(re.fullmatch(r"(?:@|\$)?(['\"`])(?:(?!\1).)*\1\s*(?:,.*)?", stripped, re.S)) and "${" not in stripped
 
 
+def _flow_metadata(trace: Trace) -> list[dict[str, Any]]:
+    return [{"loc": f"{hop.path}:{hop.line}", "node": hop.node_id, "role": hop.role} for hop in trace]
+
+
 def analyze_polyglot_security(graph: Graph, index: PolyglotIndex) -> list[Finding]:
-    """Run the polyglot SAST rules over every indexed file (deterministic)."""
+    """Interprocedural taint SAST over every indexed C#, JS/TS, PHP and Go file."""
+    fns = _collect_facts(graph, index)
+    resolver = _Resolver(index, fns)
+    for fn in fns:
+        for call in fn.calls:
+            call.targets = [t for t in resolver.resolve(fn, call) if t is not fn]
+    # Worklist fixed point: when a function's summary changes, only its callers
+    # need re-evaluation. Summaries only move toward shorter traces, so this
+    # terminates, and chains of any depth are composed (callee-first order is
+    # not required).
+    callers: dict[int, list[int]] = {}
+    position = {id(fn): i for i, fn in enumerate(fns)}
+    for i, fn in enumerate(fns):
+        for call in fn.calls:
+            for target in call.targets:
+                callers.setdefault(position[id(target)], []).append(i)
+    queue = deque(range(len(fns)))
+    queued = set(queue)
+    updates = 0
+    while queue and updates < MAX_SUMMARY_UPDATES:
+        i = queue.popleft()
+        queued.discard(i)
+        fn = fns[i]
+        _propagate_fn(fn)
+        updates += 1
+        if _update_summaries(fn):
+            for caller in sorted(set(callers.get(i, []))):
+                if caller not in queued:
+                    queued.add(caller)
+                    queue.append(caller)
+
+    # Final pass: request input reaching each sink, locally or via callees.
+    tainted_at: dict[tuple[str, int, int], Trace] = {}
+    for fn in fns:
+        _propagate_fn(fn)
+        pf = fn.pf
+        for sink in fn.sinks:
+            labels = _labels_of(fn, sink.arg_start, sink.arg_end)
+            if "src" in labels:
+                full = _extend(labels["src"], _Hop(pf.path, sink.line, fn.node_id, "sink"))
+                if _better(tainted_at.get(_sink_key(fn, sink)), full):
+                    tainted_at[_sink_key(fn, sink)] = full
+        for call in fn.calls:
+            for target in call.targets:
+                for j, (start, end) in enumerate(call.args):
+                    downstream = target.param_sinks.get(j)
+                    if not downstream:
+                        continue
+                    labels = _labels_of(fn, start, end)
+                    if "src" not in labels:
+                        continue
+                    for key, tail in sorted(downstream.items()):
+                        full = _extend(labels["src"], _Hop(pf.path, call.line, fn.node_id, "call"))
+                        for hop in tail:
+                            full = _extend(full, hop)
+                        if _better(tainted_at.get(key), full):
+                            tainted_at[key] = full
+
     findings: list[Finding] = []
     seen: set[str] = set()
-    for path in sorted(index.files):
-        pf = index.files[path]
-        family = _family(pf.language)
-        source_re = SOURCES[family]
+    for fn in fns:
+        pf = fn.pf
+        family = fn.family
         dynamic_re = DYNAMIC_RES[family]
-        code_lines = pf.code.split("\n")
-        locator = _ScopeLocator(pf, code_lines)
-        rules = [r for r in RULES if pf.language in r.languages and (r.requires is None or r.requires.search(pf.code))]
-        line_starts = [0] + [m.end() for m in re.finditer("\n", pf.code)]
-        hits = sorted(
-            ((match.start(), order, rule, match) for order, rule in enumerate(rules) for match in rule.sink.finditer(pf.code)),
-            key=lambda hit: (hit[0], hit[1]),
-        )
-        for pos, _order, rule, match in hits:
-            line_no = pf.line_of(pos)
-            line_text = pf.code[line_starts[line_no - 1] : pf.code.find("\n", pos) if pf.code.find("\n", pos) != -1 else len(pf.code)]
-            if pf.masked[pos] == " " and not pf.code[pos].isspace():
-                continue  # sink text sits inside a string literal or comment
-            assignment = match.group(0).rstrip().endswith("=")
-            arg = _argument_text(pf, match.end(), assignment)
+        for sink in sorted(fn.sinks, key=lambda s: (s.pos, s.order)):
+            rule = sink.rule
+            arg = pf.code[sink.arg_start : sink.arg_end]
             if rule.sanitizer is not None and rule.sanitizer.search(arg):
                 continue
-            scope = locator.scope_at(pos)
-            var_re = _var_pattern(list(scope.tainted), family)
-            arg_start = match.end()
-            arg_end = arg_start + len(arg)
-            if rule.category == "sql" and not assignment:
-                # Only the query text matters; later arguments are bound parameters.
-                arg_end = _first_arg_end(pf, arg_start, arg_end)
-                arg = pf.code[arg_start:arg_end]
-            values = _value_text(pf, arg_start, arg_end)
-            source_hit = source_re.search(values)
-            var_hit = var_re.search(values) if var_re else None
-            tainted = bool(source_hit or var_hit)
-            trace: list[Loc] = []
-            if var_hit and not source_hit:
-                origin = scope.tainted.get(var_hit.group(0))
-                if origin and origin != line_no:
-                    trace.append(Loc(pf.path, origin))
-            trace.append(Loc(pf.path, line_no))
+            trace = tainted_at.get(_sink_key(fn, sink))
+            tainted = trace is not None
             if rule.mode == "taint":
                 if not tainted:
                     continue
                 severity = rule.severity
             elif rule.mode == "dynamic":
-                dyn_vars = _var_pattern(sorted(scope.dynamic), family)
-                is_dynamic = bool(dynamic_re.search(arg) or (dyn_vars and dyn_vars.search(values)))
+                values = _value_text(pf, sink.arg_start, sink.arg_end)
+                dyn_names = set(IDENT_RE.findall(values)) & fn.dynamic
+                is_dynamic = bool(dynamic_re.search(arg) or dyn_names)
                 if not tainted and not is_dynamic:
                     if rule.category not in ("code", "deserialization") or _is_literal_only(arg) or not arg.strip():
                         continue
-                if not tainted and is_dynamic and _uses_only_sanitized(pf, arg_start, arg_end, scope):
+                if not tainted and is_dynamic and _uses_only_sanitized(fn, sink.arg_start, sink.arg_end):
                     continue
                 severity = rule.severity if tainted else (rule.untainted or rule.severity)
             else:
                 severity = rule.severity
-            title = rule.title
-            key = f"{rule.category}:{pf.path}:{line_no}:{title}"
-            if key in seen:
+            dedupe_key = f"{rule.category}:{pf.path}:{sink.line}:{rule.title}"
+            if dedupe_key in seen:
                 continue
-            seen.add(key)
-            owner = scope.symbol
-            node_id = symbol_node_id(pf, owner) if owner is not None else None
-            node = graph.nodes.get(node_id or "")
+            seen.add(dedupe_key)
+            node = graph.nodes.get(fn.node_id or "")
             if node is not None:
                 tags = set(node.attrs.get("tags", []))
                 tags.update({"sink", rule.category})
                 node.attrs["tags"] = sorted(tags)
-            where = f"{owner.name}" if owner else pf.path
+            functions = sorted({h.node_id for h in trace or () if h.node_id})
+            interprocedural = len(functions) > 1
+            where = fn.sym.name if fn.sym else pf.path
             if rule.mode == "always":
                 detail = "uses an unsafe API or configuration"
+            elif tainted and interprocedural:
+                origin = trace[0] if trace else None
+                detail = (
+                    f"receives request-controlled data from {origin.path}:{origin.line} "
+                    f"through {len(functions) - 1} call(s)"
+                    if origin
+                    else "receives request-controlled data through calls"
+                )
             elif tainted:
                 detail = "passes request-controlled data to this sink"
             else:
                 detail = "builds the argument dynamically (concatenation/interpolation/format)"
+            locs = [Loc(h.path, h.line) for h in trace] if trace else []
+            deduped: list[Loc] = []
+            for loc in locs:
+                if not deduped or deduped[-1] != loc:
+                    deduped.append(loc)
+            metadata: dict[str, Any] = {"rule_id": rule.rule_id, "language": pf.language, "tainted": tainted}
+            if trace:
+                metadata["flow"] = _flow_metadata(trace)
+                metadata["interprocedural"] = interprocedural
             findings.append(
                 Finding(
-                    id=stable_id("finding", rule.category, pf.path, str(line_no), title),
+                    id=stable_id("finding", rule.category, pf.path, str(sink.line), rule.title),
                     category=rule.category,
                     severity=severity,
-                    title=title,
+                    title=rule.title,
                     message=f"{LANGUAGE_LABELS[pf.language]} `{where}` {detail}: "
-                    f"`{redact_secrets(line_text.strip())[:160]}` ({pf.path}:{line_no}).",
-                    node_id=node_id if node is not None else None,
+                    f"`{redact_secrets(sink.line_text.strip())[:160]}` ({pf.path}:{sink.line}).",
+                    node_id=fn.node_id if node is not None else None,
                     cwe=rule.cwe,
-                    confidence=0.85 if tainted or rule.mode == "always" else 0.6,
-                    evidence=[Loc(pf.path, line_no)],
+                    confidence=(0.8 if interprocedural else 0.85) if tainted or rule.mode == "always" else 0.6,
+                    evidence=[Loc(pf.path, sink.line)],
                     recommendation=RECOMMEND[rule.category],
-                    trace=trace if tainted and len(trace) > 1 else [],
-                    metadata={"rule_id": rule.rule_id, "language": pf.language, "tainted": tainted},
+                    trace=deduped if len(deduped) > 1 else [],
+                    metadata=metadata,
                 )
             )
     findings.sort(key=lambda f: (f.evidence[0].path, f.evidence[0].line, f.category, f.title))

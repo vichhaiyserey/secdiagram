@@ -27,6 +27,7 @@ from .redaction import redact_secrets
 from .resolver import Resolver
 from .sca import build_dependency_reachability, check_package_reachable
 from .security import analyze as analyze_security
+from .taint_flows import annotate_flows
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -289,6 +290,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     graph.findings = list(merged.values())
     if plugin_errors:
         graph.meta["plugin_errors"] = plugin_errors
+    annotate_flows(graph)
     if config.advisory_dbs:
         advisory_index, advisory_summaries = load_advisories(config.advisory_dbs)
         validated = apply_advisories(graph.findings, advisory_index)

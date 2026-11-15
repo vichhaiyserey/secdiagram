@@ -22,6 +22,7 @@ from . import SCHEMA_VERSION, __version__
 from .high_level import HighLevelArchitecture
 from .model import Finding, Graph
 from .redaction import redact_snippet_line
+from .taint_flows import build_taint_flows, render_taint_mermaid
 
 MERMAID_CDN = "https://cdn.jsdelivr.net/npm/mermaid@11.12.0/dist/mermaid.min.js"
 MERMAID_STUB_FALLBACK = (
@@ -141,6 +142,7 @@ def render_html(
     graph.dedupe_edges()
     graph.findings = graph.sorted_findings()
     meta = dict(meta or {})
+    flows = build_taint_flows(graph)
 
     if hla is not None:
         subsystems = [dataclasses.asdict(sub) for sub in hla.subsystems]
@@ -208,7 +210,11 @@ def render_html(
         "findings": findings_payload,
         "subsystems": sorted(subsystems, key=lambda s: (s["tier"], s["name"])),
         "connections": connections,
-        "diagram": {"highlevel": highlevel_mermaid, "detailed": detail_mermaid},
+        "diagram": {
+            "highlevel": highlevel_mermaid,
+            "detailed": detail_mermaid,
+            "taint": render_taint_mermaid(graph, flows) if flows else None,
+        },
         "narrative": narrative,
         "notes": {
             "methodology": _METHOD_NOTE,
@@ -601,9 +607,13 @@ __MERMAID_SCRIPT__
     var head = el("div", "diagram-head");
     var highBtn = el("button", "btn", "High-level");
     var detBtn = el("button", "btn", "Detailed");
+    var taintBtn = el("button", "btn", "Attack paths");
     var srcBtn = el("button", "btn", "View source");
     var copyBtn = el("button", "btn", "Copy Mermaid");
-    head.appendChild(highBtn); head.appendChild(detBtn); head.appendChild(srcBtn); head.appendChild(copyBtn);
+    var hasTaint = !!(DATA.diagram && DATA.diagram.taint);
+    head.appendChild(highBtn); head.appendChild(detBtn);
+    if (hasTaint) head.appendChild(taintBtn);
+    head.appendChild(srcBtn); head.appendChild(copyBtn);
     root.appendChild(head);
     root.appendChild(el("div", "note mini muted", "Pan: drag - Zoom: mouse wheel - Reset: double click. Configure diagram flags with --diagram-direction, --diagram-theme and --max-diagram-nodes."));
     var wrap = el("div", "diagram-wrap pad");
@@ -612,11 +622,13 @@ __MERMAID_SCRIPT__
 
     function activeSource() {
       if (diagramState.mode === "highlevel") return (DATA.diagram && DATA.diagram.highlevel) || "";
+      if (diagramState.mode === "taint") return (DATA.diagram && DATA.diagram.taint) || "";
       return (DATA.diagram && DATA.diagram.detailed) || "";
     }
     function redraw() {
       highBtn.className = diagramState.mode === "highlevel" ? "btn primary" : "btn";
-      detBtn.className = diagramState.mode !== "highlevel" ? "btn primary" : "btn";
+      detBtn.className = diagramState.mode === "detailed" ? "btn primary" : "btn";
+      taintBtn.className = diagramState.mode === "taint" ? "btn primary" : "btn";
       srcBtn.className = diagramState.source ? "btn primary" : "btn";
       var code = activeSource();
       wrap.textContent = "";
@@ -634,6 +646,7 @@ __MERMAID_SCRIPT__
     }
     highBtn.addEventListener("click", function () { diagramState.mode = "highlevel"; redraw(); });
     detBtn.addEventListener("click", function () { diagramState.mode = "detailed"; redraw(); });
+    taintBtn.addEventListener("click", function () { diagramState.mode = "taint"; redraw(); });
     srcBtn.addEventListener("click", function () { diagramState.source = !diagramState.source; redraw(); });
     copyBtn.addEventListener("click", function () { copyText(activeSource()); });
     redraw();

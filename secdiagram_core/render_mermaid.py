@@ -159,8 +159,13 @@ def render_mermaid(
     direction: str = "LR",
     theme: str = "modern",
     max_diagram_nodes: int = 150,
+    taint_overlay: bool = True,
 ) -> str:
-    """Compile graph into clear, structured, human-friendly Mermaid diagram."""
+    """Compile graph into clear, structured, human-friendly Mermaid diagram.
+
+    With *taint_overlay*, every hop of a source-to-sink taint flow is drawn in
+    red: existing edges are restyled and missing hops get a ``taint`` edge.
+    """
     graph.dedupe_edges()
     all_nodes = graph.sorted_nodes()
     severity = _severity_for(graph)
@@ -302,6 +307,7 @@ def render_mermaid(
     seen_edges: set[tuple[str, str, str]] = set()
     node_by_id = {n.id: n for n in nodes}
     edge_lines: list[str] = []
+    edge_pairs: list[tuple[str, str]] = []
 
     for edge in graph.sorted_edges():
         if edge.kind == "contains":
@@ -338,12 +344,34 @@ def render_mermaid(
         else:
             arrow = "-->"
         edge_lines.append(f"  n_{src} {arrow} n_{dst}")
+        edge_pairs.append((src, dst))
 
     # In architecture mode, cap rendered edges to prevent exceeding Mermaid layout limits (500 maxEdges)
     if detail == "architecture" and len(edge_lines) > 350:
         edge_lines = edge_lines[:350]
+        edge_pairs = edge_pairs[:350]
+
+    highlighted: list[int] = []
+    if taint_overlay and graph.findings:
+        from .taint_flows import build_taint_flows, taint_edge_pairs  # local: avoids import cycle
+
+        pair_index: dict[tuple[str, str], int] = {}
+        for index, pair in enumerate(edge_pairs):
+            pair_index.setdefault(pair, index)
+        for a, b in sorted(taint_edge_pairs(build_taint_flows(graph))):
+            src, dst = remap.get(a, a), remap.get(b, b)
+            if src == dst or src not in displayed_ids or dst not in displayed_ids:
+                continue
+            if (src, dst) not in pair_index:
+                edge_lines.append(f"  n_{src} ==>|taint| n_{dst}")
+                edge_pairs.append((src, dst))
+                pair_index[(src, dst)] = len(edge_lines) - 1
+            highlighted.append(pair_index[(src, dst)])
 
     lines.extend(edge_lines)
+    if highlighted:
+        indexes = ",".join(str(i) for i in sorted(set(highlighted)))
+        lines.append(f"  linkStyle {indexes} stroke:#dc2626,stroke-width:3px")
 
     if link_base:
         base = link_base.rstrip("/")

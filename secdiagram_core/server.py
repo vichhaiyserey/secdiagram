@@ -27,6 +27,7 @@ from .render_html import render_html
 from .render_json import render_json
 from .render_mermaid import render_mermaid
 from .render_sarif import render_sarif
+from .taint_flows import render_taint_mermaid
 
 
 def _sev_counts(graph: Graph) -> dict[str, int]:
@@ -564,7 +565,9 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/diagram":
             analysis = state.get_analysis()
             detail = query.get("detail", ["architecture"])[0]
-            if detail in {"high-level", "overview"}:
+            if detail == "taint":
+                diagram_text = render_taint_mermaid(analysis.graph)
+            elif detail in {"high-level", "overview"}:
                 hla = build_high_level_architecture(state.root, analysis.graph)
                 diagram_text = render_mermaid_highlevel(
                     hla,

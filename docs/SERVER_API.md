@@ -65,12 +65,14 @@ All endpoints require Basic Authentication unless the server was explicitly star
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/` | Interactive self-contained HTML report (`report.html`) |
-| `GET` | `/api/status` | Server health, version, scan queue status, and active configuration |
-| `GET` | `/api/graph` | Deterministic graph JSON (`graph.json`) |
-| `GET` | `/api/sarif` | OASIS SARIF v2.1.0 security report (`security.sarif`) |
-| `GET` | `/api/diagram.mmd` | Mermaid detailed architecture flowchart |
-| `GET` | `/api/diagram-highlevel.mmd` | Mermaid high-level C4 tier diagram |
-| `POST` | `/api/scan` | Trigger a new scan. Body accepts JSON options (`{"dir": "...", "security": true}`). Disabled when `read_only: true`. |
+| `GET` | `/api/v1/health` | Server health and version |
+| `GET` | `/api/v1/config` | Active configuration (secrets omitted) |
+| `GET` | `/api/v1/summary` | Node/edge/finding counts for the current analysis |
+| `GET` | `/api/v1/graph` | Deterministic graph JSON (`graph.json`), including `findings[].metadata.flow` taint paths |
+| `GET` | `/api/v1/sarif` | OASIS SARIF v2.1.0 security report (`security.sarif`) |
+| `GET` | `/api/v1/findings` | Findings, highest severity first |
+| `GET` | `/api/v1/diagram` | Mermaid diagram. `?detail=architecture` (default, taint paths highlighted), `?detail=high-level` (C4 tiers) or `?detail=taint` (attack-path diagram) |
+| `POST` | `/api/v1/scan` | Trigger a new scan. Body accepts JSON options (`{"dir": "...", "security": true}`). Disabled when `read_only: true`. |
 
 ---
 

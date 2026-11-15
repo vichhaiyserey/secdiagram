@@ -25,6 +25,13 @@ class InvoiceController extends Controller
         return DB::select('SELECT * FROM invoices WHERE number = ?', [$request->input('number')]);
     }
 
+    // VULNERABLE (interprocedural): controller -> InvoiceService SQL.
+    public function search(Request $request)
+    {
+        $customer = $request->input('customer');
+        return response()->json($this->invoices->searchByCustomer($customer));
+    }
+
     // VULNERABLE: unserialize of request data.
     public function import(Request $request)
     {

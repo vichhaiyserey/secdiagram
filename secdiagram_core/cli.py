@@ -25,6 +25,7 @@ from .render_sarif import render_sarif
 from .render_security import render_security_html, render_security_markdown
 from .render_vex import render_vex
 from .security_report import build_security_report
+from .taint_flows import render_taint_mermaid
 
 FORMATS = {"json", "md", "mermaid", "sarif", "png", "svg", "pdf", "image", "html", "vex"}
 
@@ -687,6 +688,10 @@ def main(argv: list[str] | None = None) -> int:
             hl_path = out / "diagram-highlevel.mmd"
             hl_path.write_text(highlevel_mermaid, encoding="utf-8", newline="\n")
             written.append(hl_path)
+
+            taint_path = out / "diagram-taint.mmd"
+            taint_path.write_text(render_taint_mermaid(graph), encoding="utf-8", newline="\n")
+            written.append(taint_path)
         if "sarif" in args.format:
             path = out / "security.sarif"
             path.write_text(render_sarif(graph), encoding="utf-8", newline="\n")
@@ -742,6 +747,18 @@ def main(argv: list[str] | None = None) -> int:
                     offline=args.offline,
                 )
                 written.append(hl_img_path)
+
+                if (graph.meta.get("taint_flows") or {}).get("count"):
+                    taint_img_path = out / f"diagram-taint.{fmt}"
+                    render_image(
+                        mermaid_source=render_taint_mermaid(graph),
+                        output_path=taint_img_path,
+                        image_format=fmt,
+                        provider=args.image_provider,
+                        endpoint=args.image_endpoint,
+                        offline=args.offline,
+                    )
+                    written.append(taint_img_path)
 
         if args.ollama:
             args.llm = True

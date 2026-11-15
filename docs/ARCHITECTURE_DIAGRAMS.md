@@ -70,6 +70,26 @@ flowchart TB
 
 ---
 
+## 1b. Attack-Path Diagram (`diagram-taint.mmd`)
+
+Written next to `diagram.mmd` whenever `mermaid` output is enabled. It draws each
+source-to-sink taint flow as **untrusted input -> entry point -> functions on
+the path -> vulnerable sink**:
+
+```mermaid
+flowchart LR
+  input(["Untrusted input<br/>HTTP request / CLI args"]) -.->|untrusted| ep["GET /api/orders/search<br/>Search"]
+  ep ==> svc["OrderService.FindByCustomer()"]
+  svc ==> repo["OrderRepository.QueryByCustomer()"]
+  repo ==> sink{{"SINK: SQL injection - CWE-89<br/>CRITICAL<br/>Data/OrderRepository.cs:17"}}
+  linkStyle 1,2,3 stroke:#dc2626,stroke-width:3px
+```
+
+Paths are ranked by severity (top 40 drawn; the rest stay in `graph.json`). The
+detailed diagram highlights the same hops in red.
+
+---
+
 ## 2. Detail Level Modes (`--diagram-detail`)
 
 1. **`high-level` (or `--high-level`)**:
