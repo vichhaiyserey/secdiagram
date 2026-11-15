@@ -90,6 +90,7 @@ class PgSymbol:
     handler_ref: str = ""
     tainted_params: list[str] = field(default_factory=list)
     injected: list[str] = field(default_factory=list)
+    auth: str = ""  # required | anonymous | "" (unknown)
     entities: list[str] = field(default_factory=list)
 
     @property
@@ -969,9 +970,18 @@ def _parse_js(pf: PgFile) -> None:
         _add_symbol(pf, sym)
 
     _next_routes(pf)
+    # Variables created from a router/app factory are routers whatever their name.
+    router_vars = {
+        m.group(1)
+        for m in re.finditer(
+            r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:new\s+)?"
+            r"(?:express(?:\.Router)?|Router|Hono|Koa|KoaRouter|fastify|Fastify|polka|restify\.createServer)\s*\(",
+            pf.code,
+        )
+    }
     for idx, line in enumerate(code_lines):
         for match in JS_ROUTE_RE.finditer(line):
-            if not JS_ROUTER_RECEIVER_RE.match(match.group(1)):
+            if not (JS_ROUTER_RECEIVER_RE.match(match.group(1)) or match.group(1) in router_vars):
                 continue
             verb = match.group(2).upper()
             verb = "ANY" if verb == "ALL" else verb
@@ -1335,6 +1345,115 @@ def _go_stereotype(name: str) -> str:
     return ""
 
 
+# ------------------------------------------------------------- auth markers
+
+AUTH_MW_RE = re.compile(
+    r"(?i)(?<!\w)(?:auth|authn|authz|authenticated?|authorized?|requireAuth\w*|isAuthenticated|ensureAuthenticated|"
+    r"ensureLoggedIn|isLoggedIn|loginRequired|login_required|requiresAuth|withAuth|verifyToken|verifyJwt|checkJwt|"
+    r"jwtAuth|jwtMiddleware|authMiddleware|authGuard|requireUser|requireLogin|protect|basicAuth|JWTAuth|"
+    r"passport\.authenticate|auth:sanctum|auth:api|sanctum|RequireAuthorization)(?:\b|\()"
+)
+ANON_DECORATOR_RE = re.compile(r"(?i)^(?:AllowAnonymous|@?Public|@?AllowAnonymous|@?SkipAuth|PermitAll)\b|PUBLIC_ACCESS|IS_AUTHENTICATED_ANONYMOUSLY")
+AUTH_DECORATOR_RE = re.compile(
+    r"(?i)^(?:Authorize|@?UseGuards|#\[IsGranted|IsGranted|@?Roles|PreAuthorize|Secured|RolesAllowed)\b"
+)
+NEXT_AUTH_CALL_RE = re.compile(r"\b(?:getServerSession|auth|currentUser|getToken|requireAuth|getAuth|clerkClient)\s*\(")
+
+
+def _decorator_auth(decorators: list[str]) -> str:
+    names = [re.sub(r"^\s*(?:#\[)?@?", "", d) for d in decorators]
+    if any(ANON_DECORATOR_RE.search(d) or ANON_DECORATOR_RE.search(n) for d, n in zip(decorators, names, strict=False)):
+        return "anonymous"
+    if any(AUTH_DECORATOR_RE.search(n) or AUTH_DECORATOR_RE.search(d) for d, n in zip(decorators, names, strict=False)):
+        return "required"
+    return ""
+
+
+def _statement_after(pf: PgFile, pos: int, limit: int = 400) -> str:
+    end = pf.masked.find(";", pos, pos + limit)
+    return pf.code[pos : end if end != -1 else min(len(pf.code), pos + limit)]
+
+
+def _detect_auth(pf: PgFile) -> None:
+    """Record ``required`` / ``anonymous`` auth markers on endpoints and methods.
+
+    Most specific wins: method-level anonymous > method-level required >
+    class-level > route-group / file-level middleware. Empty means no marker was
+    found (unknown exposure), never "safe".
+    """
+    classes = {s.qualname: s for s in pf.symbols if s.kind == "class"}
+    class_auth: dict[str, str] = {}
+    for cls in classes.values():
+        marker = _decorator_auth(cls.decorators)
+        if not marker and pf.language == "php" and cls.has_body:
+            body = pf.code[cls.body_start : cls.body_end]
+            if re.search(r"\$this->middleware\(\s*\[?\s*['\"]auth", body):
+                marker = "required"
+        if marker:
+            class_auth[cls.qualname] = marker
+    # Route groups / middleware applied to a router variable or a closure.
+    guarded_vars: set[str] = set()
+    for match in re.finditer(r"\b(\w+)\s*:?=\s*\w+\s*\.\s*(?:Group|MapGroup|group)\s*\(([^;]*)", pf.code):
+        if AUTH_MW_RE.search(match.group(2)):
+            guarded_vars.add(match.group(1))
+    for match in re.finditer(r"\b(\w+)\s*\.\s*(?:Use|use)\s*\(([^;]*)", pf.code):
+        if AUTH_MW_RE.search(match.group(2)):
+            guarded_vars.add(match.group(1))
+    js_auth_uses: list[int] = []
+    if pf.language in JS_LANGS:
+        js_auth_uses = [
+            m.start() for m in re.finditer(r"\.\s*use\s*\(([^;]*)", pf.code) if AUTH_MW_RE.search(m.group(1))
+        ]
+    first_js_auth_use = min(js_auth_uses) if js_auth_uses else -1
+    pairs: dict[int, int] | None = None
+    guarded_spans: list[tuple[int, int]] = []
+    for match in re.finditer(
+        r"Route::(?:middleware\s*\(([^)]*)\)|group\s*\(\s*\[([^\]]*)\])[^;{]*?function\s*\([^)]*\)\s*(?:use\s*\([^)]*\)\s*)?\{",
+        pf.code,
+    ):
+        args = (match.group(1) or "") + (match.group(2) or "")
+        if AUTH_MW_RE.search(args):
+            open_pos = match.end() - 1
+            if pairs is None:
+                pairs = _brace_pairs(pf.masked)
+            close = pairs.get(open_pos, -1)
+            if close != -1:
+                guarded_spans.append((open_pos, close))
+    for sym in pf.symbols:
+        if sym.kind == "class":
+            continue
+        marker = _decorator_auth(sym.decorators)
+        if not marker and sym.decl_kind == "route":
+            line_start = pf.line_start(sym.line)
+            # Middleware arguments sit just before the handler; bound the window
+            # so minified / single-line sources stay linear.
+            window_start = max(line_start, sym.body_start - 400) if sym.body_start > line_start else line_start
+            before = pf.code[window_start : sym.body_start if sym.body_start > line_start else line_start + 300]
+            after = _statement_after(pf, max(sym.body_end, line_start))
+            if re.search(r"\.AllowAnonymous\s*\(|withoutMiddleware\s*\([^)]*auth", before + after):
+                marker = "anonymous"
+            elif AUTH_MW_RE.search(before.split(",", 1)[-1]) or re.search(
+                r"\.RequireAuthorization\s*\(|->\s*middleware\s*\([^)]*auth", after + before
+            ):
+                marker = "required"
+            else:
+                receiver = re.match(r"\s*\$?(\w+)\s*(?:\.|->)", pf.code[window_start : window_start + 200])
+                if receiver and receiver.group(1) in guarded_vars:
+                    marker = "required"
+                elif any(a < sym.body_start < b or a < line_start < b for a, b in guarded_spans):
+                    marker = "required"
+        if not marker and sym.container in class_auth:
+            marker = class_auth[sym.container]
+        if not marker and sym.framework == "nextjs" and sym.has_body:
+            if NEXT_AUTH_CALL_RE.search(pf.code[sym.body_start : sym.body_end]):
+                marker = "required"
+        if not marker and pf.language in JS_LANGS and sym.kind == "endpoint" and sym.decl_kind == "route":
+            # app.use(authMiddleware) earlier in the file guards later routes.
+            if first_js_auth_use != -1 and first_js_auth_use < pf.line_start(sym.line):
+                marker = "required"
+        sym.auth = marker
+
+
 # -------------------------------------------------------------------- indexing
 
 PARSERS = {
@@ -1360,6 +1479,7 @@ def parse_polyglot_file(path: str, text: str) -> PgFile | None:
         return None
     pf = _new_file(path, language, text)
     PARSERS[language](pf)
+    _detect_auth(pf)
     pf.symbols.sort(key=lambda s: (s.line, s.kind, s.name))
     return pf
 
@@ -1421,6 +1541,8 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
                 continue
             _, target = chosen[0]
             target.routes = _dedupe_routes(target.routes + sym.routes)
+            if sym.auth and not target.auth:
+                target.auth = sym.auth
             target.kind = "endpoint"
             target.framework = target.framework or sym.framework
             if not target.tainted_params:
@@ -1562,6 +1684,8 @@ def build_polyglot_graph(graph: Graph, index: PolyglotIndex) -> None:
                 attrs["routes"] = sym.routes
             if sym.framework:
                 attrs["framework"] = sym.framework
+            if sym.auth:
+                attrs["auth"] = sym.auth
             if sym.has_body:
                 attrs["body_lines"] = max(1, sym.end_line - sym.line + 1)
             node = Node(

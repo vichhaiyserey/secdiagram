@@ -8,6 +8,7 @@ from typing import Any
 from . import __version__
 from .features import feature_for_path
 from .model import Edge, Graph, Node
+from .risk import risk_sort_key
 from .taint_flows import build_taint_flows, render_taint_mermaid
 
 
@@ -88,6 +89,36 @@ def _indexed_sources_text(meta: dict[str, Any]) -> str:
     return (", ".join(parts[:-1]) + " and " + parts[-1] + " sources") if len(parts) > 1 else parts[0]
 
 
+def _fix_first_section(graph: Graph, limit: int = 10) -> list[str]:
+    """Top findings by risk (impact x exposure x evidence x confidence x exploit intel)."""
+    ranked = [
+        finding for finding in sorted(graph.findings, key=risk_sort_key)
+        if not finding.baseline and finding.metadata.get("risk")
+    ]
+    if not ranked:
+        return []
+    counts = (graph.meta.get("risk") or {}).get("by_priority") or {}
+    summary = ", ".join(f"{label}: {counts.get(label, 0)}" for label in ("P0", "P1", "P2", "P3"))
+    out = ["## Fix first (risk-ranked)", ""]
+    out.append(
+        f"Priorities from impact x exposure x evidence x confidence x exploit intel (0-10). {summary}. "
+        "P0 >= 8 fix now, P1 >= 6, P2 >= 4."
+    )
+    out.append("")
+    out.append("| Priority | Score | Finding | Exposure | Evidence | Location |")
+    out.append("|---|---|---|---|---|---|")
+    for finding in ranked[:limit]:
+        risk = finding.metadata["risk"]
+        ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
+        row = (
+            f"| **{risk['priority']}** | {risk['score']} | {_esc(finding.title)} ({_esc(finding.cwe or finding.category)}) | "
+            f"{_esc(risk['exposure'])} | {_esc(risk['evidence'])} | {ref} |"
+        )
+        out.append(row.encode("ascii", "replace").decode("ascii"))
+    out.append("")
+    return out
+
+
 def _attack_paths_section(graph: Graph, limit: int = 10) -> list[str]:
     """Attack paths: request input -> functions on the path -> vulnerable sink."""
     flows = [flow for flow in build_taint_flows(graph) if not flow.finding.baseline]
@@ -114,7 +145,9 @@ def _attack_paths_section(graph: Graph, limit: int = 10) -> list[str]:
             hops.append(f"`{_esc(label)}`")
         sink = finding.evidence[0].ref if finding.evidence else flow.hops[-1].loc.ref
         hops.append(f"**{_esc(finding.title)}** ({_esc(finding.cwe or finding.category)}) at `{_esc(sink)}`")
-        line = f"{number}. **{_esc(finding.severity)}** - " + " -> ".join(hops)
+        risk = finding.metadata.get("risk") or {}
+        label = f"{risk['priority']} {risk['score']}" if "priority" in risk else finding.severity
+        line = f"{number}. **{_esc(label)}** - " + " -> ".join(hops)
         out.append(line.encode("ascii", "replace").decode("ascii"))
     if len(flows) > limit:
         out.append(f"\n_{len(flows) - limit} more flow(s) in `graph.json` (`findings[].metadata.flow`)._")
@@ -294,6 +327,8 @@ def render_markdown(
         for node in infra:
             lines.append(f"| {_esc(node.name)} | {_esc(node.kind)} | {_ref(node)} |")
         lines.append("")
+
+    lines.extend(_fix_first_section(graph))
 
     if graph.findings:
         new_findings = [finding for finding in graph.sorted_findings() if not finding.baseline]

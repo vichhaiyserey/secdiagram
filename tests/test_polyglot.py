@@ -261,8 +261,11 @@ class IntegrationTests(unittest.TestCase):
         go = build_high_level_architecture(FIXTURES / "go_api", _analyze("go_api").graph)
         php_sub = next(s for s in php.subsystems if s.id.startswith("php_"))
         go_sub = next(s for s in go.subsystems if s.id.startswith("go_"))
-        self.assertEqual((php_sub.technology, php_sub.tier, php_sub.details), ("Laravel (PHP)", "gateway", ["6 Routes"]))
-        self.assertEqual((go_sub.technology, go_sub.tier, go_sub.details), ("Go Gin", "gateway", ["6 Routes"]))
+        self.assertEqual((php_sub.technology, php_sub.tier, php_sub.details[0]), ("Laravel (PHP)", "gateway", "6 Routes"))
+        self.assertEqual((go_sub.technology, go_sub.tier, go_sub.details[0]), ("Go Gin", "gateway", "6 Routes"))
+        # Risk badges: P0/P1 findings located under each project directory.
+        self.assertEqual(php_sub.details[-1], "⚠ P0x3 P1x3")
+        self.assertEqual(go_sub.details[-1], "⚠ P0x1 P1x3")
         self.assertIn(("go_shop", "db_postgres"), {(c.src, c.dst) for c in go.connections})
         self.assertIn("PHP", php.languages)
         # Polyglot packages must not be mislabeled as Python subsystems.

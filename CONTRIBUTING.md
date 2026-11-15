@@ -201,7 +201,9 @@ secdiagram/
 │   ├── render_mermaid.py        # Mermaid flowchart code generator (diagram.mmd)
 │   ├── render_sarif.py          # OASIS SARIF v2.1.0 security report serializer
 │   ├── resolver.py              # Qualified symbol resolution and call attribution
+│   ├── risk.py                  # Risk score per finding (exposure x impact x evidence x KEV)
 │   ├── taint_flows.py           # Language-neutral taint flows and attack-path diagram
+│   ├── threat_model.py          # Evidence-backed STRIDE threat model per trust boundary
 │   └── security.py              # SAST security rules (taint flow, hardcoded secrets, injection)
 ├── tests/                       # Test suite
 │   ├── fixtures/                # Sample applications (Python, .NET, Node.js)

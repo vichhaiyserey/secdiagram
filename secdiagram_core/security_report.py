@@ -119,6 +119,7 @@ def _is_validated(finding: Finding) -> bool:
 def _sort_key(finding: Finding) -> tuple[Any, ...]:
     location = finding.evidence[0] if finding.evidence else None
     return (
+        -float((finding.metadata.get("risk") or {}).get("score", 0.0)),
         -SEVERITY_RANK.get(finding.severity, 0),
         0 if _is_known_exploited(finding) else 1,
         0 if finding.trace else 1,

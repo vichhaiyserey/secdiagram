@@ -26,9 +26,11 @@ from .polyglot_security import analyze_polyglot_security
 from .protocols import get_registered_indexers, get_registered_security_providers
 from .redaction import redact_secrets
 from .resolver import Resolver
+from .risk import score_findings
 from .sca import build_dependency_reachability, check_package_reachable
 from .security import analyze as analyze_security
 from .taint_flows import annotate_flows
+from .threat_model import build_threat_model, summarize_threat_model
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -298,6 +300,9 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         validated = apply_advisories(graph.findings, advisory_index)
         graph.meta["advisory_sources"] = advisory_summaries
         graph.meta["advisory_validated_findings"] = validated
+    # Rank by risk last, once flows and exploit intelligence (KEV) are known.
+    score_findings(graph)
+    summarize_threat_model(graph, build_threat_model(graph))
     graph.edges = [
         edge
         for edge in graph.edges

@@ -70,7 +70,8 @@ All endpoints require Basic Authentication unless the server was explicitly star
 | `GET` | `/api/v1/summary` | Node/edge/finding counts for the current analysis |
 | `GET` | `/api/v1/graph` | Deterministic graph JSON (`graph.json`), including `findings[].metadata.flow` taint paths |
 | `GET` | `/api/v1/sarif` | OASIS SARIF v2.1.0 security report (`security.sarif`) |
-| `GET` | `/api/v1/findings` | Findings, highest severity first |
+| `GET` | `/api/v1/findings` | Findings, highest severity first (each carries `metadata.risk`: score, priority, exposure) |
+| `GET` | `/api/v1/threat-model` | STRIDE threat model per trust boundary (Markdown) |
 | `GET` | `/api/v1/diagram` | Mermaid diagram. `?detail=architecture` (default, taint paths highlighted), `?detail=high-level` (C4 tiers) or `?detail=taint` (attack-path diagram) |
 | `POST` | `/api/v1/scan` | Trigger a new scan. Body accepts JSON options (`{"dir": "...", "security": true}`). Disabled when `read_only: true`. |
 

@@ -28,6 +28,7 @@ from .render_json import render_json
 from .render_mermaid import render_mermaid
 from .render_sarif import render_sarif
 from .taint_flows import render_taint_mermaid
+from .threat_model import render_threat_model
 
 
 def _sev_counts(graph: Graph) -> dict[str, int]:
@@ -560,6 +561,11 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                 "total": len(findings),
                 "findings": [f.to_dict() for f in findings],
             })
+            return
+
+        if path == "/api/v1/threat-model":
+            analysis = state.get_analysis()
+            self._send_text(200, render_threat_model(analysis.graph), "text/markdown; charset=utf-8")
             return
 
         if path == "/api/v1/diagram":

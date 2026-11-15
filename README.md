@@ -100,7 +100,8 @@ By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 - `diagram-highlevel.mmd` / `.png` — High-level C4 system tier diagram (`secdiagram.com` style).
 - `diagram.mmd` / `.png` — Detailed architecture flowchart and component relationships (taint paths highlighted in red).
 - `diagram-taint.mmd` / `.png` — Attack-path diagram: untrusted input → entry points → every function on the path → vulnerable sink.
-- `ARCHITECTURE.md` — Complete markdown architecture report with embedded diagrams.
+- `ARCHITECTURE.md` — Complete markdown architecture report with embedded diagrams and a risk-ranked "Fix first" table.
+- `THREAT_MODEL.md` — STRIDE threat model per trust boundary, backed by findings and their risk priority.
 - `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings).
 - `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`.
 - `vex.json` — CycloneDX 1.6 VEX document with automated reachability justifications.

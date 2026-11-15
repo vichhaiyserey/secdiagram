@@ -155,6 +155,26 @@ def _rule_properties(finding: Finding, severity: str, confidence: float) -> dict
     return properties
 
 
+def _result_rank(finding: Finding) -> float:
+    """SARIF ``rank`` (0-100): the 0-10 risk score when available, else severity."""
+    risk = finding.metadata.get("risk") or {}
+    if "score" in risk:
+        return round(float(risk["score"]) * 10, 1)
+    return float(SEVERITY_RANK_VALUE.get(finding.severity, 50))
+
+
+def _risk_properties(finding: Finding) -> dict[str, Any]:
+    risk = finding.metadata.get("risk") or {}
+    if "score" not in risk:
+        return {}
+    return {
+        "riskScore": risk["score"],
+        "riskPriority": risk["priority"],
+        "exposure": risk["exposure"],
+        "evidenceKind": risk["evidence"],
+    }
+
+
 def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
     findings = graph.sorted_findings()
     if skip_baseline:
@@ -218,7 +238,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
             "ruleId": key,
             "ruleIndex": rule_index[key],
             "level": LEVEL.get(finding.severity, "warning"),
-            "rank": SEVERITY_RANK_VALUE.get(finding.severity, 50),
+            "rank": _result_rank(finding),
             "message": {"text": finding.message},
             "partialFingerprints": {"secdiagramFindingId/v1": finding.id},
             "properties": {
@@ -227,6 +247,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 "precision": _precision(finding.confidence),
                 "recommendation": finding.recommendation,
                 "source": finding.source,
+                **_risk_properties(finding),
             },
         }
         if finding.external_id:
