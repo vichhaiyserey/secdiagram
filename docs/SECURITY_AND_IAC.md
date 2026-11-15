@@ -119,7 +119,51 @@ developer page behind `IsDevelopment()`).
 | Prototype pollution | CWE-1321 | `_.merge(target, req.body)`, `$.extend(true, ...)`, `deepmerge(...)` when a *source* argument carries request data (taint rule) |
 | Debug exposure | CWE-209 | `UseDeveloperExceptionPage()` without an environment guard |
 
-### 1.3 Attack-path diagram (`diagram-taint.mmd`)
+### 1.3 Risk-ranked findings ("fix first")
+
+Severity says how bad a class of bug is; it does not say what to fix first.
+Every finding gets a 0-10 risk score (`metadata.risk`):
+
+`score = impact x exposure x evidence x confidence x exploit_intel`
+
+| Factor | Values |
+| :--- | :--- |
+| Impact | RCE (command/code 10, deserialization/file inclusion 9.5) > SQL 9 > JWT/auth bypass 8.5 > SSRF/secrets/NoSQL 8 > path/XXE 7.5 > prototype pollution 7 > CORS 6.5 > XSS/TLS/CI 6 > CSRF 5.5 > randomness 5 > redirect/crypto 4.5 > cookies/misconfig 4. Configuration rules scale by their own severity. |
+| Exposure | entry point of the flow: **public** (explicitly anonymous) 1.0, **unknown** (no auth marker detected - assumed reachable) 0.9, **authenticated** 0.65, **local** (CLI/job) 0.45, **internal** 0.4 |
+| Evidence | proven source-to-sink flow 1.0, credential in source 0.95, unsafe configuration 0.9, pattern 0.7, dynamically built query/command without proven input 0.5 |
+| Confidence | `0.7 + 0.3 x rule confidence` |
+| Exploit intel | x1.2 and a P0 floor when a matched advisory is in CISA KEV (`--advisory-db`) |
+
+Priorities: **P0** >= 8.0 (fix now), **P1** >= 6.0, **P2** >= 4.0, **P3** below.
+Auth markers are detected per framework: ASP.NET `[Authorize]` /
+`[AllowAnonymous]` / `RequireAuthorization()` (also on `MapGroup`), NestJS
+`@UseGuards` / `@Public`, Express auth middleware in the route or a preceding
+`app.use(...)`, Next.js `getServerSession()` / `auth()`, Laravel
+`->middleware('auth')` and auth route groups, Symfony `#[IsGranted]`, Go auth
+middleware on routes, groups or `.Use(...)`, Spring `@PreAuthorize` /
+`@Secured` / `@RolesAllowed` / `@PermitAll`, Python auth decorators. A missing
+marker means *unknown*, never *safe*.
+
+The ranking drives the "Fix first" table in `ARCHITECTURE.md`, the security
+report priorities, SARIF `rank` (score x 10) with `riskScore` / `riskPriority`
+/ `exposure` properties, and the attack-path diagram (ordered and coloured by
+priority, entry points badged with their exposure). High-level subsystems are
+badged with their P0/P1 counts.
+
+### 1.4 STRIDE threat model (`THREAT_MODEL.md`)
+
+Written with `--format md` (security enabled) and served at
+`/api/v1/threat-model`. Threats are organized per trust boundary - Internet ->
+Application, Application -> Data stores, Application -> External services,
+Application -> Host/runtime, Source & supply chain - with a STRIDE category, an
+evidence-backed status (**observed** with the findings and their top priority,
+**review** for structural signals such as entry points without detected auth,
+**no evidence** when the rules ran and matched nothing, **not assessed** for
+threats static analysis cannot verify such as repudiation and rate limiting)
+and a mitigation. A boundary diagram colours each crossing by its worst
+priority.
+
+### 1.5 Attack-path diagram (`diagram-taint.mmd`)
 
 Every tainted finding, in every language (Python and Java flows are derived from
 their traces), becomes an attack path: **untrusted input -> entry point ->

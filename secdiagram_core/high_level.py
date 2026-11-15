@@ -1112,6 +1112,40 @@ def _scan_go(
     return subsystems, connections
 
 
+def _annotate_risk(subsystems: list[Subsystem], graph: Graph) -> None:
+    """Badge subsystems with the P0/P1 findings located under their project directory."""
+    counted: list[tuple[str, dict[str, int]]] = []
+    for sub in subsystems:
+        if not sub.path:
+            continue
+        base = sub.path.rsplit("/", 1)[0] if "/" in sub.path else ""
+        counted.append((base, {"P0": 0, "P1": 0}))
+    if not counted:
+        return
+    for finding in graph.findings:
+        priority = (finding.metadata.get("risk") or {}).get("priority")
+        if finding.baseline or priority not in ("P0", "P1") or not finding.evidence:
+            continue
+        path = finding.evidence[0].path
+        # Attribute to the most specific (longest) project directory containing the file.
+        best: dict[str, int] | None = None
+        best_len = -1
+        for base, counts in counted:
+            if (base == "" or path == base or path.startswith(base + "/")) and len(base) > best_len:
+                best, best_len = counts, len(base)
+        if best is not None:
+            best[priority] += 1
+    index = 0
+    for sub in subsystems:
+        if not sub.path:
+            continue
+        counts = counted[index][1]
+        index += 1
+        badge = " ".join(f"{label}x{counts[label]}" for label in ("P0", "P1") if counts[label])
+        if badge:
+            sub.details = [*sub.details, f"⚠ {badge}"]
+
+
 def build_high_level_architecture(root: Path, graph: Graph | None = None) -> HighLevelArchitecture:
     """Build a consolidated high-level system architecture across .NET, Node.js, Python, and IaC."""
     root = root.resolve()
@@ -1275,6 +1309,8 @@ def build_high_level_architecture(root: Path, graph: Graph | None = None) -> Hig
                 seen_conns.add(pair)
                 valid_conns.append(conn)
 
+    if graph is not None:
+        _annotate_risk(all_subsystems, graph)
     return HighLevelArchitecture(
         subsystems=list(unique_subs.values()),
         connections=valid_conns,

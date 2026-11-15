@@ -174,6 +174,7 @@ def build_taint_flows(graph: Graph) -> list[TaintFlow]:
         flows.append(flow)
     flows.sort(
         key=lambda flow: (
+            -float((flow.finding.metadata.get("risk") or {}).get("score", 0.0)),
             -SEVERITY_RANK.get(flow.finding.severity, 0),
             flow.finding.baseline,
             flow.hops[-1].loc.path,
@@ -227,9 +228,21 @@ TAINT_CLASSES = """  classDef input fill:#fee2e2,stroke:#b91c1c,stroke-width:2px
   classDef low fill:#f8fafc,stroke:#475569,stroke-width:1.5px,color:#1e293b;"""
 
 
-def _node_label(node: Node | None, fallback: Loc) -> str:
+PRIORITY_TONE = {"P0": "critical", "P1": "high", "P2": "medium", "P3": "low"}
+EXPOSURE_BADGES = {
+    "public": "PUBLIC - no auth",
+    "unknown": "auth not detected",
+    "authenticated": "authenticated",
+    "local": "local entry",
+    "internal": "internal",
+}
+
+
+def _node_label(node: Node | None, fallback: Loc, exposure: str | None = None) -> str:
     if node is None:
         return _escape(f"{fallback.path}:{fallback.line}")
+    if exposure:
+        return _node_label(node, fallback) + "<br/>" + _escape(f"[{EXPOSURE_BADGES.get(exposure, exposure)}]")
     where = f"{node.path}:{node.line}" if node.path and node.line else ""
     if node.kind == "endpoint" and node.attrs.get("routes"):
         route = node.attrs["routes"][0]
@@ -310,7 +323,8 @@ def render_taint_mermaid(
             hop = next(h for h in flow.hops if h.node_id == node_id)
             is_entry = index == 0
             cls = "entry" if is_entry else "hop"
-            declare(node_id, _node_label(node, hop.loc), cls)
+            exposure = (finding.metadata.get("risk") or {}).get("exposure") if is_entry else None
+            declare(node_id, _node_label(node, hop.loc, exposure), cls)
             keys.append(node_id)
             if is_entry:
                 entries.add(node_id)
@@ -318,15 +332,21 @@ def render_taint_mermaid(
         sink_key = f"sink:{finding.id}"
         label = CATEGORY_LABELS.get(finding.category, finding.title)
         headline = f"{sym_sink}{label}{sep}{finding.cwe}" if finding.cwe else f"{sym_sink}{label}"
-        status = finding.severity.upper() + (f"{sep}baseline" if finding.baseline else "")
+        risk = finding.metadata.get("risk") or {}
+        priority = f"{risk['priority']} {risk['score']}{sep}" if "priority" in risk else ""
+        status = priority + finding.severity.upper() + (f"{sep}baseline" if finding.baseline else "")
         sink_loc = finding.evidence[0].ref if finding.evidence else sink_hop.loc.ref
+        # Colour by risk priority when scored (the diagram must agree with the
+        # ranking), otherwise by rule severity.
+        tone = PRIORITY_TONE.get(str(risk.get("priority")), finding.severity)
+        tone = tone if tone in ("critical", "high", "medium", "low") else "low"
         declare(
             sink_key,
             f"{_escape(headline)}<br/>{_escape(status)}<br/>{_escape(sink_loc)}",
-            finding.severity if finding.severity in ("critical", "high", "medium", "low") else "low",
+            tone,
             "hex",
         )
-        severity = finding.severity
+        severity = tone
         if keys:
             link("__input__", keys[0], "-.->|untrusted|")
             for src, dst in zip(keys, keys[1:], strict=False):

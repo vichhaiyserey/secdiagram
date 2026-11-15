@@ -1081,6 +1081,21 @@ def _tag(node: Node, tag: str) -> None:
     node.attrs["security"] = sorted(tags)
 
 
+_SPRING_AUTH = frozenset({"PreAuthorize", "PostAuthorize", "Secured", "RolesAllowed"})
+_SPRING_ANON = frozenset({"PermitAll", "AnonymousAllowed"})
+
+
+def _spring_auth(method_annotations: list[str], class_annotations: list[str]) -> str:
+    """``required`` / ``anonymous`` from Spring/Jakarta security annotations (method first)."""
+    for annotation_names in (method_annotations, class_annotations):
+        names = set(annotation_names)
+        if names & _SPRING_ANON:
+            return "anonymous"
+        if names & _SPRING_AUTH:
+            return "required"
+    return ""
+
+
 def build_java_graph(graph: Graph, index: JavaIndex) -> None:
     """Append Java nodes and edges to the graph (deterministic)."""
     packages: dict[str, str] = {}
@@ -1169,6 +1184,9 @@ def build_java_graph(graph: Graph, index: JavaIndex) -> None:
                     attrs["body_lines"] = len(method.body)
                 if method.routes:
                     attrs["routes"] = sorted(method.routes, key=lambda r: (r["method"], r["path"]))
+                auth = _spring_auth(method.annotations, cls.annotations)
+                if auth:
+                    attrs["auth"] = auth
                 node = Node(
                     id=stable_id("jsym", method.path, method.qualname),
                     kind=kind,

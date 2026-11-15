@@ -24,8 +24,10 @@ from .render_mermaid import render_mermaid
 from .render_sarif import render_sarif
 from .render_security import render_security_html, render_security_markdown
 from .render_vex import render_vex
+from .risk import score_findings
 from .security_report import build_security_report
 from .taint_flows import render_taint_mermaid
+from .threat_model import build_threat_model, render_threat_model, summarize_threat_model
 
 FORMATS = {"json", "md", "mermaid", "sarif", "png", "svg", "pdf", "image", "html", "vex"}
 
@@ -629,6 +631,10 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
+    # Re-rank after confidence filtering and baseline suppression.
+    score_findings(graph)
+    threats = build_threat_model(graph)
+    summarize_threat_model(graph, threats)
     meta = dict(graph.meta)
     meta.update(
         {
@@ -668,6 +674,10 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8",
                 newline="\n",
             )
+            written.append(path)
+        if "md" in args.format and args.security:
+            path = out / "THREAT_MODEL.md"
+            path.write_text(render_threat_model(graph, threats), encoding="utf-8", newline="\n")
             written.append(path)
         if "mermaid" in args.format:
             if args.diagram_detail in {"high-level", "overview"}:
