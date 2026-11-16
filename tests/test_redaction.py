@@ -126,6 +126,12 @@ class RedactionTests(unittest.TestCase):
         inside = str(root / "secdiagram_core" / "cli.py")
         sanitized_inside = sanitize_path_text(inside, root)
         self.assertEqual(sanitized_inside, "./secdiagram_core/cli.py")
+        # Reports must be byte-identical across platforms (determinism):
+        # the forward-slash spelling of an inside path resolves the same way.
+        self.assertEqual(
+            sanitize_path_text(inside.replace("\\", "/"), root),
+            "./secdiagram_core/cli.py",
+        )
 
         outside_unix = "/etc/shadow"
         self.assertEqual(sanitize_path_text(outside_unix, root), "[external-path]")
