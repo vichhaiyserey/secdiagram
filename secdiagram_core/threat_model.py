@@ -18,10 +18,11 @@ not a proof of absence.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .model import Finding, Graph, stable_id
+from .model import Finding, Graph, Loc, stable_id
 from .risk import endpoint_exposure
 
 BOUNDARIES: tuple[tuple[str, str, str], ...] = (
@@ -244,3 +245,390 @@ def render_threat_model(graph: Graph, threats: list[Threat] | None = None) -> st
             )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+# ---------------------------------------------------------------------------
+# MITRE ATT&CK evaluation (continuous threat modeling)
+# ---------------------------------------------------------------------------
+# Architectural rules: a rule fires "observed" when evidence-backed findings
+# exist, "review" when only a structural signal exists (e.g. entry points whose
+# authentication could not be determined), and "no-evidence" otherwise. As with
+# the STRIDE model, "no evidence" is not a proof of absence.
+
+
+@dataclass(frozen=True, slots=True)
+class AttackRule:
+    technique: str
+    name: str
+    tactic: str
+    categories: frozenset[str]
+    mitigation: str
+    missing_mitigation: str
+    structural: Callable[[Graph], list[str]] | None = None
+
+
+@dataclass(slots=True)
+class AttackEval:
+    technique: str
+    name: str
+    tactic: str
+    status: str  # observed | review | no-evidence
+    mitigation: str
+    missing_mitigation: str
+    finding_ids: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    priority: str | None = None
+    max_score: float = 0.0
+
+    @property
+    def reference(self) -> str:
+        return f"https://attack.mitre.org/techniques/{self.technique}/"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "technique": self.technique,
+            "name": self.name,
+            "tactic": self.tactic,
+            "status": self.status,
+            "priority": self.priority,
+            "max_score": self.max_score,
+            "reference": self.reference,
+            "finding_ids": self.finding_ids,
+            "evidence": self.evidence,
+            "mitigation": self.mitigation,
+            "missing_mitigation": self.missing_mitigation,
+        }
+
+
+def _structural_public_entrypoints(graph: Graph) -> list[str]:
+    """Entry points reachable without a detected authentication marker."""
+    signals: list[str] = []
+    for node in graph.sorted_nodes():
+        if node.kind != "endpoint":
+            continue
+        exposure = endpoint_exposure(node)
+        if exposure not in ("public", "unknown"):
+            continue
+        loc = node.evidence or Loc(node.path or "", node.line or 0)
+        signals.append(f"{loc.ref} endpoint {node.qualname} exposure={exposure}")
+    return signals
+
+
+@dataclass(frozen=True, slots=True)
+class _AttackRuleSpec:
+    rule: AttackRule
+    structural: Callable[[Graph], list[str]] | None = None
+
+
+ATTACK_RULES: tuple[AttackRule, ...] = (
+    AttackRule(
+        technique="T1190",
+        name="Exploit Public-Facing Application",
+        tactic="Initial Access",
+        categories=frozenset({"sql", "nosql", "command", "code", "deserialization", "file-inclusion", "xss", "path"}),
+        mitigation="Authenticate every entry point by default; validate and parameterize all client input; deploy edge protections.",
+        missing_mitigation="Entry-point authentication / edge protections not detected on public-facing routes.",
+        structural=_structural_public_entrypoints,
+    ),
+    AttackRule(
+        technique="T1040",
+        name="Network Sniffing",
+        tactic="Credential Access",
+        categories=frozenset({"tls"}),
+        mitigation="Keep TLS certificate verification enabled end to end; reject cleartext transport for sensitive flows.",
+        missing_mitigation="Transport encryption controls not detected (TLS verification findings indicate interceptable traffic).",
+    ),
+    AttackRule(
+        technique="T1078",
+        name="Valid Accounts",
+        tactic="Privilege Escalation",
+        categories=frozenset({"jwt", "auth", "cookie"}),
+        mitigation="Verify token signatures and expiry, use CSPRNG session tokens, set HttpOnly+Secure cookie flags.",
+        missing_mitigation="Session/identity token hardening not detected.",
+    ),
+    AttackRule(
+        technique="T1552",
+        name="Unsecured Credentials",
+        tactic="Credential Access",
+        categories=frozenset({"secret"}),
+        mitigation="Rotate exposed credentials and load secrets from a secret manager at runtime.",
+        missing_mitigation="Credentials committed to source or images (no secret-manager usage detected).",
+    ),
+    AttackRule(
+        technique="T1195",
+        name="Supply Chain Compromise",
+        tactic="Initial Access",
+        categories=frozenset({"supply-chain", "supply_chain", "dependency", "ci"}),
+        mitigation="Pin actions and images by digest, use least-privilege CI tokens, verify dependencies.",
+        missing_mitigation="Build/dependency pipeline integrity controls not detected.",
+    ),
+    AttackRule(
+        technique="T1068",
+        name="Exploit for Privilege Escalation",
+        tactic="Privilege Escalation",
+        categories=frozenset({"container", "cloud"}),
+        mitigation="Run containers as non-root, drop capabilities, apply least-privilege IAM roles.",
+        missing_mitigation="Over-privileged runtime or cloud roles detected.",
+    ),
+)
+
+ATTACK_STATUS_TEXT = {"observed": "observed", "review": "review", "no-evidence": "no evidence"}
+
+
+def attack_status_label(status: str) -> str:
+    return ATTACK_STATUS_TEXT.get(status, status)
+
+
+def evaluate_attack(graph: Graph, findings: list[Finding] | None = None) -> list[AttackEval]:
+    """Map evidence-backed findings and architectural signals to ATT&CK techniques.
+
+    Deterministic: rules are evaluated in ``ATTACK_RULES`` order and evidence is
+    sorted by risk score, then source location.
+    """
+    active = [f for f in (findings if findings is not None else graph.sorted_findings()) if not f.baseline]
+    evals: list[AttackEval] = []
+    for rule in ATTACK_RULES:
+        matched = sorted(
+            (f for f in active if f.category in rule.categories),
+            key=lambda f: (-float((f.metadata.get("risk") or {}).get("score", 0.0)), f.id),
+        )
+        evaluation = AttackEval(
+            technique=rule.technique,
+            name=rule.name,
+            tactic=rule.tactic,
+            status="no-evidence",
+            mitigation=rule.mitigation,
+            missing_mitigation=rule.missing_mitigation,
+        )
+        if matched:
+            evaluation.status = "observed"
+            evaluation.finding_ids = [f.id for f in matched]
+            evaluation.evidence = [
+                f"{f.title} ({f.evidence[0].ref})" for f in matched[:5] if f.evidence
+            ]
+            scores = [float((f.metadata.get("risk") or {}).get("score", 0.0)) for f in matched]
+            evaluation.max_score = max(scores) if scores else 0.0
+            evaluation.priority = min(
+                (str((f.metadata.get("risk") or {}).get("priority", "P3")) for f in matched),
+                key=lambda p: PRIORITY_ORDER.get(p, 3),
+            )
+        elif rule.structural is not None:
+            signals = rule.structural(graph)
+            if signals:
+                evaluation.status = "review"
+                evaluation.evidence = signals[:10]
+                evaluation.max_score = 0.0
+        evals.append(evaluation)
+    return evals
+
+
+def summarize_attack(graph: Graph, evals: list[AttackEval]) -> None:
+    graph.meta["attack"] = {
+        "techniques": len(evals),
+        "observed": sum(1 for e in evals if e.status == "observed"),
+        "review": sum(1 for e in evals if e.status == "review"),
+        "by_tactic": {
+            tactic: sum(1 for e in evals if e.tactic == tactic and e.status == "observed")
+            for tactic in sorted({e.tactic for e in evals})
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Audit policy (stdlib-only YAML subset)
+# ---------------------------------------------------------------------------
+# The policy file is a restricted YAML dialect: nested mappings by indentation,
+# lists via "- ", scalar values (string/int/float/bool), and full-line comments.
+# Parsing is hand-rolled because secdiagram's core must stay 100% standard
+# library, and the dialect is deliberately tiny so results stay deterministic.
+
+
+@dataclass(frozen=True, slots=True)
+class AttackPolicy:
+    fail_priorities: tuple[str, ...] = ("P0", "P1")
+    min_score: float = 6.0
+    techniques: tuple[str, ...] = ()
+    ignore_techniques: tuple[str, ...] = ()
+    include_review: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fail_priorities": list(self.fail_priorities),
+            "min_score": self.min_score,
+            "techniques": list(self.techniques),
+            "ignore_techniques": list(self.ignore_techniques),
+            "include_review": self.include_review,
+        }
+
+
+def _policy_scalar(text: str) -> Any:
+    value = text.strip()
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [_policy_scalar(item) for item in inner.split(",")]
+    if value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    if value.lower() in ("null", "none", "~"):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def _parse_policy_yaml(text: str) -> dict[str, Any]:
+    """Parse the restricted policy YAML dialect into nested dicts/lists."""
+    significant: list[tuple[int, str]] = []
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        significant.append((lineno, raw))
+    root: dict[str, Any] = {}
+    stack: list[tuple[int, Any]] = [(-1, root)]
+    for index, (lineno, raw) in enumerate(significant):
+        indent = len(raw) - len(raw.lstrip(" "))
+        if "\t" in raw[:indent]:
+            raise ValueError(f"policy line {lineno}: tabs are not allowed for indentation")
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        parent = stack[-1][1]
+        line = raw.strip()
+        if line.startswith("- "):
+            if not isinstance(parent, list):
+                raise ValueError(f"policy line {lineno}: list item without a list key")
+            parent.append(_policy_scalar(line[2:]))
+            continue
+        if ":" not in line:
+            raise ValueError(f"policy line {lineno}: expected 'key: value'")
+        key, _, rest = line.partition(":")
+        key = key.strip()
+        if not key or " " in key:
+            raise ValueError(f"policy line {lineno}: invalid key {key!r}")
+        rest = rest.strip()
+        if rest == "":
+            nxt = significant[index + 1] if index + 1 < len(significant) else None
+            child_is_list = bool(
+                nxt
+                and len(nxt[1]) - len(nxt[1].lstrip(" ")) > indent
+                and nxt[1].strip().startswith("- ")
+            )
+            child: Any = [] if child_is_list else {}
+            parent[key] = child
+            stack.append((indent, child))
+        else:
+            parent[key] = _policy_scalar(rest)
+    return root
+
+
+def parse_policy(text: str) -> AttackPolicy:
+    data = _parse_policy_yaml(text)
+    if not isinstance(data, dict):
+        raise ValueError("policy root must be a mapping")
+    valid_priorities = ("P0", "P1", "P2", "P3")
+    fail_priorities = data.get("fail_priorities") or []
+    if not isinstance(fail_priorities, list):
+        raise ValueError("fail_priorities must be a list")
+    for item in fail_priorities:
+        if item not in valid_priorities:
+            raise ValueError(f"unknown priority {item!r}; expected one of {', '.join(valid_priorities)}")
+    min_score = data.get("min_score", 6.0)
+    if not isinstance(min_score, (int, float)) or isinstance(min_score, bool) or not 0.0 <= float(min_score) <= 10.0:
+        raise ValueError("min_score must be a number between 0.0 and 10.0")
+    techniques = data.get("techniques") or []
+    ignore = data.get("ignore_techniques") or []
+    for name, value in (("techniques", techniques), ("ignore_techniques", ignore)):
+        if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
+            raise ValueError(f"{name} must be a list of technique ids")
+    known = {rule.technique for rule in ATTACK_RULES}
+    for value in list(techniques) + list(ignore):
+        if value not in known:
+            raise ValueError(f"unknown technique {value!r}; known: {', '.join(sorted(known))}")
+    include_review = data.get("include_review", False)
+    if not isinstance(include_review, bool):
+        raise ValueError("include_review must be a boolean")
+    return AttackPolicy(
+        fail_priorities=tuple(fail_priorities),
+        min_score=float(min_score),
+        techniques=tuple(techniques),
+        ignore_techniques=tuple(ignore),
+        include_review=include_review,
+    )
+
+
+DEFAULT_POLICY_YAML = """\
+# secdiagram ATT&CK audit policy.
+# A technique violates the policy when its status is observed (or review when
+# include_review is true), its risk priority is in fail_priorities, and its
+# score is at least min_score.
+fail_priorities: [P0, P1]
+min_score: 6.0
+include_review: false
+# techniques: []          # empty = evaluate every technique
+# ignore_techniques: []   # technique ids to exempt from this gate
+"""
+
+
+def load_policy(path: Any) -> AttackPolicy:
+    return parse_policy(path.read_text(encoding="utf-8"))
+
+
+def policy_violations(evals: list[AttackEval], policy: AttackPolicy) -> list[AttackEval]:
+    """Return the evaluations that break the policy, deterministically ordered."""
+    allowed = set(policy.techniques) if policy.techniques else {rule.technique for rule in ATTACK_RULES}
+    ignored = set(policy.ignore_techniques)
+    statuses = {"observed", "review"} if policy.include_review else {"observed"}
+    violating: list[AttackEval] = []
+    for evaluation in evals:
+        if evaluation.technique not in allowed or evaluation.technique in ignored:
+            continue
+        if evaluation.status not in statuses:
+            continue
+        if (evaluation.priority or "P3") in policy.fail_priorities or evaluation.max_score >= policy.min_score:
+            violating.append(evaluation)
+    violating.sort(key=lambda e: (-e.max_score, e.technique))
+    return violating
+
+
+def render_attack_summary(evals: list[AttackEval], policy: AttackPolicy, violating: list[AttackEval]) -> str:
+    """Deterministic plain-text audit summary for CI logs."""
+    width = 6
+    lines = [
+        f"ATT&CK audit: {len(evals)} technique(s) evaluated, {len(violating)} violating",
+        "",
+        "Technique | Tactic | Status | Priority | Score | Missing mitigation | Evidence",
+        "---|---|---|---|---|---|---",
+    ]
+    for evaluation in evals:
+        priority = evaluation.priority or "-"
+        score = f"{evaluation.max_score:.1f}" if evaluation.max_score else "-"
+        evidence = "; ".join(evaluation.evidence) or "-"
+        missing = evaluation.missing_mitigation if evaluation.status != "no-evidence" else "-"
+        lines.append(
+            f"{evaluation.technique.ljust(width)} | {evaluation.tactic} | "
+            f"{ATTACK_STATUS_TEXT[evaluation.status]} | {priority} | {score} | {missing} | {evidence}"
+        )
+    if violating:
+        lines.append("")
+        lines.append(
+            "Policy violation: " + ", ".join(
+                f"{e.technique} ({ATTACK_STATUS_TEXT[e.status]}, {e.priority or '-'})"
+                for e in violating
+            )
+        )
+        lines.append(
+            f"Gate: fail_priorities={','.join(policy.fail_priorities) or 'none'} "
+            f"min_score={policy.min_score} include_review={str(policy.include_review).lower()}"
+        )
+    else:
+        lines.append("")
+        lines.append("Policy: PASS")
+    return "\n".join(lines) + "\n"

@@ -1,0 +1,21 @@
+# secdiagram ATT&CK audit policy (default).
+#
+# `secdiagram audit <dir>` loads this file when present at the repository root,
+# otherwise it uses the built-in defaults below. A technique violates the
+# policy when its status is observed (or review when include_review is true),
+# its risk priority is in fail_priorities, and its score is at least min_score.
+#
+# Supported keys:
+#   fail_priorities    list of P0/P1/P2/P3 that break the gate
+#   min_score          minimum risk score (0.0-10.0) that breaks the gate
+#   include_review     also fail on structural "review" signals (default: false)
+#   techniques         allowlist of technique ids; empty = all
+#   ignore_techniques  technique ids exempt from this gate
+#
+# Known techniques: T1190, T1040, T1078, T1552, T1195, T1068.
+
+fail_priorities: [P0, P1]
+min_score: 6.0
+include_review: false
+techniques: []
+ignore_techniques: []

@@ -120,3 +120,34 @@ secdiagram --dir . --sonarqube-report sonar.json --xray-report xray.json --forma
 ```bash
 secdiagram --dir /path/to/monorepo --jobs 8 --cache-dir ~/.cache/secdiagram
 ```
+
+### Continuous Threat Modeling Audit (ATT&CK Policy Gate)
+```bash
+secdiagram audit /path/to/repo --policy policy.yaml --json audit-result.json
+```
+
+Evaluates the parsed architecture against MITRE ATT&CK techniques (e.g. `T1190`
+Exploit Public-Facing Application, `T1040` Network Sniffing, `T1552` Unsecured
+Credentials) with evidence from the scan, prints a technique/mitigation summary,
+and exits `1` when the policy thresholds in `policy.yaml` are violated so
+CI/CD can block the build. When `--policy` is omitted, `<dir>/policy.yaml` is
+used when present, otherwise built-in defaults. `--json` writes a
+deterministic machine-readable result (`policy`, `techniques`, `violations`,
+`pass`).
+
+---
+
+## 5. `secdiagram audit` Subcommand
+
+```text
+secdiagram audit [DIR] [--policy FILE] [--json PATH] [--quiet]
+```
+
+| Flag | Default | Description |
+| :--- | :--- | :--- |
+| `DIR` | `.` | Repository directory to audit |
+| `--policy FILE` | `<dir>/policy.yaml` if present, else built-in | Audit policy file (restricted YAML dialect; see `policy.yaml`) |
+| `--json PATH` | `None` | Write deterministic machine-readable audit result |
+| `--quiet` | `false` | Print only the violation line or PASS |
+
+Exit codes: `0` policy satisfied, `1` policy violated or execution error.
