@@ -29,6 +29,7 @@
 - **Web/API Misconfiguration Checks**: Flags broken JWT validation (`alg=none`, signature/expiry checks off), CORS that trusts any origin **with credentials**, disabled CSRF protection, cookies without `HttpOnly`/`Secure`, XXE-prone XML parsers, non-cryptographic RNGs used for tokens, and JS prototype pollution across C#, JS/TS, PHP, Go, and Java.
 - **Risk-Ranked "Fix First" List**: Scores every finding 0–10 by impact × exposure (anonymous, authenticated, or internal entry point, detected from framework auth markers) × evidence × confidence × CISA KEV, and groups them P0–P3 in reports, SARIF, and diagrams.
 - **STRIDE Threat Model**: Generates `THREAT_MODEL.md` per trust boundary (Internet, data stores, external services, host, supply chain) with evidence-backed statuses, priorities, and mitigations — and states honestly what static analysis cannot assess.
+- **MITRE ATT&CK Audit Gate**: `secdiagram audit <dir>` maps the parsed architecture to ATT&CK techniques (T1190 Exploit Public-Facing Application, T1040 Network Sniffing, T1552 Unsecured Credentials, …) with evidence and missing mitigations, and **fails CI/CD with exit code 1** when findings violate `policy.yaml` thresholds.
 - **CycloneDX 1.6 VEX & SARIF Export**: Generates industry-standard `security.sarif` and CycloneDX 1.6 VEX documents (`vex.json`) with automated reachability justifications (`code_not_reachable`) for dead/internal code.
 - **AI Architectural & Threat Modeling Reviews**: Integrates with local/containerized **Ollama (Qwen, LLaMA, DeepSeek)** or OpenAI endpoints to generate evidence-grounded architectural reviews citing exact `path:line` with zero hallucinations.
 - **100% Deterministic & Air-Gapped**: Byte-for-byte reproducible outputs across runs. Fully functional in offline, isolated, or air-gapped environments.
@@ -50,6 +51,9 @@ python secdiagram.py --dir="." --image
 
 # Generate high-level system overview as primary diagram:
 python secdiagram.py --dir="." --high-level --image
+
+# ATT&CK audit gate for CI/CD - exits 1 on policy violations:
+python secdiagram.py audit . --policy policy.yaml --json audit-result.json
 ```
 
 ### 2. Standalone Container Execution (Docker / Podman)
@@ -107,6 +111,7 @@ By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 - `diagram-taint.mmd` / `.png` — Attack-path diagram: untrusted input → entry points → every function on the path → vulnerable sink.
 - `ARCHITECTURE.md` — Complete markdown architecture report with embedded diagrams and a risk-ranked "Fix first" table.
 - `THREAT_MODEL.md` — STRIDE threat model per trust boundary, backed by findings and their risk priority.
+- `audit-result.json` — Machine-readable ATT&CK audit result (`secdiagram audit --json`): policy, per-technique status/evidence, and violations.
 - `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings with hop-by-hop `metadata.flow` and `metadata.risk`).
 - `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`; `rank` and `riskScore`/`riskPriority` follow the risk model.
 - `vex.json` — CycloneDX 1.6 VEX document with automated reachability justifications.
@@ -125,7 +130,7 @@ For comprehensive guides, references, and deployment patterns, see:
 | :--- | :--- |
 | [**Architecture Diagrams & Image Rendering**](docs/ARCHITECTURE_DIAGRAMS.md) | C4 high-level diagrams, visual tiering, detail modes, PNG/SVG/PDF rendering, and providers. |
 | [**Container & Docker Compose Guide**](docs/CONTAINER_AND_COMPOSE.md) | Standalone Docker & Podman, Windows Git Bash tips, SELinux mode, and local Ollama Compose. |
-| [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
+| [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
 | [**Hardened Platform Server & REST API**](docs/SERVER_API.md) | Daemon mode (`secdiagram serve`), authentication, rate limits, request caps, and config schema. |
 | [**CLI Reference Manual**](docs/CLI_REFERENCE.md) | Complete command-line syntax, options breakdown table, and exit codes. |
 | [**Python Public Facade & Developer API**](docs/PYTHON_API.md) | Stable facade (`secdiagram_core`), taint/reachability queries, SCA bridge, and cache serialization. |
@@ -135,7 +140,7 @@ For comprehensive guides, references, and deployment patterns, see:
 
 ## 🧪 Verification & Testing
 
-`secdiagram` maintains a comprehensive test suite (350+ unit tests) covering AST and lexical indexers for seven languages, interprocedural taint, misconfiguration rules, risk scoring, the threat model, graph builders, image rendering, and deterministic CLI behaviors:
+`secdiagram` maintains a comprehensive test suite (380+ unit tests) covering AST and lexical indexers for seven languages, interprocedural taint, misconfiguration rules, risk scoring, the STRIDE threat model and MITRE ATT&CK audit gate, graph builders, image rendering, and deterministic CLI behaviors. The suite is enforced cross-platform: CI runs the unit-test matrix on Ubuntu **and** Windows for every supported Python version.
 
 ```bash
 # Run unit test suite:

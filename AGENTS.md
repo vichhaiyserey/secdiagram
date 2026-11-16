@@ -12,6 +12,7 @@ All AI agents operating on this codebase **MUST** read, understand, and adhere t
 - **Human-friendly system architecture diagrams** (`secdiagram.com` and C4 style) in Mermaid, PNG, SVG, and PDF.
 - **Detailed architectural relationship graphs** (modules, classes, methods, endpoints, database schemas, queues).
 - **SAST security overlays & threat models** citing exact `path:line` references, exportable to OASIS SARIF v2.1.0.
+- **MITRE ATT&CK audit gates** (`secdiagram audit <dir>`) that evaluate the parsed architecture against ATT&CK techniques and fail CI/CD with exit code 1 when a `policy.yaml` gate is violated.
 - **Evidence-grounded AI architectural narratives** via local Ollama or OpenAI endpoints without hallucinations.
 
 The guiding motto is: ***Small but Gold*** — minimal footprint, zero runtime bloat, maximum reliability.

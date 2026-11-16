@@ -163,7 +163,42 @@ threats static analysis cannot verify such as repudiation and rate limiting)
 and a mitigation. A boundary diagram colours each crossing by its worst
 priority.
 
-### 1.5 Attack-path diagram (`diagram-taint.mmd`)
+### 1.5 MITRE ATT&CK audit gate (`secdiagram audit`)
+
+Continuous threat modeling: the parsed architecture is evaluated against MITRE
+ATT&CK techniques with the same evidence model as the STRIDE table.
+
+```bash
+# CI/CD gate - exits 1 when policy thresholds are violated:
+secdiagram audit . --policy policy.yaml --json audit-result.json
+```
+
+Rules map findings and architectural signals to techniques:
+
+| Technique | Name | Fired by |
+| :--- | :--- | :--- |
+| `T1190` | Exploit Public-Facing Application | Public/unknown-exposure entry points (structural **review** signal) and injection/XSS/path findings on them (**observed**) |
+| `T1040` | Network Sniffing | TLS verification findings (interceptable traffic) |
+| `T1078` | Valid Accounts | JWT, auth and cookie weaknesses |
+| `T1552` | Unsecured Credentials | Credentials committed to source or images |
+| `T1195` | Supply Chain Compromise | Supply-chain, dependency and CI pipeline findings |
+| `T1068` | Exploit for Privilege Escalation | Container/cloud over-privilege findings |
+
+Each technique gets a status (**observed** = findings, **review** = structural
+signal only, **no evidence** = rules ran and matched nothing), a priority and
+score from the risk model, the mitigation, and the missing mitigation. "No
+evidence" is not a proof of absence.
+
+`policy.yaml` (loaded from the audited repository root when present, otherwise
+built-in defaults) defines the gate: `fail_priorities` (default `[P0, P1]`),
+`min_score` (default `6.0`), `include_review` (default `false`), a `techniques`
+allowlist and `ignore_techniques` exemptions. The parser is a restricted
+stdlib-only YAML dialect (nested maps, lists, scalars, comments) - no third
+party dependency. The plain-text summary lists every technique with status,
+priority, missing mitigation and evidence; `--json` writes a deterministic
+machine-readable result. Exit code `0` passes the gate, `1` violates it.
+
+### 1.6 Attack-path diagram (`diagram-taint.mmd`)
 
 Every tainted finding, in every language (Python and Java flows are derived from
 their traces), becomes an attack path: **untrusted input -> entry point ->
