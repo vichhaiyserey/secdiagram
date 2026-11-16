@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .model import Finding, Graph, Loc, stable_id
@@ -314,12 +315,6 @@ def _structural_public_entrypoints(graph: Graph) -> list[str]:
     return signals
 
 
-@dataclass(frozen=True, slots=True)
-class _AttackRuleSpec:
-    rule: AttackRule
-    structural: Callable[[Graph], list[str]] | None = None
-
-
 ATTACK_RULES: tuple[AttackRule, ...] = (
     AttackRule(
         technique="T1190",
@@ -577,7 +572,7 @@ include_review: false
 """
 
 
-def load_policy(path: Any) -> AttackPolicy:
+def load_policy(path: Path) -> AttackPolicy:
     return parse_policy(path.read_text(encoding="utf-8"))
 
 

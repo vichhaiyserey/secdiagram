@@ -23,7 +23,7 @@ from secdiagram_core.threat_model import (
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-_CACHE: dict[str, object] = {}
+_CACHE: dict[str | tuple[str, str], object] = {}
 
 
 def _analyze(name: str):
