@@ -271,19 +271,26 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("could not write output: Network unreachable", stderr)
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Git-Bash path translation only executes under a POSIX/MSYS interpreter; "
+        "native Windows takes the os.name == 'nt' early return in _normalize_cli_path, "
+        "and mocking os.name would make pathlib dispatch to PosixPath (NotImplementedError "
+        "on Python <= 3.11).",
+    )
     def test_normalize_cli_path_git_bash(self) -> None:
         from secdiagram_core.cli import _normalize_cli_path
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            with mock.patch("os.name", "posix"):
+            with mock.patch("os.name", "posix"), mock.patch.object(Path, "exists", autospec=True) as mock_exists:
+                # The fake Git-Bash path does not exist as-is, so the function
+                # must run its translation regex instead of the early return.
+                mock_exists.return_value = False
                 fake_git_bash_path = f"C:/Program Files/Git/{tmp_path.name}"
-                with mock.patch.object(Path, "exists", autospec=True) as mock_exists:
-                    def fake_exists(p):
-                        return str(p).endswith(tmp_path.name)
-                    mock_exists.side_effect = fake_exists
-                    resolved = _normalize_cli_path(fake_git_bash_path)
-                    self.assertTrue(str(resolved).endswith(tmp_path.name))
+                resolved = _normalize_cli_path(fake_git_bash_path)
+                self.assertTrue(str(resolved).endswith(tmp_path.name))
+                self.assertFalse(str(resolved).startswith("C:"))
 
     def test_normalize_cli_path_keeps_new_nested_paths(self) -> None:
         # Regression for #42: a path whose parent does not exist yet must be

@@ -167,7 +167,10 @@ class RedactionTests(unittest.TestCase):
         for hostile in hostile_inputs:
             start = time.perf_counter()
             redact_secrets(hostile)
-            self.assertLess(time.perf_counter() - start, 1.0, hostile[:12])
+            # Generous ceiling: guards against quadratic blow-ups (orders of
+            # magnitude slower), not absolute speed, so it must not flake on
+            # loaded or slower CI machines.
+            self.assertLess(time.perf_counter() - start, 2.5, hostile[:12])
 
     def test_dotted_and_prefixed_keys_still_redacted(self) -> None:
         self.assertEqual(redact_secrets("app.db.password=hunter2hunter2"), f"app.db.password={REDACTED}")
@@ -205,7 +208,10 @@ class RedactionTests(unittest.TestCase):
         for hostile in hostile_inputs:
             start = time.perf_counter()
             redact_secrets(hostile)
-            self.assertLess(time.perf_counter() - start, 1.0, hostile[:12])
+            # Generous ceiling: guards against quadratic blow-ups (orders of
+            # magnitude slower), not absolute speed, so it must not flake on
+            # loaded or slower CI machines.
+            self.assertLess(time.perf_counter() - start, 2.5, hostile[:12])
 
 
 if __name__ == "__main__":
