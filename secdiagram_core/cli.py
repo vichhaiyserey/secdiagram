@@ -27,7 +27,19 @@ from .render_vex import render_vex
 from .risk import score_findings
 from .security_report import build_security_report
 from .taint_flows import render_taint_mermaid
-from .threat_model import build_threat_model, render_threat_model, summarize_threat_model
+from .threat_model import (
+    DEFAULT_POLICY_YAML,
+    attack_status_label,
+    build_threat_model,
+    evaluate_attack,
+    load_policy,
+    parse_policy,
+    policy_violations,
+    render_attack_summary,
+    render_threat_model,
+    summarize_attack,
+    summarize_threat_model,
+)
 
 FORMATS = {"json", "md", "mermaid", "sarif", "png", "svg", "pdf", "image", "html", "vex"}
 
@@ -521,11 +533,106 @@ def server_main(argv: list[str] | None = None) -> int:
     )
 
 
+def audit_main(argv: list[str] | None = None) -> int:
+    """``secdiagram audit <dir>``: ATT&CK evaluation gated by policy.yaml.
+
+    Fails the pipeline with exit code 1 when unmitigated architectural flaws
+    violate the policy thresholds, so CI/CD can block the build.
+    """
+    parser = argparse.ArgumentParser(
+        prog="secdiagram audit",
+        description="Evaluate the parsed architecture against MITRE ATT&CK techniques and fail on policy violations.",
+    )
+    parser.add_argument("dir", nargs="?", default=".", help="repository directory to audit (default: .)")
+    parser.add_argument(
+        "--policy",
+        default=None,
+        metavar="FILE",
+        help="audit policy file (default: <dir>/policy.yaml when present, else built-in defaults)",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_out",
+        default=None,
+        metavar="PATH",
+        help="write the machine-readable audit result to PATH",
+    )
+    parser.add_argument("--quiet", action="store_true", help="print only violations or PASS")
+    args = parser.parse_args(argv)
+    root = _normalize_cli_path(args.dir)
+
+    try:
+        if args.policy:
+            policy = load_policy(_normalize_cli_path(args.policy))
+            policy_source = args.policy
+        else:
+            default_path = root / "policy.yaml"
+            if default_path.exists():
+                policy = load_policy(default_path)
+                policy_source = str(default_path)
+            else:
+                policy = parse_policy(DEFAULT_POLICY_YAML)
+                policy_source = "built-in defaults"
+    except (ValueError, OSError) as exc:
+        print(f"secdiagram: invalid audit policy ({exc})", file=sys.stderr)
+        return 1
+
+    try:
+        result = run_analysis(AnalysisConfig(root=root, security=True))
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        print(f"secdiagram: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # pragma: no cover - defensive top-level guard
+        print(f"secdiagram: analysis failed: {exc}", file=sys.stderr)
+        return 1
+
+    graph = result.graph
+    score_findings(graph)
+    evals = evaluate_attack(graph)
+    violating = policy_violations(evals, policy)
+    summarize_attack(graph, evals)
+
+    if args.json_out:
+        payload = {
+            "repository": result.repo.name,
+            "policy": policy.to_dict(),
+            "policy_source": policy_source,
+            "pass": not violating,
+            "techniques": [evaluation.to_dict() for evaluation in evals],
+            "violations": [evaluation.to_dict() for evaluation in violating],
+        }
+        path = _normalize_cli_path(args.json_out)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            print(f"secdiagram: could not write audit json: {exc}", file=sys.stderr)
+            return 1
+
+    if not args.quiet:
+        print(render_attack_summary(evals, policy, violating), end="")
+
+    if violating:
+        print(
+            f"secdiagram: audit FAILED against {policy_source}: "
+            + ", ".join(
+                f"{e.technique} {e.name} ({attack_status_label(e.status)})" for e in violating
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    if not args.quiet:
+        print(f"secdiagram: audit PASS against {policy_source}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == "serve":
         return server_main(argv[1:])
+    if argv and argv[0] == "audit":
+        return audit_main(argv[1:])
 
     parser = build_parser()
     args = parser.parse_args(argv)
