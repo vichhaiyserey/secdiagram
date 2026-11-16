@@ -167,18 +167,28 @@ def redact_secrets(text: str) -> str:
 
 
 def sanitize_path_text(text: str, root: Path | None = None) -> str:
-    """Remove a repository root prefix from *text* and hide other absolute paths."""
+    """Remove a repository root prefix from *text* and hide other absolute paths.
+
+    The sanitized output is normalized to POSIX separators so reports stay
+    byte-identical across platforms (determinism requirement).
+    """
     if not text:
         return text
     cleaned = text
     if root is not None:
         try:
-            cleaned = cleaned.replace(str(root.resolve()), ".")
+            resolved = str(root.resolve())
+            cleaned = cleaned.replace(resolved, ".")
+            if "\\" in resolved:
+                # Match the forward-slash spelling of the root as well, e.g.
+                # "C:/repo/..." as produced by POSIX-style normalizers.
+                cleaned = cleaned.replace(resolved.replace("\\", "/"), ".")
         except OSError:
             pass
-    if len(cleaned) >= 3 and cleaned[1:3] in {":\\", ":/"} and cleaned[0].isalpha():
+    cleaned = cleaned.replace("\\", "/")
+    if len(cleaned) >= 3 and cleaned[1] == ":" and cleaned[0].isalpha():
         return "[external-path]"
-    if cleaned.startswith("\\\\"):
+    if cleaned.startswith("//"):
         return "[external-path]"
     if cleaned.startswith("/"):
         return "[external-path]"

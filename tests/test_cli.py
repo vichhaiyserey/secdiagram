@@ -288,9 +288,15 @@ class CliTests(unittest.TestCase):
     def test_normalize_cli_path_keeps_new_nested_paths(self) -> None:
         # Regression for #42: a path whose parent does not exist yet must be
         # taken literally, not truncated to an existing ancestor such as "/".
+        # Assert on the REAL platform (no os.name mocking): Windows takes the
+        # `os.name == "nt"` early return, POSIX runs the Git-Bash fallback -
+        # both must preserve the literal path. Never construct or combine
+        # pathlib.Path objects inside an `os.name` mock; pathlib dispatches
+        # its flavour class from os.name at instantiation time, so mocking it
+        # on Windows yields PosixPath objects that cannot be combined.
         from secdiagram_core.cli import _normalize_cli_path
 
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("os.name", "posix"):
+        with tempfile.TemporaryDirectory() as tmp:
             nested = Path(tmp) / "det" / "a"
             self.assertEqual(_normalize_cli_path(str(nested)), nested)
             self.assertEqual(_normalize_cli_path("build/reports/secdiagram"), Path("build/reports/secdiagram"))

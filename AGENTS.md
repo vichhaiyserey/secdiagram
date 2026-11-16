@@ -142,6 +142,10 @@ python -m unittest discover -s tests -v
 ```
 - **Requirement**: The full test suite (currently 210+ tests) must pass with exit code `0`.
 - If new functionality was added, corresponding unit tests must be added in `tests/test_*.py`.
+- **Cross-platform requirement (see CONTRIBUTING.md "Cross-Platform Unit Test Requirements")**:
+  - Never construct or combine `pathlib.Path` objects inside an `os.name` mock (pathlib dispatches its flavour class from `os.name`; mocking it on Windows raises `UnsupportedOperation`).
+  - Never assert platform-native path separators (`\`) in test expectations; runtime output is normalized to forward slashes for determinism.
+  - CI runs the unit-test matrix on `ubuntu-latest` **and** `windows-latest` for every supported Python version; tests that fail on either OS are merge blockers, not local-only issues.
 
 ### Step 2: Verify Code Quality & Type Safety
 ```bash
