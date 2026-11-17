@@ -6,14 +6,16 @@ import argparse
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import __version__
 from .analyzer import AnalysisConfig, run_analysis
-from .baseline import apply_baseline, ignore_baseline, load_baseline, write_baseline
+from .baseline import apply_baseline, ignore_baseline, load_suppressions, write_baseline
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .llm import NarrativeError, generate_narrative
 from .model import SEVERITY_RANK
+from .policy import POLICY_MODES, apply_policy
 from .protocols import get_registered_exporters
 from .redaction import redact_secrets
 from .render_html import render_html
@@ -319,9 +321,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fail-on",
         type=str.lower,
-        choices=["critical", "high", "medium", "low", "info", "none"],
+        choices=["critical", "high", "medium", "low", "info", "block", "none"],
         default="none",
-        help="exit with code 2 when a finding at or above this severity exists",
+        help="exit with code 2 when a finding at or above this severity exists; 'block' fails on policy block decisions (implies --policy strict)",
+    )
+    parser.add_argument(
+        "--policy",
+        type=str.lower,
+        choices=list(POLICY_MODES),
+        default=None,
+        help=(
+            "enforcement policy mode: shadow (record decisions, never fail CI), "
+            "report-only (record and surface in reports), strict (block decisions fail CI; exit 2)"
+        ),
     )
     parser.add_argument(
         "--baseline",
@@ -713,6 +725,8 @@ def main(argv: list[str] | None = None) -> int:
         else out / "security.baseline.json"
     )
     baseline_label = args.baseline if args.baseline else baseline_path.name
+    active_suppressions: dict[str, dict[str, str]] = {}
+    expired_suppressions: dict[str, dict[str, str]] = {}
     if baseline_mode:
         if args.create_baseline:
             count = write_baseline(graph, baseline_path)
@@ -720,9 +734,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"secdiagram: created baseline with {count} finding(s): {baseline_path}", file=sys.stderr)
             written.append(baseline_path)
         else:
-            baseline_ids: set[str] = set()
             try:
-                baseline_ids = load_baseline(baseline_path)
+                active_s, expired_s, legacy_ids, schema_v = load_suppressions(baseline_path, date.today().isoformat())
             except FileNotFoundError:
                 print(
                     f"secdiagram: baseline file not found: {baseline_path} "
@@ -738,15 +751,38 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 ignore_baseline(graph, baseline_label)
             else:
-                known, new = apply_baseline(graph, baseline_ids, baseline_label)
-                print(
-                    f"secdiagram: baseline {baseline_label} suppresses {known} known finding(s); "
-                    f"{new} new finding(s) remain",
-                    file=sys.stderr,
-                )
+                if legacy_ids:
+                    known, new = apply_baseline(graph, legacy_ids, baseline_label)
+                    print(
+                        f"secdiagram: baseline {baseline_label} suppresses {known} known finding(s); "
+                        f"{new} new finding(s) remain",
+                        file=sys.stderr,
+                    )
+                else:
+                    active_suppressions, expired_suppressions = active_s, expired_s
+                    apply_baseline(graph, set(active_s) | set(expired_s), baseline_label)
+                    print(
+                        f"secdiagram: governed baseline {baseline_label} (schema {schema_v}): "
+                        f"{len(active_s)} active suppression(s), {len(expired_s)} expired (reactivated)",
+                        file=sys.stderr,
+                    )
 
     # Re-rank after confidence filtering and baseline suppression.
     score_findings(graph)
+    # Policy layer: enforcement decisions. Runs when --policy is given, when
+    # --fail-on block is used (implies strict), or when governed suppressions
+    # are in play. Without any of these, findings stay informational and all
+    # outputs are byte-identical to pre-policy runs.
+    policy_mode = args.policy or ("strict" if args.fail_on == "block" else None)
+    policy_summary = None
+    if policy_mode or active_suppressions or expired_suppressions:
+        policy_summary = apply_policy(
+            graph,
+            mode=policy_mode or "shadow",
+            active_suppressions=active_suppressions,
+            expired_suppressions=expired_suppressions,
+            dependency_usage=result.dependency_usage,
+        )
     threats = build_threat_model(graph)
     summarize_threat_model(graph, threats)
     meta = dict(graph.meta)
@@ -919,6 +955,7 @@ def main(argv: list[str] | None = None) -> int:
                 fail_on=args.fail_on,
                 reproduce=_security_reproduce_command(args),
                 narrative=narrative_text,
+                policy=graph.meta.get("policy"),
             )
             if args.security_report in {"md", "both"}:
                 path = out / "SECURITY_REVIEW.md"
@@ -1039,7 +1076,18 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    if args.fail_on != "none":
+    if policy_summary is not None:
+        decision_bits = [f"{key}={value}" for key, value in sorted(policy_summary.decisions.items()) if value]
+        print(
+            f"secdiagram: policy {policy_summary.mode}: " + ", ".join(decision_bits or ["no findings"])
+            + (f", {len(policy_summary.reactivated)} reactivated" if policy_summary.reactivated else ""),
+            file=sys.stderr,
+        )
+
+    if args.fail_on == "block" or args.policy == "strict":
+        if any(finding.enforcement == "block" and not finding.baseline for finding in graph.findings):
+            return 2
+    elif args.fail_on != "none":
         threshold = SEVERITY_RANK[args.fail_on]
         if any(
             SEVERITY_RANK.get(finding.severity, 0) >= threshold and not finding.baseline
