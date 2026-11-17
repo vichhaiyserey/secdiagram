@@ -30,8 +30,9 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
            [--llm-template {comprehensive,threat-model,remediation,compliance}]
            [--llm-timeout LLM_TIMEOUT] [--llm-max-tokens LLM_MAX_TOKENS]
            [--llm-context-chars LLM_CONTEXT_CHARS]
-           [--fail-on {critical,high,medium,low,info,none}]
-           [--baseline FILE] [--create-baseline]
+            [--fail-on {critical,high,medium,low,info,block,none}]
+            [--policy {shadow,report-only,strict}]
+            [--baseline FILE] [--create-baseline]
            [--quiet] [--version]
 ```
 
@@ -67,7 +68,8 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
 | `--advisory-db PATH` | `none` | Validate imported CVEs against a local CISA KEV/NVD/OSV JSON file or directory (repeatable) |
 | `--min-confidence SCORE` | `0.5` | Drop call/inheritance edges below this confidence (`0.0`-`1.0`) |
 | `--min-finding-confidence SCORE` | `0.0` | Drop security findings below this confidence (`0.0`-`1.0`) |
-| `--fail-on SEVERITY` | `none` | Return exit code `2` if findings meet or exceed severity threshold: `critical`, `high`, `medium`, `low`, `info`, `none` |
+| `--fail-on SEVERITY` | `none` | Return exit code `2` if findings meet or exceed severity threshold: `critical`, `high`, `medium`, `low`, `info`, `block` (policy block decisions; implies `--policy strict`), `none` |
+| `--policy MODE` | `None` (informational) | Enforcement policy layer separating detection from CI impact: `shadow` (record decisions, never fail CI), `report-only` (record and surface in reports), `strict` (block decisions fail CI with exit code `2`). Decisions combine severity, decision confidence (>= 0.90), evidence quality, reachability, exposure, and mitigation status; LLM-produced findings never block |
 | `--baseline FILE` | `none` | Suppress findings listed in baseline so CI fails only on NEW findings |
 | `--create-baseline` | `false` | Generate `security.baseline.json` from the current scan and exit `0` |
 | `--ollama [MODEL]` | `qwen2.5-coder` | Generate AI review using local Ollama (`qwen2.5-coder`, `qwen2.5:7b`, etc.) |
@@ -88,9 +90,9 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
 
 | Exit Code | Meaning |
 | :---: | :--- |
-| `0` | **Success**: Analysis completed without errors, and no `--fail-on` security threshold was violated. Also returned on `--help`, `--version`, or `--create-baseline`. |
+| `0` | **Success**: Analysis completed without errors, and no `--fail-on` security threshold or strict-policy block decision was violated. Also returned on `--help`, `--version`, or `--create-baseline`. |
 | `1` | **Execution Error**: Fatal runtime error, invalid argument combination, missing required file, or unhandled exception. |
-| `2` | **Security Violation**: Active security or IaC findings met or exceeded the threshold defined in `--fail-on` (e.g. `--fail-on high`). |
+| `2` | **Security Violation**: Active security or IaC findings met or exceeded the threshold defined in `--fail-on` (e.g. `--fail-on high`), or a strict-policy run (`--policy strict` / `--fail-on block`) produced at least one `block` enforcement decision. |
 
 ---
 
@@ -109,6 +111,15 @@ secdiagram --dir . --high-level --image svg
 ### Strict CI Pipeline with SARIF Export and Failure on High Vulnerabilities
 ```bash
 secdiagram --dir . --format sarif,json,html --fail-on high --baseline .secdiagram/security.baseline.json
+```
+
+### High-Confidence Policy Rollout (shadow, then strict)
+```bash
+# Step 1: record enforcement decisions without affecting CI
+secdiagram --dir . --policy shadow --format sarif,json
+
+# Step 2: fail CI only on evidence-backed block decisions
+secdiagram --dir . --policy strict --format sarif,json
 ```
 
 ### External Scanner Ingestion with CycloneDX VEX Export

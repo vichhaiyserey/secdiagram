@@ -80,6 +80,45 @@ def _precision(confidence: float) -> str:
     return "low"
 
 
+def _policy_mode(graph: Graph) -> str:
+    policy = graph.meta.get("policy") or {}
+    return str(policy.get("mode") or "")
+
+
+def _result_level(finding: Finding, policy_mode: str) -> str:
+    """SARIF level for a result.
+
+    Outside the policy layer the severity mapping is unchanged. Under a policy
+    mode, ``error`` is reserved for ``block`` decisions; review and
+    informational findings are ``note``; suppressed findings are ``none``.
+    """
+    if not policy_mode:
+        return LEVEL.get(finding.severity, "warning")
+    if finding.baseline:
+        return "none"
+    if finding.enforcement == "block":
+        return "error"
+    if finding.enforcement == "suppressed":
+        return "none"
+    return "note"
+
+
+def _policy_properties(finding: Finding, policy_mode: str) -> dict[str, Any]:
+    if not policy_mode:
+        return {}
+    props: dict[str, Any] = {
+        "enforcement": finding.enforcement,
+        "policyReason": finding.policy_reason,
+        "confidenceScore": finding.confidence_score,
+        "reachability": finding.reachability,
+        "exposureClassification": finding.exposure,
+        "evidenceQuality": finding.evidence_quality,
+    }
+    if finding.required_actions:
+        props["requiredActions"] = list(finding.required_actions)
+    return props
+
+
 def _cwe_uri(cwe: str | None) -> str:
     if cwe and "-" in cwe:
         return f"https://cwe.mitre.org/data/definitions/{cwe.split('-', 1)[1]}.html"
@@ -179,6 +218,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
     findings = graph.sorted_findings()
     if skip_baseline:
         findings = [finding for finding in findings if not finding.baseline]
+    policy_mode = _policy_mode(graph)
 
     rules: list[dict[str, Any]] = []
     rule_index: dict[str, int] = {}
@@ -192,12 +232,15 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 "severity": finding.severity,
                 "confidence": finding.confidence,
                 "recommendation": finding.recommendation,
+                "blocks": 0,
             }
             rule_state[key] = state
         else:
             if SEVERITY_RANK.get(finding.severity, 0) > SEVERITY_RANK.get(state["severity"], 0):
                 state["severity"] = finding.severity
             state["confidence"] = max(state["confidence"], finding.confidence)
+        if finding.enforcement == "block":
+            state["blocks"] += 1
         if key not in rule_index:
             rule_index[key] = len(rules)
             description = CATEGORY_DESCRIPTIONS.get(finding.category, finding.title)
@@ -227,7 +270,12 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
             state["severity"],
             state["confidence"],
         )
-        rule["defaultConfiguration"] = {"level": LEVEL.get(state["severity"], "warning")}
+        if policy_mode:
+            # Under the policy layer, error is reserved for block decisions.
+            level = "error" if state["blocks"] else "note"
+        else:
+            level = LEVEL.get(state["severity"], "warning")
+        rule["defaultConfiguration"] = {"level": level}
 
     baseline = graph.meta.get("security_baseline") or {}
     baseline_file = baseline.get("file", "security.baseline.json")
@@ -237,7 +285,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
         result: dict[str, Any] = {
             "ruleId": key,
             "ruleIndex": rule_index[key],
-            "level": LEVEL.get(finding.severity, "warning"),
+            "level": _result_level(finding, policy_mode),
             "rank": _result_rank(finding),
             "message": {"text": finding.message},
             "partialFingerprints": {"secdiagramFindingId/v1": finding.id},
@@ -248,6 +296,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 "recommendation": finding.recommendation,
                 "source": finding.source,
                 **_risk_properties(finding),
+                **_policy_properties(finding, policy_mode),
             },
         }
         if finding.external_id:
@@ -285,7 +334,8 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 {
                     "kind": "external",
                     "status": "accepted",
-                    "justification": f"Known finding suppressed by baseline {baseline_file}.",
+                    "justification": finding.policy_reason
+                    or f"Known finding suppressed by baseline {baseline_file}.",
                 }
             ]
         elif baseline:
@@ -337,6 +387,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
     if notifications:
         invocation["notifications"] = notifications
 
+    policy_meta = graph.meta.get("policy") or None
     payload = {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
@@ -355,6 +406,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 "properties": {
                     "coverage": coverage,
                     "baseline": baseline or None,
+                    **({"policy": policy_meta} if policy_meta else {}),
                 },
             }
         ],

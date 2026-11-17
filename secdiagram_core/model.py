@@ -171,6 +171,17 @@ class Finding:
     source: str = "secdiagram"
     external_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Policy layer (see policy.py). Every finding defaults to informational;
+    # enforcement is only upgraded by an explicit policy evaluation.
+    enforcement: str = "informational"
+    policy_reason: str = ""
+    risk_score: float = 0.0
+    confidence_score: float = 0.0
+    reachability: str = ""
+    exposure: str = ""
+    mitigation_status: str = "none"
+    evidence_quality: str = ""
+    required_actions: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -195,6 +206,24 @@ class Finding:
             out["external_id"] = self.external_id
         if self.metadata:
             out["metadata"] = self.metadata
+        if self.enforcement != "informational":
+            out["enforcement"] = self.enforcement
+        if self.policy_reason:
+            out["policy_reason"] = self.policy_reason
+        if self.risk_score > 0:
+            out["risk_score"] = round(float(self.risk_score), 2)
+        if self.confidence_score > 0:
+            out["confidence_score"] = round(float(self.confidence_score), 2)
+        if self.reachability:
+            out["reachability"] = self.reachability
+        if self.exposure:
+            out["exposure"] = self.exposure
+        if self.mitigation_status not in ("none", ""):
+            out["mitigation_status"] = self.mitigation_status
+        if self.evidence_quality:
+            out["evidence_quality"] = self.evidence_quality
+        if self.required_actions:
+            out["required_actions"] = list(self.required_actions)
         return out
 
     @classmethod
@@ -215,6 +244,15 @@ class Finding:
             source=str(data.get("source", "secdiagram")),
             external_id=data.get("external_id"),
             metadata=dict(data.get("metadata", {})),
+            enforcement=str(data.get("enforcement", "informational")),
+            policy_reason=str(data.get("policy_reason", "")),
+            risk_score=float(data.get("risk_score", 0.0)),
+            confidence_score=float(data.get("confidence_score", 0.0)),
+            reachability=str(data.get("reachability", "")),
+            exposure=str(data.get("exposure", "")),
+            mitigation_status=str(data.get("mitigation_status", "none")),
+            evidence_quality=str(data.get("evidence_quality", "")),
+            required_actions=[str(action) for action in data.get("required_actions", [])],
         )
 
 

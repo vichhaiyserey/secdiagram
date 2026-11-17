@@ -361,3 +361,21 @@ secdiagram --dir . --baseline .secdiagram/security.baseline.json --fail-on high
 ```
 
 The baseline uses deterministic location and finding fingerprints. Suppressed counts are reported in all output artifacts.
+
+### 7.1 Governed suppressions (schema 2)
+
+Baselines written by `--create-baseline` use schema 2: every entry records the finding fingerprint, rule id, scope, reason, owner, approver, ticket, and expiry date. Entries created automatically are marked *pending governed triage* and suppress without expiry until an owner, approver, ticket, and `expires` date (`YYYY-MM-DD`) are filled in. Expired suppressions automatically reactivate the finding; suppressed findings remain visible in every report and in `graph.json`. Schema-1 baselines are still accepted read-only and suppress without expiry.
+
+### 7.2 High-confidence enforcement policy
+
+Detection and enforcement are separated: only high-risk, evidence-backed, reachable findings block CI, everything else stays informational. A finding can block only when severity is critical/high, decision confidence is >= 0.90, evidence is deterministic or externally verified, the issue is reachable from an exposed or privileged entry point, no compensating control exists, and the category is in the approved high-risk scope (verified secrets, known-exploited reachable dependencies, verified reachable injection findings). LLM-produced findings never block.
+
+```bash
+# 1. Shadow mode: record decisions, CI never fails because of them
+secdiagram --dir . --policy shadow --format sarif,json
+
+# 2. Strict mode: block decisions fail CI (exit code 2)
+secdiagram --dir . --policy strict --format sarif,json
+```
+
+In SARIF output under a policy mode, `error` is reserved for `block` decisions; review and informational findings are `note`; suppressed findings are `none`. The `ARCHITECTURE.md` report gains an "Enforcement policy" section listing block decisions, required actions, and reactivated suppressions.

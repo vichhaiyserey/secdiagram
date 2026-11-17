@@ -159,6 +159,43 @@ def _attack_paths_section(graph: Graph, limit: int = 10) -> list[str]:
     return out
 
 
+def _policy_section(graph: Graph, policy: dict[str, Any]) -> list[str]:
+    """Enforcement-policy decisions: what blocks, what needs review, what is exempt."""
+    mode = str(policy.get("mode") or "")
+    decisions = policy.get("decisions") or {}
+    blocks = policy.get("blocks") or []
+    suppressed = policy.get("suppressed") or []
+    reactivated = policy.get("reactivated") or []
+    out = ["## Enforcement policy", ""]
+    bits = [f"{key}: {value}" for key, value in sorted(decisions.items()) if value]
+    header = f"Mode **{mode}**. Decisions: " + (", ".join(bits) or "none") + "."
+    if mode == "shadow":
+        header += " Shadow mode: decisions are recorded but CI is not affected."
+    out.append(header)
+    out.append("")
+    if blocks:
+        out.append("| Finding | Policy reason | Confidence | Reachability | Exposure | Required actions |")
+        out.append("|---|---|---|---|---|---|")
+        by_id = {finding.id: finding for finding in graph.findings}
+        for finding_id in blocks:
+            finding = by_id.get(finding_id)
+            if finding is None:
+                continue
+            actions = "; ".join(finding.required_actions) if finding.required_actions else "-"
+            out.append(
+                f"| {_esc(finding.title)} | {_esc(finding.policy_reason)} | {finding.confidence_score} | "
+                f"{_esc(finding.reachability)} | {_esc(finding.exposure)} | {_esc(actions)} |"
+            )
+        out.append("")
+    if suppressed:
+        out.append(f"Suppressed by governed exception: **{len(suppressed)}** finding(s) (still listed above and in `graph.json`).")
+        out.append("")
+    if reactivated:
+        out.append(f"Reactivated after suppression expiry: **{len(reactivated)}** finding(s).")
+        out.append("")
+    return out
+
+
 def render_markdown(
     graph: Graph,
     meta: dict[str, Any] | None = None,
@@ -330,8 +367,10 @@ def render_markdown(
 
     lines.extend(_fix_first_section(graph))
 
+    policy = meta.get("policy") or {}
     if graph.findings:
         new_findings = [finding for finding in graph.sorted_findings() if not finding.baseline]
+        policy_active = bool(policy.get("mode"))
         if baseline_info and not new_findings:
             lines.append("## Security review")
             lines.append("")
@@ -348,17 +387,32 @@ def render_markdown(
                 "Tainted findings rise to critical; risky patterns without taint remain review items."
             )
             lines.append("")
-            lines.append("| Severity | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
-            lines.append("|---|---|---|---|---|---|---|")
-            for finding in new_findings:
-                ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
-                trace = " -> ".join(f"`{_esc(loc.ref)}`" for loc in finding.trace) if finding.trace else "-"
-                lines.append(
-                    f"| **{_esc(finding.severity)}** | {_esc(finding.category)} | "
-                    f"{_esc(finding.cwe or '-')} | {ref} | {trace} | {_esc(finding.title)} | "
-                    f"{_esc(finding.recommendation)} |"
-                )
+            if policy_active:
+                lines.append("| Severity | Enforcement | Confidence | Exposure | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
+                lines.append("|---|---|---|---|---|---|---|---|---|---|")
+                for finding in new_findings:
+                    ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
+                    trace = " -> ".join(f"`{_esc(loc.ref)}`" for loc in finding.trace) if finding.trace else "-"
+                    lines.append(
+                        f"| **{_esc(finding.severity)}** | {_esc(finding.enforcement)} | "
+                        f"{finding.confidence_score or finding.confidence} | {_esc(finding.exposure or '-')} | "
+                        f"{_esc(finding.category)} | {_esc(finding.cwe or '-')} | {ref} | {trace} | "
+                        f"{_esc(finding.title)} | {_esc(finding.recommendation)} |"
+                    )
+            else:
+                lines.append("| Severity | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
+                lines.append("|---|---|---|---|---|---|---|")
+                for finding in new_findings:
+                    ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
+                    trace = " -> ".join(f"`{_esc(loc.ref)}`" for loc in finding.trace) if finding.trace else "-"
+                    lines.append(
+                        f"| **{_esc(finding.severity)}** | {_esc(finding.category)} | "
+                        f"{_esc(finding.cwe or '-')} | {ref} | {trace} | {_esc(finding.title)} | "
+                        f"{_esc(finding.recommendation)} |"
+                    )
             lines.append("")
+        if policy_active:
+            lines.extend(_policy_section(graph, policy))
 
     lines.extend(_attack_paths_section(graph))
 
