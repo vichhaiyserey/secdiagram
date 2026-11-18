@@ -170,6 +170,9 @@ def _thread_flow(trace: list[Loc]) -> list[dict[str, Any]]:
 
 def _rule_key(finding: Finding) -> str:
     prefix = "" if finding.source == "secdiagram" else f"{finding.source}:"
+    rule_id = finding.metadata.get("rule_id")
+    if rule_id:
+        return f"{prefix}{rule_id}"
     return f"{prefix}{finding.category}:{finding.cwe or ''}"
 
 

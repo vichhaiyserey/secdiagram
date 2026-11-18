@@ -105,8 +105,11 @@ IAC_NAMES = {
     "docker-compose.yaml",
     "compose.yml",
     "compose.yaml",
+    "jenkinsfile",
+    ".gitlab-ci.yml",
 }
-IAC_SUFFIXES = (".tf", ".yaml", ".yml")
+IAC_PREFIXES = ("dockerfile", "jenkinsfile")
+IAC_SUFFIXES = (".tf", ".tfvars", ".yaml", ".yml")
 
 
 @dataclass(slots=True)
@@ -130,7 +133,7 @@ class RepoInfo:
         for path in self.rel_files:
             lower = path.lower()
             name = lower.rsplit("/", 1)[-1]
-            if name.startswith("dockerfile") or name in IAC_NAMES:
+            if name.startswith(IAC_PREFIXES) or name in IAC_NAMES:
                 out.append(path)
             elif lower.endswith(IAC_SUFFIXES) and (
                 "/.github/workflows/" in f"/{lower}"
@@ -138,7 +141,7 @@ class RepoInfo:
                 or "/kubernetes/" in f"/{lower}"
                 or "/manifests/" in f"/{lower}"
                 or "/deploy/" in f"/{lower}"
-                or lower.endswith(".tf")
+                or lower.endswith((".tf", ".tfvars"))
             ):
                 out.append(path)
         return out
