@@ -158,10 +158,18 @@ Application, Application -> Data stores, Application -> External services,
 Application -> Host/runtime, Source & supply chain - with a STRIDE category, an
 evidence-backed status (**observed** with the findings and their top priority,
 **review** for structural signals such as entry points without detected auth,
-**no evidence** when the rules ran and matched nothing, **not assessed** for
+**no evidence** when there is no matching active finding in the graph, **not assessed** for
 threats static analysis cannot verify such as repudiation and rate limiting)
-and a mitigation. A boundary diagram colours each crossing by its worst
+and a coverage overview. A boundary diagram colours each crossing by its worst
 priority.
+
+Individual source-backed records separate facts from assessments, link affected
+components/assets and static data flows, and include severity, confidence,
+exploitability limits and verification steps. Missing authentication markers are
+informational review signals, not confirmed bypasses. The CLI also writes
+`threat-model.json` with security-enabled `json` or `md` outputs. Compare versions
+offline with `secdiagram threat-diff before/threat-model.json after/threat-model.json`.
+See [Threat modeling](THREAT_MODELING.md) for the schema and interpretation limits.
 
 ### 1.5 MITRE ATT&CK audit gate (`secdiagram audit`)
 

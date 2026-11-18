@@ -46,6 +46,7 @@ from .security_report import build_security_report
 from .taint_flows import render_taint_mermaid
 from .threat_model import (
     DEFAULT_POLICY_YAML,
+    Threat,
     attack_status_label,
     build_threat_model,
     evaluate_attack,
@@ -56,6 +57,14 @@ from .threat_model import (
     render_threat_model,
     summarize_attack,
     summarize_threat_model,
+)
+from .threat_review import (
+    build_threat_snapshot,
+    diff_threat_snapshots,
+    load_threat_snapshot,
+    render_snapshot,
+    render_threat_diff,
+    threat_analysis_context,
 )
 
 FORMATS = {"json", "md", "mermaid", "sarif", "png", "svg", "pdf", "image", "html", "vex"}
@@ -109,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="secdiagram",
         description="Build deterministic architecture, relationship, and security diagrams for a Python repository.",
+        epilog="Compare saved threat models offline: secdiagram threat-diff BEFORE.json AFTER.json --format md|json [--out FILE]",
     )
     parser.add_argument("--dir", default=".", help="repository directory to analyze (default: .)")
     parser.add_argument("--dry-run", action="store_true", help="validate inputs and discover files without parsing, cache writes, rendering or network requests")
@@ -702,6 +712,50 @@ def _parse_role_args(role_args: list[str]) -> dict[str, str]:
     return manual_roles
 
 
+def _write_threat_outputs(graph: Graph, threats: list[Threat], args: argparse.Namespace, out: Path) -> list[Path]:
+    if not args.security or not {"json", "md"}.intersection(args.format):
+        return []
+    paths = [out / "threat-model.json"]
+    paths[0].write_text(render_snapshot(build_threat_snapshot(graph, threats)), encoding="utf-8", newline="\n")
+    if "md" in args.format:
+        paths.append(out / "THREAT_MODEL.md")
+        paths[-1].write_text(render_threat_model(graph, threats), encoding="utf-8", newline="\n")
+    return paths
+
+
+def threat_diff_main(argv: list[str], summary: dict[str, Any] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="secdiagram threat-diff", description="Compare two saved threat-model.json snapshots without executing or checking out source.")
+    parser.add_argument("before", help="older threat-model.json snapshot")
+    parser.add_argument("after", help="newer threat-model.json snapshot")
+    parser.add_argument("--format", choices=("md", "json"), default="md")
+    parser.add_argument("--out", help="write diff to this file; otherwise print to stdout")
+    parser.add_argument("--output", choices=("text", "json"), default="text", help="use the standard CI JSON console envelope")
+    args = parser.parse_args(argv)
+    before, after = _normalize_cli_path(args.before), _normalize_cli_path(args.after)
+    output = _normalize_cli_path(args.out) if args.out else None
+    if output and output.resolve() in {before.resolve(), after.resolve()}:
+        parser.error("--out must differ from both input snapshots")
+    try:
+        diff = diff_threat_snapshots(load_threat_snapshot(before), load_threat_snapshot(after))
+        if output and output.exists() and (output.samefile(before) or output.samefile(after)):
+            raise ValueError("--out aliases an input snapshot; choose a separate output file")
+        if summary is not None:
+            summary["diff"] = diff
+        text = render_snapshot(diff) if args.format == "json" else render_threat_diff(diff)
+        if output:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(text, encoding="utf-8", newline="\n")
+        elif args.output != "json":
+            print(text, end="")
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+        message = redact_secrets(f"cannot compare threat snapshots: {exc}; provide readable threat-model.json files from the same schema")
+        if summary is not None:
+            summary["error"] = message
+        print(f"secdiagram: {message}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _validate_diagrams(graph: Graph, hla: HighLevelArchitecture, args: argparse.Namespace) -> bool:
     """Validate the primary projection and accompanying high-level diagram before writes."""
     models = [build_diagram_model(graph, hla)]
@@ -760,6 +814,15 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
     graph = ws_result.merged_graph
     # Score and build threat model on merged graph
     score_findings(graph)
+    graph.meta["workspace_analysis"] = {
+        "repositories": {
+            name: {"analysis": threat_analysis_context(result.graph), "commit": result.repo.commit}
+            for name, result in sorted(ws_result.per_repo.items())
+        },
+        "unavailable_repositories": sorted(role.name for role in ws_result.workspace.repos if role.name not in ws_result.per_repo),
+    }
+    threats = build_threat_model(graph)
+    summarize_threat_model(graph, threats)
     hla = build_high_level_architecture(workspace_root, graph)
 
     # Enrich HLA with workspace role metadata
@@ -791,6 +854,7 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
     mermaid_text: str | None = None
 
     try:
+        written.extend(_write_threat_outputs(graph, threats, args, out))
         if "json" in args.format:
             path = out / "graph.json"
             write_json(graph, path)
@@ -867,6 +931,8 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
         return server_main(argv[1:])
     if argv and argv[0] == "audit":
         return audit_main(argv[1:])
+    if argv and argv[0] == "threat-diff":
+        return threat_diff_main(argv[1:], summary)
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1128,6 +1194,7 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
 
     progress("report generation")
     try:
+        written.extend(_write_threat_outputs(graph, threats, args, out))
         if "json" in args.format:
             path = out / "graph.json"
             write_json(graph, path)
@@ -1139,10 +1206,6 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
                 encoding="utf-8",
                 newline="\n",
             )
-            written.append(path)
-        if "md" in args.format and args.security:
-            path = out / "THREAT_MODEL.md"
-            path.write_text(render_threat_model(graph, threats), encoding="utf-8", newline="\n")
             written.append(path)
         if "mermaid" in args.format:
             if args.diagram_detail in {"high-level", "overview"}:

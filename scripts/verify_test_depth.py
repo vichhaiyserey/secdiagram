@@ -42,6 +42,11 @@ CASES = {
     "python_sast_disabled": "tests.test_security.SecurityTests.test_tainted_command_and_sql_are_critical",
     "polyglot_sast_disabled": "tests.test_polyglot.CSharpTests.test_findings_exact",
     "parallel_workers_fail": "tests.test_scale.ScaleTests.test_parallel_matches_serial",
+    "threat_evidence_dropped": "tests.test_threat_review.ThreatRecordTests.test_source_facts_components_assets_and_ordered_flow",
+    "auth_review_claims_confirmed": "tests.test_threat_review.ThreatRecordTests.test_route_review_does_not_claim_missing_authorization_or_input_acceptance",
+    "threat_flow_dropped": "tests.test_threat_review.ThreatRecordTests.test_source_facts_components_assets_and_ordered_flow",
+    "threat_diff_hides_changes": "tests.test_threat_review.ThreatDiffTests.test_add_remove_change_and_noop_have_complete_review_evidence",
+    "threat_diff_hides_context": "tests.test_threat_review.ThreatDiffTests.test_scan_coverage_and_suppression_changes_are_visible",
 }
 
 
@@ -115,6 +120,37 @@ def inject(case: str, stack: contextlib.ExitStack) -> None:
         stack.enter_context(mock.patch("secdiagram_core.analyzer.analyze_polyglot_security", return_value=[]))
     elif case == "parallel_workers_fail":
         stack.enter_context(mock.patch("secdiagram_core.ast_index.ProcessPoolExecutor", side_effect=OSError("mock worker startup failure")))
+    elif case in {"threat_evidence_dropped", "auth_review_claims_confirmed", "threat_flow_dropped"}:
+        from secdiagram_core import threat_model
+
+        original_attach = threat_model.attach_threat_records
+
+        def corrupt_records(graph, threats):
+            original_attach(graph, threats)
+            for threat in threats:
+                for record in threat.records:
+                    if case == "threat_evidence_dropped":
+                        record["evidence"] = []
+                    elif case == "auth_review_claims_confirmed" and record["status"] == "review":
+                        record["status"] = "observed"
+                    elif case == "threat_flow_dropped":
+                        record["data_flows"] = []
+
+        stack.enter_context(mock.patch.object(threat_model, "attach_threat_records", side_effect=corrupt_records))
+    elif case in {"threat_diff_hides_changes", "threat_diff_hides_context"}:
+        from secdiagram_core import threat_review
+
+        original_diff = threat_review.diff_threat_snapshots
+
+        def corrupt_diff(before, after):
+            result = original_diff(before, after)
+            if case == "threat_diff_hides_changes":
+                result["changed"] = []
+            else:
+                result["context_changes"] = {}
+            return result
+
+        stack.enter_context(mock.patch("tests.test_threat_review.diff_threat_snapshots", side_effect=corrupt_diff))
     else:
         raise ValueError(f"unknown fault case: {case}")
 

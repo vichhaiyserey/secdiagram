@@ -1,6 +1,7 @@
 # Unit-test accuracy and depth audit
 
-This audit accompanies issue #71 and PR #72. It covers all 39 unit-test files,
+The original audit accompanies issue #71 and PR #72. Issue #73 extends it with
+22 threat-model regression tests; the suite now contains 603 tests in 40 files,
 including the diagram review fixes and the strengthened regression suite.
 The review checks assertion meaning, fixture preconditions, mock boundaries,
 exception handling, skips, shared mutable state and test discovery. Test or
@@ -18,7 +19,8 @@ assertion counts are inventory measures, not proof of correctness.
 | Rendering, HTML, images and security reports | 55 | Escaping, source links, styles, exact node caps, severity levels and report content |
 | Imported reports, plugins and LLM adapters | 43 | Provenance, plugin failure rollback, credential boundaries and transport error handling |
 | Server, redaction, task governance and supply chain | 84 | Authentication failures, limits, redaction, pins and scanner gates |
-| **Total** | **581** | |
+| Threat evidence, snapshots and version diffs | 22 | Exact source/flow links, conservative auth review, workspace remapping, real vulnerable/safe revisions, coverage changes, malformed input and input-file preservation |
+| **Total** | **603** | |
 
 The structural scan found no duplicate test definitions, assertion-method
 overrides or assertion-method reassignments. The review found no malicious test
@@ -66,12 +68,15 @@ fault counts as detected only when the selected test produces an assertion
 failure: import/setup errors, skips and timeouts never count as detections.
 Production files are never rewritten by the audit.
 
-The 17 cases cover removal of dangling edges, omitted detailed validation,
+The original 17 cases cover removal of dangling edges, omitted detailed validation,
 workspace bypass, premature baseline writes, ignored canonical ordering,
 corrupted serialized fields, empty capped diagrams, empty ATT&CK results,
 constant confidence, excess scan permits, empty YAML results, authentication
 bypass, shared fixture state, disabled redaction, disabled Python SAST,
-disabled polyglot SAST and failed parallel workers. This is a bounded set of
+disabled polyglot SAST and failed parallel workers. Five additional cases drop
+threat evidence or flows, misclassify auth reviews as observed findings, hide
+threat changes or hide comparison context. All 22 require assertion failures
+with no setup errors or skips. This is a bounded set of
 targeted regressions, not an exhaustive mutation score.
 
 ## Coverage and execution checks
@@ -88,8 +93,9 @@ python -m coverage run --branch -m unittest discover -s tests -v
 python -m coverage report
 ```
 
-The measured baseline is approximately 89% statement coverage, 79% branch
-coverage and 86% combined coverage. The diagram model and quality checker are
+The expanded suite measures 89.08% statement coverage, 79.60% branch coverage
+and 86.05% combined coverage. The new threat-review module measures 94.14%
+statements and 90.15% branches. The diagram model and quality checker are
 approximately 97% combined. Coverage is not treated as a substitute for the
 positive controls, negative controls and fault-injection checks above.
 
