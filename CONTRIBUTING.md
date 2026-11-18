@@ -189,7 +189,7 @@ secdiagram/
 │   ├── frameworks.py            # Framework detection (FastAPI, Flask, Django, etc.)
 │   ├── graph_builder.py         # Builds dependency graph, pruning, edge weighting
 │   ├── high_level.py            # Compiles C4 high-level tier overview diagrams
-│   ├── iac.py                   # Infrastructure-as-Code audits (Dockerfile, Compose, K8s, TF)
+│   ├── iac.py                   # Infrastructure-as-Code audits (Dockerfile, Compose, CI, K8s, TF)
 │   ├── llm.py                   # Citation-preserving LLM narrative review generator
 │   ├── misconfig.py             # Web/API misconfiguration rules for C#, JS/TS, PHP, Go, Java
 │   ├── model.py                 # Graph, Node, Edge, Finding, and stable_id data models

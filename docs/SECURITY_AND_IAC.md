@@ -214,25 +214,43 @@ severity that uses it. The same flows are highlighted in red on the detailed
 
 ## 2. Infrastructure-as-Code (IaC) Rules
 
-The engine audits infrastructure files for security misconfigurations:
+The engine audits infrastructure files for security misconfigurations. Every
+rule carries a stable identifier (`IAC-<PLATFORM>-<NNN>`) exposed through
+`Finding.metadata["rule_id"]` and used as the SARIF `ruleId`, enabling
+per-rule baselines, ignore lists and CI triage:
 
-- **Dockerfile**:
-  - Root user execution (`USER root` or missing non-root `USER` directive).
-  - Unpinned base image tags (e.g. `:latest`).
-  - Sensitive files copied into image contexts.
-  - Exposed privileged ports.
-- **Kubernetes Manifests**:
-  - Containers running without `runAsNonRoot: true`.
-  - Privileged containers (`privileged: true`).
-  - Dangerous capabilities (e.g. `SYS_ADMIN`).
-  - Missing CPU and memory resource limits.
-- **Terraform**:
-  - S3 buckets configured with public read/write ACLs.
-  - Unrestricted security group ingress (`0.0.0.0/0`).
-  - Unencrypted storage volumes or databases.
-- **GitHub Actions Workflows**:
-  - `pull_request_target` triggers combined with explicit repository checkouts of untrusted code.
-  - Inline script executions referencing untrusted pull request title/body expressions.
+- **Dockerfile** (`IAC-DOCKER-001..008`): unpinned base images, remote `ADD`,
+  `curl|wget … | sh`, secrets baked into `ENV`/`ARG`, `chmod 777`, `sudo`
+  build steps, root execution.
+- **Docker Compose** (`IAC-COMPOSE-001..012`): unpinned images, privileged
+  mode, host network/PID/IPC/user namespaces, Docker socket mounts,
+  dangerous capabilities, unconfined seccomp/AppArmor, sensitive host path
+  mounts, root user, hardcoded environment secrets.
+- **GitHub Actions workflows** (`IAC-CI-001..007`): `write-all` permissions
+  (inline and block forms, top-level and job-level), actions not pinned to a
+  commit SHA, `pull_request_target` / `workflow_run` triggers,
+  `${{ github.event.* }}` script injection (including multi-line `run:` blocks
+  and Helm-style templating), secrets interpolated into shell commands.
+- **GitLab CI pipelines** (`.gitlab-ci.yml`, `IAC-GITLAB-001..004`): unpinned
+  remote includes, project includes with mutable refs, `curl|sh` in scripts,
+  hardcoded secret variables.
+- **Jenkins pipelines** (`Jenkinsfile`, `IAC-JENKINS-001..003`): `curl|sh`
+  shell steps, hardcoded credential literals, `--privileged` containers.
+- **Kubernetes manifests** (`IAC-K8S-001..013`): pod security standard checks
+  (privileged, host namespaces, UID 0, `runAsNonRoot: false`, privilege
+  escalation, writable root filesystem, automounted service account tokens,
+  unconfined seccomp), hostPath volumes (including Docker sockets),
+  dangerous capabilities, mutable image tags. Checks apply per-document with
+  exact key/value matching to avoid false positives; non-workload kinds
+  (e.g. ConfigMap) are skipped.
+- **Terraform / `.tfvars`** (`IAC-TF-001..007`): open security groups
+  (`0.0.0.0/0`), public storage ACLs, disabled encryption, publicly
+  accessible databases, disabled public access blocks, wildcard IAM
+  actions, hardcoded secrets (literals and heredocs).
+
+YAML-backed analyzers use a deterministic, stdlib-only, indentation-aware
+skeleton parser (`secdiagram_core.yaml_lite`); Helm/Jinja expressions are
+treated as opaque values and never executed.
 
 ---
 
