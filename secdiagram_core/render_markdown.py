@@ -8,6 +8,8 @@ from typing import Any
 from . import __version__
 from .features import feature_for_path
 from .model import Edge, Graph, Node
+from .risk import risk_sort_key
+from .taint_flows import build_taint_flows, render_taint_mermaid
 
 
 def _esc(text: Any) -> str:
@@ -73,6 +75,125 @@ def _flows(graph: Graph, endpoints: list[Node], node_by_id: dict[str, Node], lim
         else:
             lines.append(f"- **{_esc(endpoint.qualname)}** ({_ref(endpoint)}) - no resolved outgoing calls")
     return lines
+
+
+_POLYGLOT_LABELS = (
+    ("csharp", "C#"), ("javascript", "JavaScript"), ("typescript", "TypeScript"), ("php", "PHP"), ("go", "Go"),
+)
+
+
+def _indexed_sources_text(meta: dict[str, Any]) -> str:
+    parts = [f"**{meta.get('python_files', 0)}** Python", f"**{meta.get('java_files', 0)}** Java"]
+    polyglot = meta.get("polyglot_files") or {}
+    parts.extend(f"**{polyglot[key]}** {label}" for key, label in _POLYGLOT_LABELS if polyglot.get(key))
+    return (", ".join(parts[:-1]) + " and " + parts[-1] + " sources") if len(parts) > 1 else parts[0]
+
+
+def _fix_first_section(graph: Graph, limit: int = 10) -> list[str]:
+    """Top findings by risk (impact x exposure x evidence x confidence x exploit intel)."""
+    ranked = [
+        finding for finding in sorted(graph.findings, key=risk_sort_key)
+        if not finding.baseline and finding.metadata.get("risk")
+    ]
+    if not ranked:
+        return []
+    counts = (graph.meta.get("risk") or {}).get("by_priority") or {}
+    summary = ", ".join(f"{label}: {counts.get(label, 0)}" for label in ("P0", "P1", "P2", "P3"))
+    out = ["## Fix first (risk-ranked)", ""]
+    out.append(
+        f"Priorities from impact x exposure x evidence x confidence x exploit intel (0-10). {summary}. "
+        "P0 >= 8 fix now, P1 >= 6, P2 >= 4."
+    )
+    out.append("")
+    out.append("| Priority | Score | Finding | Exposure | Evidence | Location |")
+    out.append("|---|---|---|---|---|---|")
+    for finding in ranked[:limit]:
+        risk = finding.metadata["risk"]
+        ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
+        row = (
+            f"| **{risk['priority']}** | {risk['score']} | {_esc(finding.title)} ({_esc(finding.cwe or finding.category)}) | "
+            f"{_esc(risk['exposure'])} | {_esc(risk['evidence'])} | {ref} |"
+        )
+        out.append(row.encode("ascii", "replace").decode("ascii"))
+    out.append("")
+    return out
+
+
+def _attack_paths_section(graph: Graph, limit: int = 10) -> list[str]:
+    """Attack paths: request input -> functions on the path -> vulnerable sink."""
+    flows = [flow for flow in build_taint_flows(graph) if not flow.finding.baseline]
+    if not flows:
+        return []
+    out = ["## Attack paths (taint flows)", ""]
+    cross = sum(1 for flow in flows if flow.interprocedural)
+    entries = len({flow.node_path[0] for flow in flows if flow.node_path})
+    out.append(
+        f"**{len(flows)}** source-to-sink flow(s) from **{entries}** entry point(s); "
+        f"**{cross}** cross function or file boundaries. Each path is evidence-backed "
+        "(`path:line` per hop) and drawn in `diagram-taint.mmd`."
+    )
+    out.append("")
+    for number, flow in enumerate(flows[:limit], start=1):
+        finding = flow.finding
+        hops = []
+        for node_id in flow.node_path:
+            node = graph.nodes.get(node_id)
+            if node is None:
+                continue
+            routes = node.attrs.get("routes") or []
+            label = f"{routes[0].get('method', '').upper()} {routes[0].get('path', '')}" if routes else node.name
+            hops.append(f"`{_esc(label)}`")
+        sink = finding.evidence[0].ref if finding.evidence else flow.hops[-1].loc.ref
+        hops.append(f"**{_esc(finding.title)}** ({_esc(finding.cwe or finding.category)}) at `{_esc(sink)}`")
+        risk = finding.metadata.get("risk") or {}
+        label = f"{risk['priority']} {risk['score']}" if "priority" in risk else finding.severity
+        line = f"{number}. **{_esc(label)}** - " + " -> ".join(hops)
+        out.append(line.encode("ascii", "replace").decode("ascii"))
+    if len(flows) > limit:
+        out.append(f"\n_{len(flows) - limit} more flow(s) in `graph.json` (`findings[].metadata.flow`)._")
+    out.append("")
+    out.append("```mermaid")
+    out.append(render_taint_mermaid(graph, flows, max_flows=15, ascii_only=True).rstrip())
+    out.append("```")
+    out.append("")
+    return out
+
+
+def _policy_section(graph: Graph, policy: dict[str, Any]) -> list[str]:
+    """Enforcement-policy decisions: what blocks, what needs review, what is exempt."""
+    mode = str(policy.get("mode") or "")
+    decisions = policy.get("decisions") or {}
+    blocks = policy.get("blocks") or []
+    suppressed = policy.get("suppressed") or []
+    reactivated = policy.get("reactivated") or []
+    out = ["## Enforcement policy", ""]
+    bits = [f"{key}: {value}" for key, value in sorted(decisions.items()) if value]
+    header = f"Mode **{mode}**. Decisions: " + (", ".join(bits) or "none") + "."
+    if mode == "shadow":
+        header += " Shadow mode: decisions are recorded but CI is not affected."
+    out.append(header)
+    out.append("")
+    if blocks:
+        out.append("| Finding | Policy reason | Confidence | Reachability | Exposure | Required actions |")
+        out.append("|---|---|---|---|---|---|")
+        by_id = {finding.id: finding for finding in graph.findings}
+        for finding_id in blocks:
+            finding = by_id.get(finding_id)
+            if finding is None:
+                continue
+            actions = "; ".join(finding.required_actions) if finding.required_actions else "-"
+            out.append(
+                f"| {_esc(finding.title)} | {_esc(finding.policy_reason)} | {finding.confidence_score} | "
+                f"{_esc(finding.reachability)} | {_esc(finding.exposure)} | {_esc(actions)} |"
+            )
+        out.append("")
+    if suppressed:
+        out.append(f"Suppressed by governed exception: **{len(suppressed)}** finding(s) (still listed above and in `graph.json`).")
+        out.append("")
+    if reactivated:
+        out.append(f"Reactivated after suppression expiry: **{len(reactivated)}** finding(s).")
+        out.append("")
+    return out
 
 
 def render_markdown(
@@ -244,8 +365,12 @@ def render_markdown(
             lines.append(f"| {_esc(node.name)} | {_esc(node.kind)} | {_ref(node)} |")
         lines.append("")
 
+    lines.extend(_fix_first_section(graph))
+
+    policy = meta.get("policy") or {}
     if graph.findings:
         new_findings = [finding for finding in graph.sorted_findings() if not finding.baseline]
+        policy_active = bool(policy.get("mode"))
         if baseline_info and not new_findings:
             lines.append("## Security review")
             lines.append("")
@@ -262,17 +387,34 @@ def render_markdown(
                 "Tainted findings rise to critical; risky patterns without taint remain review items."
             )
             lines.append("")
-            lines.append("| Severity | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
-            lines.append("|---|---|---|---|---|---|---|")
-            for finding in new_findings:
-                ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
-                trace = " -> ".join(f"`{_esc(loc.ref)}`" for loc in finding.trace) if finding.trace else "-"
-                lines.append(
-                    f"| **{_esc(finding.severity)}** | {_esc(finding.category)} | "
-                    f"{_esc(finding.cwe or '-')} | {ref} | {trace} | {_esc(finding.title)} | "
-                    f"{_esc(finding.recommendation)} |"
-                )
+            if policy_active:
+                lines.append("| Severity | Enforcement | Confidence | Exposure | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
+                lines.append("|---|---|---|---|---|---|---|---|---|---|")
+                for finding in new_findings:
+                    ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
+                    trace = " -> ".join(f"`{_esc(loc.ref)}`" for loc in finding.trace) if finding.trace else "-"
+                    lines.append(
+                        f"| **{_esc(finding.severity)}** | {_esc(finding.enforcement)} | "
+                        f"{finding.confidence_score or finding.confidence} | {_esc(finding.exposure or '-')} | "
+                        f"{_esc(finding.category)} | {_esc(finding.cwe or '-')} | {ref} | {trace} | "
+                        f"{_esc(finding.title)} | {_esc(finding.recommendation)} |"
+                    )
+            else:
+                lines.append("| Severity | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
+                lines.append("|---|---|---|---|---|---|---|")
+                for finding in new_findings:
+                    ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
+                    trace = " -> ".join(f"`{_esc(loc.ref)}`" for loc in finding.trace) if finding.trace else "-"
+                    lines.append(
+                        f"| **{_esc(finding.severity)}** | {_esc(finding.category)} | "
+                        f"{_esc(finding.cwe or '-')} | {ref} | {trace} | {_esc(finding.title)} | "
+                        f"{_esc(finding.recommendation)} |"
+                    )
             lines.append("")
+        if policy_active:
+            lines.extend(_policy_section(graph, policy))
+
+    lines.extend(_attack_paths_section(graph))
 
     analysis = meta.get("analysis", {})
     lines.append("## Method & limits")
@@ -281,13 +423,13 @@ def render_markdown(
     language_text = ", ".join(f"{name} ({count})" for name, count in sorted(languages.items())) or "none detected"
     lines.append(
         f"- Scope: **{meta.get('files_discovered', '?')}** files discovered, "
-        f"**{meta.get('python_files', 0)}** Python and **{meta.get('java_files', 0)}** Java sources indexed, "
+        f"{_indexed_sources_text(meta)} indexed, "
         f"**{meta.get('files_skipped', 0)}** skipped. Languages: {_esc(language_text)}."
     )
     unsupported = meta.get("unsupported_security_languages") or []
     if unsupported:
         lines.append(
-            "- Security rules cover Python and Java only; no checks were run for: "
+            "- Security rules cover Python, Java, C#, JavaScript/TypeScript, PHP and Go; no checks were run for: "
             + ", ".join(f"`{_esc(name)}`" for name in unsupported)
             + "."
         )

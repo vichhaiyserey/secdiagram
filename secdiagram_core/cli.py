@@ -6,14 +6,16 @@ import argparse
 import json
 import os
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import __version__
 from .analyzer import AnalysisConfig, run_analysis
-from .baseline import apply_baseline, ignore_baseline, load_baseline, write_baseline
+from .baseline import apply_baseline, ignore_baseline, load_suppressions, write_baseline
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .llm import NarrativeError, generate_narrative
 from .model import SEVERITY_RANK
+from .policy import POLICY_MODES, apply_policy
 from .protocols import get_registered_exporters
 from .redaction import redact_secrets
 from .render_html import render_html
@@ -24,7 +26,22 @@ from .render_mermaid import render_mermaid
 from .render_sarif import render_sarif
 from .render_security import render_security_html, render_security_markdown
 from .render_vex import render_vex
+from .risk import score_findings
 from .security_report import build_security_report
+from .taint_flows import render_taint_mermaid
+from .threat_model import (
+    DEFAULT_POLICY_YAML,
+    attack_status_label,
+    build_threat_model,
+    evaluate_attack,
+    load_policy,
+    parse_policy,
+    policy_violations,
+    render_attack_summary,
+    render_threat_model,
+    summarize_attack,
+    summarize_threat_model,
+)
 
 FORMATS = {"json", "md", "mermaid", "sarif", "png", "svg", "pdf", "image", "html", "vex"}
 
@@ -79,6 +96,26 @@ def build_parser() -> argparse.ArgumentParser:
         description="Build deterministic architecture, relationship, and security diagrams for a Python repository.",
     )
     parser.add_argument("--dir", default=".", help="repository directory to analyze (default: .)")
+    parser.add_argument(
+        "--workspace",
+        default=None,
+        metavar="DIR",
+        help=(
+            "analyze multiple repos under DIR as a unified product workspace; "
+            "each immediate subdirectory is treated as a separate microservice/repo"
+        ),
+    )
+    parser.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        metavar="REPO=ROLE",
+        help=(
+            "manually assign a role to a repo in the workspace (repeatable); "
+            "roles: backend, frontend, gateway, worker, data-layer, infrastructure, library "
+            "(e.g. --role user-service=backend --role web-app=frontend)"
+        ),
+    )
     parser.add_argument(
         "--out",
         default=None,
@@ -304,9 +341,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fail-on",
         type=str.lower,
-        choices=["critical", "high", "medium", "low", "info", "none"],
+        choices=["critical", "high", "medium", "low", "info", "block", "none"],
         default="none",
-        help="exit with code 2 when a finding at or above this severity exists",
+        help="exit with code 2 when a finding at or above this severity exists; 'block' fails on policy block decisions (implies --policy strict)",
+    )
+    parser.add_argument(
+        "--policy",
+        type=str.lower,
+        choices=list(POLICY_MODES),
+        default=None,
+        help=(
+            "enforcement policy mode: shadow (record decisions, never fail CI), "
+            "report-only (record and surface in reports), strict (block decisions fail CI; exit 2)"
+        ),
     )
     parser.add_argument(
         "--baseline",
@@ -429,11 +476,18 @@ def _normalize_cli_path(path_str: str) -> Path:
             if candidate_rel.exists() or candidate_rel.parent.exists():
                 return candidate_rel
 
-    parts = Path(path_str.replace("\\", "/")).parts
-    for i in range(1, len(parts)):
-        cand = Path("/" + "/".join(parts[i:]))
-        if cand.exists() or cand.parent.exists():
-            return cand
+        # Last resort for converted paths only (e.g. another Git install root):
+        # strip leading components, preferring a target that already exists.
+        parts = Path(path_str.replace("\\", "/")).parts
+        candidates = [Path("/" + "/".join(parts[i:])) for i in range(1, len(parts))]
+        for cand in candidates:
+            if cand.exists():
+                return cand
+        for cand in candidates:
+            if cand.parent.exists() and cand.parent != Path("/"):
+                return cand
+    # Any other path is taken literally; the caller creates missing parents.
+    # (Rewriting it here once turned `--out build/reports/x` into `/x`.)
     return p
 
 
@@ -511,11 +565,260 @@ def server_main(argv: list[str] | None = None) -> int:
     )
 
 
+def audit_main(argv: list[str] | None = None) -> int:
+    """``secdiagram audit <dir>``: ATT&CK evaluation gated by policy.yaml.
+
+    Fails the pipeline with exit code 1 when unmitigated architectural flaws
+    violate the policy thresholds, so CI/CD can block the build.
+    """
+    parser = argparse.ArgumentParser(
+        prog="secdiagram audit",
+        description="Evaluate the parsed architecture against MITRE ATT&CK techniques and fail on policy violations.",
+    )
+    parser.add_argument("dir", nargs="?", default=".", help="repository directory to audit (default: .)")
+    parser.add_argument(
+        "--policy",
+        default=None,
+        metavar="FILE",
+        help="audit policy file (default: <dir>/policy.yaml when present, else built-in defaults)",
+    )
+    parser.add_argument(
+        "--json",
+        dest="json_out",
+        default=None,
+        metavar="PATH",
+        help="write the machine-readable audit result to PATH",
+    )
+    parser.add_argument("--quiet", action="store_true", help="print only violations or PASS")
+    args = parser.parse_args(argv)
+    root = _normalize_cli_path(args.dir)
+
+    try:
+        if args.policy:
+            policy = load_policy(_normalize_cli_path(args.policy))
+            policy_source = args.policy
+        else:
+            default_path = root / "policy.yaml"
+            if default_path.exists():
+                policy = load_policy(default_path)
+                policy_source = str(default_path)
+            else:
+                policy = parse_policy(DEFAULT_POLICY_YAML)
+                policy_source = "built-in defaults"
+    except (ValueError, OSError) as exc:
+        print(f"secdiagram: invalid audit policy ({exc})", file=sys.stderr)
+        return 1
+
+    try:
+        result = run_analysis(AnalysisConfig(root=root, security=True))
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        print(f"secdiagram: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # pragma: no cover - defensive top-level guard
+        print(f"secdiagram: analysis failed: {exc}", file=sys.stderr)
+        return 1
+
+    graph = result.graph
+    score_findings(graph)
+    evals = evaluate_attack(graph)
+    violating = policy_violations(evals, policy)
+    summarize_attack(graph, evals)
+
+    if args.json_out:
+        payload = {
+            "repository": result.repo.name,
+            "policy": policy.to_dict(),
+            "policy_source": policy_source,
+            "pass": not violating,
+            "techniques": [evaluation.to_dict() for evaluation in evals],
+            "violations": [evaluation.to_dict() for evaluation in violating],
+        }
+        path = _normalize_cli_path(args.json_out)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+        except OSError as exc:
+            print(f"secdiagram: could not write audit json: {exc}", file=sys.stderr)
+            return 1
+
+    if not args.quiet:
+        print(render_attack_summary(evals, policy, violating), end="")
+
+    if violating:
+        print(
+            f"secdiagram: audit FAILED against {policy_source}: "
+            + ", ".join(
+                f"{e.technique} {e.name} ({attack_status_label(e.status)})" for e in violating
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    if not args.quiet:
+        print(f"secdiagram: audit PASS against {policy_source}", file=sys.stderr)
+    return 0
+
+
+def _parse_role_args(role_args: list[str]) -> dict[str, str]:
+    """Parse ``--role REPO=ROLE`` arguments into a dict."""
+    manual_roles: dict[str, str] = {}
+    for item in role_args:
+        if "=" not in item:
+            continue
+        name, _, role = item.partition("=")
+        name = name.strip()
+        role = role.strip().lower()
+        if name and role:
+            manual_roles[name] = role
+    return manual_roles
+
+
+def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | None) -> int:
+    """Handle the --workspace flag: analyze multiple repos as a unified product."""
+    from .analyzer import run_workspace_analysis
+    from .high_level import build_high_level_architecture, render_mermaid_highlevel
+    from .workspace import VALID_ROLES
+
+    workspace_root = _normalize_cli_path(args.workspace)
+    manual_roles = _parse_role_args(args.role)
+
+    # Validate role names
+    for repo_name, role in manual_roles.items():
+        if role not in VALID_ROLES:
+            print(
+                f"secdiagram: invalid role '{role}' for repo '{repo_name}'; "
+                f"valid roles: {', '.join(sorted(VALID_ROLES))}",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        ws_result = run_workspace_analysis(
+            workspace_root,
+            manual_roles=manual_roles,
+            include=args.include,
+            exclude=args.exclude,
+            min_confidence=args.min_confidence,
+            max_nodes=args.max_nodes,
+            security=args.security,
+            jobs=args.jobs,
+            cache_dir=cache_dir,
+        )
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        print(f"secdiagram: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # pragma: no cover - defensive top-level guard
+        print(f"secdiagram: workspace analysis failed: {exc}", file=sys.stderr)
+        return 1
+
+    graph = ws_result.merged_graph
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    # Write workspace manifest
+    ws_json_path = out / "workspace.json"
+    ws_json_path.write_text(
+        json.dumps(ws_result.workspace.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    written.append(ws_json_path)
+
+    # Score and build threat model on merged graph
+    score_findings(graph)
+    hla = build_high_level_architecture(workspace_root, graph)
+
+    # Enrich HLA with workspace role metadata
+    for repo_role in ws_result.workspace.repos:
+        for sub in hla.subsystems:
+            if sub.path and repo_role.name in sub.path:
+                sub.metadata["workspace_role"] = repo_role.role
+                sub.metadata["workspace_repo"] = repo_role.name
+
+    highlevel_mermaid = render_mermaid_highlevel(
+        hla,
+        direction=args.diagram_direction if args.diagram_direction == "LR" else "TB",
+        theme=args.diagram_theme,
+    )
+
+    mermaid_text: str | None = None
+
+    try:
+        if "json" in args.format:
+            path = out / "graph.json"
+            write_json(graph, path)
+            written.append(path)
+        if "md" in args.format:
+            path = out / "ARCHITECTURE.md"
+            meta = dict(graph.meta)
+            meta["name"] = ws_result.workspace.name
+            path.write_text(
+                render_markdown(graph, meta, high_level_mermaid=highlevel_mermaid),
+                encoding="utf-8",
+                newline="\n",
+            )
+            written.append(path)
+        if "mermaid" in args.format:
+            if args.diagram_detail in {"high-level", "overview"}:
+                mermaid_text = highlevel_mermaid
+            else:
+                mermaid_text = render_mermaid(
+                    graph,
+                    link_base=args.link_base,
+                    detail=args.diagram_detail,
+                    direction=args.diagram_direction,
+                    theme=args.diagram_theme,
+                    max_diagram_nodes=args.max_diagram_nodes,
+                )
+            path = out / "diagram.mmd"
+            path.write_text(mermaid_text, encoding="utf-8", newline="\n")
+            written.append(path)
+
+            hl_path = out / "diagram-highlevel.mmd"
+            hl_path.write_text(highlevel_mermaid, encoding="utf-8", newline="\n")
+            written.append(hl_path)
+        if "sarif" in args.format:
+            path = out / "security.sarif"
+            path.write_text(render_sarif(graph), encoding="utf-8", newline="\n")
+            written.append(path)
+    except (OSError, ImageRenderError) as exc:
+        print(f"secdiagram: could not write output: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.quiet:
+        # Print workspace summary
+        total_nodes = len(graph.nodes)
+        total_edges = len(graph.edges)
+        total_findings = len(graph.findings)
+        repo_count = len(ws_result.workspace.repos)
+
+        print(f"secdiagram workspace: {ws_result.workspace.name}")
+        print(f"  {repo_count} repo(s), {total_nodes} nodes, {total_edges} edges, {total_findings} findings")
+        for repo_role in sorted(ws_result.workspace.repos, key=lambda r: r.name):
+            confidence_pct = f"{repo_role.confidence * 100:.0f}%"
+            manual_tag = " (manual)" if repo_role.manual else ""
+            per_repo = ws_result.per_repo.get(repo_role.name)
+            file_count = len(per_repo.repo.rel_files) if per_repo else 0
+            print(f"  • {repo_role.name}: {repo_role.role} ({confidence_pct}{manual_tag}) [{file_count} files]")
+
+        cross_edges = ws_result.workspace.inter_repo_edges
+        if cross_edges:
+            print(f"  {len(cross_edges)} cross-repo relationship(s):")
+            for edge in cross_edges:
+                print(f"    {edge.src_repo} --[{edge.kind}]--> {edge.dst_repo}: {edge.label}")
+
+        for path in written:
+            print(f"  wrote {path}")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == "serve":
         return server_main(argv[1:])
+    if argv and argv[0] == "audit":
+        return audit_main(argv[1:])
 
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -546,6 +849,10 @@ def main(argv: list[str] | None = None) -> int:
     cache_dir = None
     if args.cache:
         cache_dir = _normalize_cli_path(args.cache_dir) if args.cache_dir else out / "cache"
+
+    # ── Workspace mode: multi-repo analysis ───────────────────────────
+    if args.workspace:
+        return _run_workspace_mode(args, out, cache_dir)
 
     try:
         result = run_analysis(
@@ -596,6 +903,8 @@ def main(argv: list[str] | None = None) -> int:
         else out / "security.baseline.json"
     )
     baseline_label = args.baseline if args.baseline else baseline_path.name
+    active_suppressions: dict[str, dict[str, str]] = {}
+    expired_suppressions: dict[str, dict[str, str]] = {}
     if baseline_mode:
         if args.create_baseline:
             count = write_baseline(graph, baseline_path)
@@ -603,9 +912,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"secdiagram: created baseline with {count} finding(s): {baseline_path}", file=sys.stderr)
             written.append(baseline_path)
         else:
-            baseline_ids: set[str] = set()
             try:
-                baseline_ids = load_baseline(baseline_path)
+                active_s, expired_s, legacy_ids, schema_v = load_suppressions(baseline_path, date.today().isoformat())
             except FileNotFoundError:
                 print(
                     f"secdiagram: baseline file not found: {baseline_path} "
@@ -621,13 +929,40 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 ignore_baseline(graph, baseline_label)
             else:
-                known, new = apply_baseline(graph, baseline_ids, baseline_label)
-                print(
-                    f"secdiagram: baseline {baseline_label} suppresses {known} known finding(s); "
-                    f"{new} new finding(s) remain",
-                    file=sys.stderr,
-                )
+                if legacy_ids:
+                    known, new = apply_baseline(graph, legacy_ids, baseline_label)
+                    print(
+                        f"secdiagram: baseline {baseline_label} suppresses {known} known finding(s); "
+                        f"{new} new finding(s) remain",
+                        file=sys.stderr,
+                    )
+                else:
+                    active_suppressions, expired_suppressions = active_s, expired_s
+                    apply_baseline(graph, set(active_s) | set(expired_s), baseline_label)
+                    print(
+                        f"secdiagram: governed baseline {baseline_label} (schema {schema_v}): "
+                        f"{len(active_s)} active suppression(s), {len(expired_s)} expired (reactivated)",
+                        file=sys.stderr,
+                    )
 
+    # Re-rank after confidence filtering and baseline suppression.
+    score_findings(graph)
+    # Policy layer: enforcement decisions. Runs when --policy is given, when
+    # --fail-on block is used (implies strict), or when governed suppressions
+    # are in play. Without any of these, findings stay informational and all
+    # outputs are byte-identical to pre-policy runs.
+    policy_mode = args.policy or ("strict" if args.fail_on == "block" else None)
+    policy_summary = None
+    if policy_mode or active_suppressions or expired_suppressions:
+        policy_summary = apply_policy(
+            graph,
+            mode=policy_mode or "shadow",
+            active_suppressions=active_suppressions,
+            expired_suppressions=expired_suppressions,
+            dependency_usage=result.dependency_usage,
+        )
+    threats = build_threat_model(graph)
+    summarize_threat_model(graph, threats)
     meta = dict(graph.meta)
     meta.update(
         {
@@ -668,6 +1003,10 @@ def main(argv: list[str] | None = None) -> int:
                 newline="\n",
             )
             written.append(path)
+        if "md" in args.format and args.security:
+            path = out / "THREAT_MODEL.md"
+            path.write_text(render_threat_model(graph, threats), encoding="utf-8", newline="\n")
+            written.append(path)
         if "mermaid" in args.format:
             if args.diagram_detail in {"high-level", "overview"}:
                 mermaid_text = highlevel_mermaid
@@ -687,6 +1026,10 @@ def main(argv: list[str] | None = None) -> int:
             hl_path = out / "diagram-highlevel.mmd"
             hl_path.write_text(highlevel_mermaid, encoding="utf-8", newline="\n")
             written.append(hl_path)
+
+            taint_path = out / "diagram-taint.mmd"
+            taint_path.write_text(render_taint_mermaid(graph), encoding="utf-8", newline="\n")
+            written.append(taint_path)
         if "sarif" in args.format:
             path = out / "security.sarif"
             path.write_text(render_sarif(graph), encoding="utf-8", newline="\n")
@@ -743,6 +1086,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 written.append(hl_img_path)
 
+                if (graph.meta.get("taint_flows") or {}).get("count"):
+                    taint_img_path = out / f"diagram-taint.{fmt}"
+                    render_image(
+                        mermaid_source=render_taint_mermaid(graph),
+                        output_path=taint_img_path,
+                        image_format=fmt,
+                        provider=args.image_provider,
+                        endpoint=args.image_endpoint,
+                        offline=args.offline,
+                    )
+                    written.append(taint_img_path)
+
         if args.ollama:
             args.llm = True
             llm_provider = "ollama"
@@ -778,6 +1133,7 @@ def main(argv: list[str] | None = None) -> int:
                 fail_on=args.fail_on,
                 reproduce=_security_reproduce_command(args),
                 narrative=narrative_text,
+                policy=graph.meta.get("policy"),
             )
             if args.security_report in {"md", "both"}:
                 path = out / "SECURITY_REVIEW.md"
@@ -898,7 +1254,18 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    if args.fail_on != "none":
+    if policy_summary is not None:
+        decision_bits = [f"{key}={value}" for key, value in sorted(policy_summary.decisions.items()) if value]
+        print(
+            f"secdiagram: policy {policy_summary.mode}: " + ", ".join(decision_bits or ["no findings"])
+            + (f", {len(policy_summary.reactivated)} reactivated" if policy_summary.reactivated else ""),
+            file=sys.stderr,
+        )
+
+    if args.fail_on == "block" or args.policy == "strict":
+        if any(finding.enforcement == "block" and not finding.baseline for finding in graph.findings):
+            return 2
+    elif args.fail_on != "none":
         threshold = SEVERITY_RANK[args.fail_on]
         if any(
             SEVERITY_RANK.get(finding.severity, 0) >= threshold and not finding.baseline

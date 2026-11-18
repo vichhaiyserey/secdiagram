@@ -105,6 +105,7 @@ class SecurityReport:
     limitations: list[str]
     reproduce: str
     narrative: str | None = None
+    policy: dict[str, Any] | None = None
 
 
 def _is_known_exploited(finding: Finding) -> bool:
@@ -119,6 +120,7 @@ def _is_validated(finding: Finding) -> bool:
 def _sort_key(finding: Finding) -> tuple[Any, ...]:
     location = finding.evidence[0] if finding.evidence else None
     return (
+        -float((finding.metadata.get("risk") or {}).get("score", 0.0)),
         -SEVERITY_RANK.get(finding.severity, 0),
         0 if _is_known_exploited(finding) else 1,
         0 if finding.trace else 1,
@@ -173,10 +175,36 @@ def _risk(findings: list[Finding], baselined: int) -> Risk:
     )
 
 
-def _gate(findings: list[Finding], threshold: str | None, enabled: bool) -> Gate:
+def _gate(findings: list[Finding], threshold: str | None, enabled: bool, policy: dict[str, Any] | None = None) -> Gate:
     if not enabled:
         return Gate(threshold, "N/A", "Security analysis was disabled for this run.")
-    if not threshold or threshold == "none":
+    mode = str((policy or {}).get("mode") or "")
+    if mode == "strict":
+        blocks = [
+            finding
+            for finding in findings
+            if finding.enforcement == "block" and not finding.baseline
+        ]
+        if blocks:
+            return Gate(
+                "block",
+                "FAIL",
+                f"{len(blocks)} finding(s) meet the strict policy blocking conditions.",
+            )
+        return Gate(
+            "block",
+            "PASS",
+            "No finding met the strict policy blocking conditions.",
+        )
+    if mode == "shadow":
+        blocks = [finding for finding in findings if finding.enforcement == "block"]
+        if blocks:
+            return Gate(
+                threshold,
+                "INFORMATIONAL",
+                f"Shadow policy: {len(blocks)} finding(s) would block under the strict policy; CI is not affected.",
+            )
+    if not threshold or threshold == "none" or threshold == "block":
         return Gate(
             None,
             "INFORMATIONAL",
@@ -400,6 +428,7 @@ def _coverage(meta: dict[str, Any], enabled: bool) -> dict[str, Any]:
         "files_skipped": int(meta.get("files_skipped") or 0),
         "python_files": int(meta.get("python_files") or 0),
         "java_files": int(meta.get("java_files") or 0),
+        "polyglot_files": sum(int(v) for v in (meta.get("polyglot_files") or {}).values()),
         "iac_files": int(meta.get("iac_files") or 0),
         "languages": language_rows,
         "unsupported_security_languages": unsupported,
@@ -418,8 +447,9 @@ def _limitations(coverage: dict[str, Any]) -> list[str]:
         "so runtime behavior, feature flags, and deployed configuration are not proven.",
         "secdiagram findings are evidence-backed heuristics with confidence scores; "
         "they are review prompts, not proof of exploitability or a substitute for manual testing.",
-        "Security rules cover Python and Java sources. Unsupported languages are listed in the "
-        "coverage section and were not assessed.",
+        "Security rules cover Python and Java (AST/lexical data flow) plus C#/.NET, JavaScript/TypeScript, "
+        "PHP and Go (lexical, function-scoped taint). Unsupported languages are listed in the coverage "
+        "section and were not assessed.",
         "Dynamic imports, reflection, metaprogramming, monkey patching, and runtime registries "
         "cannot be fully resolved and are counted rather than guessed.",
         "Imported SonarQube and JFrog Xray reports are accepted as supplied. Advisory validation "
@@ -452,11 +482,13 @@ def build_security_report(
     fail_on: str | None = None,
     reproduce: str | None = None,
     narrative: str | None = None,
+    policy: dict[str, Any] | None = None,
 ) -> SecurityReport:
     """Build a deterministic security report from an analyzed graph."""
     merged_meta = dict(graph.meta)
     merged_meta.update(meta or {})
     meta = merged_meta
+    policy = policy or (meta.get("policy") if isinstance(meta.get("policy"), dict) else None)
     enabled = bool(meta.get("security_enabled", True))
     findings = _sorted(list(graph.findings))
     new_findings = [finding for finding in findings if not finding.baseline]
@@ -486,6 +518,7 @@ def build_security_report(
         str(meta.get("commit") or ""),
         str(meta.get("config_hash") or ""),
         str(fail_on or "none"),
+        json.dumps(policy or {}, sort_keys=True, ensure_ascii=True, default=str),
         *[
             json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=True, default=str)
             for finding in findings
@@ -510,7 +543,7 @@ def build_security_report(
         config_hash=str(meta["config_hash"]) if meta.get("config_hash") else None,
         security_enabled=enabled,
         finding_confidence_floor=float(meta.get("finding_confidence_floor") or 0.0),
-        gate=_gate(findings, fail_on, enabled),
+        gate=_gate(findings, fail_on, enabled, policy),
         risk=risk,
         priorities=new_findings[:PRIORITY_LIMIT],
         new_findings=new_findings,
@@ -530,6 +563,7 @@ def build_security_report(
         reproduce=reproduce
         or "secdiagram --dir . --security-report both --format sarif",
         narrative=narrative,
+        policy=policy,
     )
 
 

@@ -189,15 +189,21 @@ secdiagram/
 │   ├── frameworks.py            # Framework detection (FastAPI, Flask, Django, etc.)
 │   ├── graph_builder.py         # Builds dependency graph, pruning, edge weighting
 │   ├── high_level.py            # Compiles C4 high-level tier overview diagrams
-│   ├── iac.py                   # Infrastructure-as-Code audits (Dockerfile, Compose, K8s, TF)
+│   ├── iac.py                   # Infrastructure-as-Code audits (Dockerfile, Compose, CI, K8s, TF)
 │   ├── llm.py                   # Citation-preserving LLM narrative review generator
+│   ├── misconfig.py             # Web/API misconfiguration rules for C#, JS/TS, PHP, Go, Java
 │   ├── model.py                 # Graph, Node, Edge, Finding, and stable_id data models
+│   ├── polyglot_index.py        # C#/.NET, JS/TS, PHP, Go lexical indexer (routes, DI, edges)
+│   ├── polyglot_security.py     # Function-scoped taint SAST rules for C#, JS/TS, PHP, Go
 │   ├── render_image.py          # PNG, SVG, PDF image generation (local mmdc / Kroki / ink)
 │   ├── render_json.py           # Structured JSON output serializer
 │   ├── render_markdown.py       # Architecture document generator (ARCHITECTURE.md)
 │   ├── render_mermaid.py        # Mermaid flowchart code generator (diagram.mmd)
 │   ├── render_sarif.py          # OASIS SARIF v2.1.0 security report serializer
 │   ├── resolver.py              # Qualified symbol resolution and call attribution
+│   ├── risk.py                  # Risk score per finding (exposure x impact x evidence x KEV)
+│   ├── taint_flows.py           # Language-neutral taint flows and attack-path diagram
+│   ├── threat_model.py          # Evidence-backed STRIDE threat model per trust boundary
 │   └── security.py              # SAST security rules (taint flow, hardcoded secrets, injection)
 ├── tests/                       # Test suite
 │   ├── fixtures/                # Sample applications (Python, .NET, Node.js)
@@ -239,6 +245,15 @@ secdiagram/
 ### 3. Cross-Platform File Handling
 - Always use `pathlib.Path` for filesystem operations.
 - Internally normalize graph node and file paths to forward slashes (`/`) so diagrams and SARIF reports remain byte-for-byte identical across Linux, macOS, and Windows.
+
+### 3b. Cross-Platform Unit Test Requirements
+Every unit test must pass on Windows and POSIX. CI enforces this by running the unit-test matrix on `ubuntu-latest` **and** `windows-latest` for every supported Python version — a green local run on one OS is not sufficient. Requirements:
+
+- **Never construct or combine `pathlib.Path` objects inside an `os.name` mock.** `pathlib` dispatches its flavour class (`WindowsPath`/`PosixPath`) from `os.name` at instantiation time; mocking `os.name = "posix"` on Windows makes `Path(...)` / `path / "child"` raise `UnsupportedOperation: cannot instantiate 'PosixPath' on your system`. Build every `Path` fixture **before** entering the mock, or drop the mock and assert against the real platform.
+- **Never assert platform-native path separators in output.** Runtime code emits normalized forward-slash (`/`) paths in reports, logs, and IDs (see `sanitize_path_text`, `_normalize_path_str`). Tests must assert the normalized form, never `os.sep`-specific strings like `.\pkg\mod.py`.
+- **String round-trips are the portable assertion for path-normalization functions.** When a function returns a `Path` built under a mocked or different OS flavour, compare `str(actual)` / `str(expected)` (or assert on `str()` equality) instead of relying on `Path.__eq__` across flavours.
+- **Test the platform-independent behavior, not the platform-specific branch.** Prefer assertions that hold on every OS (e.g. "a new nested path is preserved literally") and add `skipIf`/`skipUnless` only for genuinely OS-specific behavior (e.g. Git-Bash path translation).
+- **Windows CI is the gate, not an afterthought.** If a new test or feature fails on the `windows-latest` matrix entry, fix it before merging — do not bypass or mark it expected-failure.
 
 ### 4. Modern Python Typing (3.10+)
 - Use Python 3.10+ type union syntax: `str | None` instead of `Optional[str]`.

@@ -214,6 +214,12 @@ class ServerIntegrationTests(unittest.TestCase):
             text = resp.read().decode("utf-8")
             self.assertIn("flowchart", text)
 
+        with urllib.request.urlopen(f"{diag_url}?detail=taint", timeout=5) as resp:
+            self.assertEqual(resp.status, 200)
+            taint = resp.read().decode("utf-8")
+            self.assertIn("Untrusted input", taint)
+            self.assertIn("Command injection", taint)
+
     def test_config_endpoint_is_safe(self) -> None:
         cfg_url = f"{self.base_url}/api/v1/config"
         with urllib.request.urlopen(cfg_url, timeout=5) as resp:

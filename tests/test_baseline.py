@@ -19,7 +19,7 @@ from secdiagram_core.baseline import (
     load_baseline,
     write_baseline,
 )
-from secdiagram_core.model import SEVERITY_RANK, Finding, Graph, Loc
+from secdiagram_core.model import Finding, Graph, Loc
 
 try:
     from .support import fixture_result
@@ -65,15 +65,19 @@ class BaselineUnitTests(unittest.TestCase):
             self.assertEqual(count, count2)
             self.assertEqual(first.read_bytes(), second.read_bytes())
             payload = json.loads(first.read_text(encoding="utf-8"))
-            self.assertEqual(payload["schema_version"], "1")
+            self.assertEqual(payload["schema_version"], "2")
             self.assertEqual(payload["tool"], "secdiagram")
-            ids = [record["id"] for record in payload["findings"]]
+            ids = [record["id"] for record in payload["suppressions"]]
             self.assertEqual(ids, sorted(finding.id for finding in g.sorted_findings()))
             self.assertTrue(ids)
-            for record in payload["findings"]:
-                self.assertIn(record["severity"], SEVERITY_RANK)
-                self.assertIn("path", record)
-                self.assertIn("line", record)
+            for record in payload["suppressions"]:
+                self.assertIn("rule_id", record)
+                self.assertIn("scope", record)
+                self.assertIn("reason", record)
+                self.assertIn("owner", record)
+                self.assertIn("approver", record)
+                self.assertIn("ticket", record)
+                self.assertIn("expires", record)
 
     def test_load_baseline_round_trip_and_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -143,7 +147,7 @@ class BaselineCliTests(unittest.TestCase):
 
             code, _, stderr = self._run(run_args + ["--baseline", str(baseline_path), "--quiet"])
             self.assertEqual(code, 0, "known findings are suppressed by the baseline")
-            self.assertIn("suppresses", stderr)
+            self.assertIn("active suppression", stderr)
 
             sarif = json.loads((out / "security.sarif").read_text(encoding="utf-8"))
             results = sarif["runs"][0]["results"]
@@ -165,16 +169,18 @@ class BaselineCliTests(unittest.TestCase):
             root = Path(tmp)
             out = root / "out"
             run_args = ["--dir", str(Path(__file__).resolve().parent / "fixtures" / "sample_app"), "--out", str(out)]
-            self._run(run_args + ["--create-baseline", "--quiet"])
+            code, _, _ = self._run(run_args + ["--format", "json", "--create-baseline", "--quiet"])
+            self.assertEqual(code, 0)
             baseline_path = out / "security.baseline.json"
 
-            payload = json.loads(baseline_path.read_text(encoding="utf-8"))
-            total = len(payload["findings"])
-            critical = [record for record in payload["findings"] if record["severity"] == "critical"]
+            graph = json.loads((out / "graph.json").read_text(encoding="utf-8"))
+            findings = graph["findings"]
+            total = len(findings)
+            critical = [finding for finding in findings if finding["severity"] == "critical"]
             self.assertTrue(critical)
-            keep = [record for record in payload["findings"] if record["id"] != critical[0]["id"]]
+            keep = [finding["id"] for finding in findings if finding["id"] != critical[0]["id"]]
             baseline_path.write_text(
-                json.dumps({"schema_version": "1", "tool": "secdiagram", "findings": keep}),
+                json.dumps({"schema_version": "1", "tool": "secdiagram", "findings": [{"id": fid} for fid in keep]}),
                 encoding="utf-8",
             )
 

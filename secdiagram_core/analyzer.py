@@ -19,12 +19,18 @@ from .frameworks import annotate, load_frameworks_config
 from .graph_builder import BuildStats, GraphBuilder
 from .iac import analyze_iac
 from .java_index import analyze_java_security, build_java_graph, index_java
+from .misconfig import analyze_misconfig
 from .model import DependencyReachabilitySummary, Finding, Graph, TaintTrace, stable_id
+from .polyglot_index import build_polyglot_graph, index_polyglot
+from .polyglot_security import analyze_polyglot_security
 from .protocols import get_registered_indexers, get_registered_security_providers
 from .redaction import redact_secrets
 from .resolver import Resolver
+from .risk import score_findings
 from .sca import build_dependency_reachability, check_package_reachable
 from .security import analyze as analyze_security
+from .taint_flows import annotate_flows
+from .threat_model import build_threat_model, summarize_threat_model
 
 LANGUAGE_BY_SUFFIX = {
     ".py": "python",
@@ -51,7 +57,7 @@ LANGUAGE_BY_SUFFIX = {
     ".swift": "swift",
 }
 
-SECURITY_LANGUAGES = ("java", "python")
+SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "typescript")
 
 
 @dataclass(slots=True)
@@ -242,6 +248,10 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if java_index.files:
         build_java_graph(graph, java_index)
 
+    polyglot_index = index_polyglot(repo.root, repo.rel_files)
+    if polyglot_index.files:
+        build_polyglot_graph(graph, polyglot_index)
+
     plugin_errors: list[dict[str, str]] = []
     for custom_indexer in sorted(get_registered_indexers(), key=lambda item: str(item.name)):
         snapshot = (copy.deepcopy(graph.nodes), list(graph.edges), list(graph.features))
@@ -259,6 +269,9 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         findings.extend(analyze_security(graph, indexes, resolver, repo.root, repo.rel_files))
         if java_index.files:
             findings.extend(analyze_java_security(graph, java_index, repo.root, repo.name))
+        if polyglot_index.files:
+            findings.extend(analyze_polyglot_security(graph, polyglot_index))
+        findings.extend(analyze_misconfig(graph, repo.root, repo.rel_files))
         for custom_provider in sorted(get_registered_security_providers(), key=lambda item: str(item.name)):
             try:
                 provider_findings = list(custom_provider.analyze(graph, repo.root, repo.rel_files))
@@ -281,11 +294,15 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     graph.findings = list(merged.values())
     if plugin_errors:
         graph.meta["plugin_errors"] = plugin_errors
+    annotate_flows(graph)
     if config.advisory_dbs:
         advisory_index, advisory_summaries = load_advisories(config.advisory_dbs)
         validated = apply_advisories(graph.findings, advisory_index)
         graph.meta["advisory_sources"] = advisory_summaries
         graph.meta["advisory_validated_findings"] = validated
+    # Rank by risk last, once flows and exploit intelligence (KEV) are known.
+    score_findings(graph)
+    summarize_threat_model(graph, build_threat_model(graph))
     graph.edges = [
         edge
         for edge in graph.edges
@@ -324,6 +341,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             "is_git": repo.is_git,
             "python_files": len(indexes),
             "java_files": len(java_index.files),
+            "polyglot_files": polyglot_index.language_counts(),
             "iac_files": len(repo.iac_files),
             "files_discovered": len(repo.rel_files),
             "files_skipped": len(repo.skipped),
@@ -399,6 +417,89 @@ def analyze(
         cache_dir=cache_dir,
     )
     return run_analysis(cfg)
+
+
+@dataclass(slots=True)
+class WorkspaceAnalysisResult:
+    """Result of analyzing an entire multi-repo workspace."""
+
+    workspace: Any  # workspace.Workspace (lazy to avoid circular import)
+    per_repo: dict[str, AnalysisResult]
+    merged_graph: Graph
+    repo_roles: dict[str, Any]  # workspace.RepoRole
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "workspace": self.workspace.to_dict(),
+            "per_repo": {name: result.to_dict() for name, result in sorted(self.per_repo.items())},
+            "merged_graph": self.merged_graph.to_dict(),
+        }
+
+
+def run_workspace_analysis(
+    workspace_root: str | Path,
+    *,
+    repo_paths: list[str | Path] | None = None,
+    manual_roles: dict[str, str] | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    min_confidence: float = 0.5,
+    max_nodes: int = 2000,
+    security: bool = True,
+    jobs: int = 0,
+    cache_dir: Path | None = None,
+) -> WorkspaceAnalysisResult:
+    """Analyze multiple repos as a unified workspace.
+
+    1. Discovers repos and assigns roles (auto or manual).
+    2. Runs ``run_analysis`` on each repo individually.
+    3. Detects cross-repo relationships.
+    4. Merges all graphs into a single unified graph.
+    """
+    from .workspace import discover_workspace, merge_graphs
+
+    ws = discover_workspace(
+        workspace_root,
+        repo_paths=repo_paths,
+        manual_roles=manual_roles,
+        include=include,
+        exclude=exclude,
+    )
+
+    per_repo: dict[str, AnalysisResult] = {}
+    repo_graphs: dict[str, Graph] = {}
+    repo_roles_map: dict[str, Any] = {}
+
+    for repo_role in sorted(ws.repos, key=lambda r: r.name):
+        repo_roles_map[repo_role.name] = repo_role
+        try:
+            result = run_analysis(AnalysisConfig(
+                root=repo_role.path,
+                include=include or [],
+                exclude=exclude or [],
+                min_confidence=min_confidence,
+                max_nodes=max_nodes,
+                security=security,
+                jobs=jobs,
+                cache_dir=Path(str(cache_dir) + f"/{repo_role.name}") if cache_dir else None,
+            ))
+            per_repo[repo_role.name] = result
+            repo_graphs[repo_role.name] = result.graph
+        except Exception:
+            # Skip repos that fail analysis (e.g. empty dirs)
+            continue
+
+    merged = merge_graphs(repo_graphs, repo_roles_map, ws.inter_repo_edges)
+    merged.meta["workspace"] = ws.to_dict()
+    merged.meta["name"] = ws.name
+    merged.meta["workspace_mode"] = True
+
+    return WorkspaceAnalysisResult(
+        workspace=ws,
+        per_repo=per_repo,
+        merged_graph=merged,
+        repo_roles=repo_roles_map,
+    )
 
 
 def __getattr__(name: str) -> Any:

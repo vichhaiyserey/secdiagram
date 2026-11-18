@@ -1,0 +1,6 @@
+{
+    "name": "acme/invoices",
+    "require": {
+        "laravel/framework": "99.0.0"
+    }
+}

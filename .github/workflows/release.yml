@@ -7,7 +7,7 @@ on:
       - "[0-9]*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -22,9 +22,11 @@ jobs:
   verify:
     name: Verify tag is on main
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
@@ -55,8 +57,11 @@ jobs:
     name: Unit tests
     needs: verify
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
@@ -72,8 +77,11 @@ jobs:
     name: Build Python distributions
     needs: [verify, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
@@ -91,8 +99,13 @@ jobs:
 
   github-release:
     name: Publish GitHub release
-    needs: build
+    # Publish the GitHub release only after the image passed its gates and
+    # was pushed, so the two release artifacts never diverge.
+    needs: [build, docker-publish]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -108,11 +121,14 @@ jobs:
     name: Scan release image
     needs: [verify, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build image for scanning
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -124,8 +140,6 @@ jobs:
           tags: |
             secdiagram:release
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
       - name: Smoke test CLI
         run: docker run --rm ${{ env.IMAGE_NAME }}:${{ github.ref_name }} --help
       - name: Verify containerized diagram generation
@@ -154,12 +168,19 @@ jobs:
           category: trivy-release-image
         continue-on-error: true
 
+  # Release builds never read the shared GHA cache (written by branch and PR
+  # runs): published layers are always rebuilt from the pinned Dockerfile.
+  # The pre-push scan builds and the final push share this job's local buildx
+  # cache, so the pushed layers are the ones that were scanned.
   docker-publish:
     name: Publish Docker Hub image
     needs: [build, docker-scan]
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Log in to Docker Hub
@@ -197,7 +218,6 @@ jobs:
           push: false
           load: true
           tags: secdiagram:prepush-amd64
-          cache-from: type=gha
       - name: Trivy scan linux/amd64 (pre-push gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -215,7 +235,6 @@ jobs:
           push: false
           load: true
           tags: secdiagram:prepush-arm64
-          cache-from: type=gha
       - name: Trivy scan linux/arm64 (pre-push gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -234,8 +253,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
       # Post-publication audit (NOT a gate: the push above already happened).

@@ -123,7 +123,8 @@ class SupplyChainPinTests(unittest.TestCase):
         entries = re.findall(
             r"^\s*-\s*id:\s*(\S+)(.*?)(?=^\s*-\s*id:|\Z)", text, re.M | re.S
         )
-        self.assertGreater(len(entries), 0)
+        # An empty baseline is the healthy state: the image scanned with zero
+        # CRITICAL/HIGH findings and nothing needs a Rule 7 exception.
         ids = [cve for cve, _ in entries]
         self.assertEqual(len(ids), len(set(ids)), "duplicate baseline entries")
         for cve, block in entries:
@@ -219,6 +220,31 @@ class SupplyChainPinTests(unittest.TestCase):
             self.assertIn("CVE-2099-0002", text)
             self.assertIn("statement:", text)
             self.assertIn("expired_at: 2099-01-01", text)
+
+    def test_refresh_script_writes_empty_baseline(self) -> None:
+        report = {"Results": [{"Target": "image"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "scan.json"
+            output = Path(tmp) / ".trivyignore.yaml"
+            source.write_text(json.dumps(report), encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "refresh_image_baseline.py"),
+                    str(source),
+                    "--expires",
+                    "2099-01-01",
+                    "--output",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            text = output.read_text(encoding="utf-8")
+            self.assertIn("vulnerabilities: []", text)
+            self.assertNotIn("  - id:", text)
 
     def test_dependabot_ignores_node_major_updates(self) -> None:
         text = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")

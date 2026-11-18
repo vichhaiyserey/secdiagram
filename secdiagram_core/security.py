@@ -6,6 +6,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .ast_index import CallRec, DefRec, FileIndex
 from .frameworks import get_registered_sanitizers, get_registered_sinks
@@ -776,6 +777,7 @@ class SecurityAnalyzer:
         confidence: float,
         recommendation: str,
         trace: list[Loc] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         key = f"{category}:{loc.path}:{loc.line}:{title}"
         if key in self._seen_findings:
@@ -794,6 +796,7 @@ class SecurityAnalyzer:
                 evidence=[loc],
                 recommendation=recommendation,
                 trace=list(trace or []),
+                metadata=dict(metadata or {}),
             )
         )
 
@@ -1062,6 +1065,10 @@ class SecurityAnalyzer:
     ) -> bool:
         match = SECRET_ASSIGN_RE.search(line)
         if match and not self._is_placeholder_secret(match.group("value")):
+            value = match.group("value")
+            # A credential-shaped assignment whose value matches a curated
+            # provider format is verified evidence, not a heuristic guess.
+            provider_verified = any(pattern.search(value) for pattern in SECRET_TOKEN_RES)
             self._add_finding(
                 category=SECRET_CATEGORY,
                 severity="high",
@@ -1070,8 +1077,9 @@ class SecurityAnalyzer:
                 loc=Loc(path, line_number),
                 cwe=SECRET_CWE,
                 node_id=node_id,
-                confidence=0.7,
+                confidence=0.95 if provider_verified else 0.7,
                 recommendation=SECRET_RECOMMENDATION,
+                metadata={"secret_kind": "provider_token" if provider_verified else "assignment"},
             )
             return True
         for pattern in SECRET_TOKEN_RES:
@@ -1086,6 +1094,7 @@ class SecurityAnalyzer:
                     node_id=node_id,
                     confidence=0.8,
                     recommendation=SECRET_RECOMMENDATION,
+                    metadata={"secret_kind": "provider_token"},
                 )
                 return True
         return False
@@ -1105,6 +1114,7 @@ class SecurityAnalyzer:
                 node_id=node_id,
                 confidence=0.7,
                 recommendation=SECRET_RECOMMENDATION,
+                metadata={"secret_kind": "assignment"},
             )
             return True
         return False
@@ -1231,6 +1241,7 @@ class SecurityAnalyzer:
                 value = match.group(2).strip().strip("'\"")
                 if self._is_placeholder_secret(value):
                     continue
+                provider_verified = any(pattern.search(value) for pattern in SECRET_TOKEN_RES)
                 self._add_finding(
                     category=SECRET_CATEGORY,
                     severity="high",
@@ -1239,8 +1250,9 @@ class SecurityAnalyzer:
                     loc=Loc(path, line_number),
                     cwe=SECRET_CWE,
                     node_id=None,
-                    confidence=0.85,
+                    confidence=0.95 if provider_verified else 0.85,
                     recommendation=SECRET_RECOMMENDATION,
+                    metadata={"secret_kind": "provider_token" if provider_verified else "env_file"},
                 )
 
     # ------------------------------------------------------------------- run

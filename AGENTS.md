@@ -12,6 +12,7 @@ All AI agents operating on this codebase **MUST** read, understand, and adhere t
 - **Human-friendly system architecture diagrams** (`secdiagram.com` and C4 style) in Mermaid, PNG, SVG, and PDF.
 - **Detailed architectural relationship graphs** (modules, classes, methods, endpoints, database schemas, queues).
 - **SAST security overlays & threat models** citing exact `path:line` references, exportable to OASIS SARIF v2.1.0.
+- **MITRE ATT&CK audit gates** (`secdiagram audit <dir>`) that evaluate the parsed architecture against ATT&CK techniques and fail CI/CD with exit code 1 when a `policy.yaml` gate is violated.
 - **Evidence-grounded AI architectural narratives** via local Ollama or OpenAI endpoints without hallucinations.
 
 The guiding motto is: ***Small but Gold*** — minimal footprint, zero runtime bloat, maximum reliability.
@@ -103,11 +104,18 @@ When implementing fixes or enhancements, modify only the relevant modules:
 | [`secdiagram_core/discover.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/discover.py) | Repository enumeration, `.gitignore` parsing, polyglot manifest detection | `discover_repo()`, `RepoContext` |
 | [`secdiagram_core/ast_index.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/ast_index.py) | Python AST parsing for definitions, routes, calls, tasks, type annotations | `index_repo()`, `FileIndex`, `DefRec`, `CallRec` |
 | [`secdiagram_core/java_index.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/java_index.py) | Stdlib-only Java/Spring lexical indexer, DI/call graph edges, and Java SAST heuristics | `index_java()`, `build_java_graph()`, `analyze_java_security()` |
+| [`secdiagram_core/polyglot_index.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/polyglot_index.py) | Stdlib-only lexical indexer for C#/.NET, JavaScript/TypeScript, PHP and Go: routes, classes, DI, call/import edges | `index_polyglot()`, `build_polyglot_graph()`, `PolyglotIndex` |
+| [`secdiagram_core/polyglot_security.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/polyglot_security.py) | Function-scoped taint SAST rules for C#, JS/TS, PHP and Go | `analyze_polyglot_security()`, `RULES` |
+| [`secdiagram_core/taint_flows.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/taint_flows.py) | Language-neutral taint flows (hop, node, role) and the attack-path Mermaid diagram | `build_taint_flows()`, `annotate_flows()`, `render_taint_mermaid()` |
+| [`secdiagram_core/misconfig.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/misconfig.py) | Web/API misconfiguration rules (JWT, CORS, CSRF, cookies, XXE, randomness) for C#, JS/TS, PHP, Go, Java | `analyze_misconfig()`, `RULES` |
+| [`secdiagram_core/risk.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/risk.py) | Risk score per finding (impact x exposure x evidence x confidence x KEV), P0-P3 | `score_findings()`, `endpoint_exposure()` |
+| [`secdiagram_core/threat_model.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/threat_model.py) | Evidence-backed STRIDE threat model per trust boundary; MITRE ATT&CK evaluation + audit policy gate | `build_threat_model()`, `render_threat_model()`, `evaluate_attack()`, `policy_violations()` |
 | [`secdiagram_core/resolver.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/resolver.py) | Qualified symbol resolution, star-import handling, re-exports | `Resolver`, `Resolution` |
 | [`secdiagram_core/graph_builder.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/graph_builder.py) | Assembly of dependency graph, node pruning, edge deduplication | `GraphBuilder`, `BuildStats` |
 | [`secdiagram_core/high_level.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/high_level.py) | C4 subsystem compiler, tiering (Ingress, Gateway, Services, Data, External) | `build_high_level_architecture()`, `render_mermaid_highlevel()` |
 | [`secdiagram_core/security.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/security.py) | SAST heuristics: taint tracking, SQLi, command injection, secret patterns | `analyze()`, `Finding` |
-| [`secdiagram_core/iac.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/iac.py) | Infrastructure-as-Code audits: Dockerfile, Compose, K8s, Terraform | `analyze_iac()`, `IacResult` |
+| [`secdiagram_core/iac.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/iac.py) | Infrastructure-as-Code audits: Dockerfile, Compose, GitHub Actions, GitLab CI, Jenkinsfile, K8s, Terraform | `analyze_iac()`, `IacResult` |
+| [`secdiagram_core/yaml_lite.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/yaml_lite.py) | Stdlib-only indentation-aware YAML skeleton parser for IaC analyzers (block scalars, multi-doc, Helm markers) | `parse_yaml()`, `iter_nodes()`, `walk()` |
 | [`secdiagram_core/render_mermaid.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/render_mermaid.py) | Detailed Mermaid diagram generation, node shape styling | `render_mermaid()` |
 | [`secdiagram_core/render_image.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/render_image.py) | PNG/SVG/PDF rendering via local `mmdc`, Kroki, or mermaid.ink | `render_image()`, `ImageRenderError` |
 | [`secdiagram_core/render_sarif.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/render_sarif.py) | OASIS SARIF v2.1.0 security report generation | `render_sarif()` |
@@ -136,6 +144,10 @@ python -m unittest discover -s tests -v
 ```
 - **Requirement**: The full test suite (currently 210+ tests) must pass with exit code `0`.
 - If new functionality was added, corresponding unit tests must be added in `tests/test_*.py`.
+- **Cross-platform requirement (see CONTRIBUTING.md "Cross-Platform Unit Test Requirements")**:
+  - Never construct or combine `pathlib.Path` objects inside an `os.name` mock (pathlib dispatches its flavour class from `os.name`; mocking it on Windows raises `UnsupportedOperation`).
+  - Never assert platform-native path separators (`\`) in test expectations; runtime output is normalized to forward slashes for determinism.
+  - CI runs the unit-test matrix on `ubuntu-latest` **and** `windows-latest` for every supported Python version; tests that fail on either OS are merge blockers, not local-only issues.
 
 ### Step 2: Verify Code Quality & Type Safety
 ```bash
@@ -213,7 +225,7 @@ git diff
    - Import abstract collection types from `collections.abc` (`Iterable`, `Mapping`, `Sequence`), **never** from `typing`.
 
 6. **Container Image Security & Vulnerability Gating**:
-   - Always build containers using minimal, hardened base layers (`python:*-slim`, `node:*-slim`) with exact `@sha256:` digest pins.
+   - Always build containers using minimal, hardened base layers (`python:*-alpine`, `node:*-alpine`) with exact `@sha256:` digest pins, and run `apk upgrade --no-cache` before installing packages so stable-branch security revisions are applied.
    - Enforce non-root execution (`USER secdiagram`, UID 10001) and drop unnecessary capabilities.
    - Never suppress or ignore Critical or High image CVEs without a comprehensive, documented contextual reachability evaluation.
    - **Contextual Reachability & Exploitability Analysis Protocol**:

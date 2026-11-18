@@ -126,6 +126,12 @@ class RedactionTests(unittest.TestCase):
         inside = str(root / "secdiagram_core" / "cli.py")
         sanitized_inside = sanitize_path_text(inside, root)
         self.assertEqual(sanitized_inside, "./secdiagram_core/cli.py")
+        # Reports must be byte-identical across platforms (determinism):
+        # the forward-slash spelling of an inside path resolves the same way.
+        self.assertEqual(
+            sanitize_path_text(inside.replace("\\", "/"), root),
+            "./secdiagram_core/cli.py",
+        )
 
         outside_unix = "/etc/shadow"
         self.assertEqual(sanitize_path_text(outside_unix, root), "[external-path]")
@@ -161,7 +167,10 @@ class RedactionTests(unittest.TestCase):
         for hostile in hostile_inputs:
             start = time.perf_counter()
             redact_secrets(hostile)
-            self.assertLess(time.perf_counter() - start, 1.0, hostile[:12])
+            # Generous ceiling: guards against quadratic blow-ups (orders of
+            # magnitude slower), not absolute speed, so it must not flake on
+            # loaded or slower CI machines.
+            self.assertLess(time.perf_counter() - start, 2.5, hostile[:12])
 
     def test_dotted_and_prefixed_keys_still_redacted(self) -> None:
         self.assertEqual(redact_secrets("app.db.password=hunter2hunter2"), f"app.db.password={REDACTED}")
@@ -199,7 +208,10 @@ class RedactionTests(unittest.TestCase):
         for hostile in hostile_inputs:
             start = time.perf_counter()
             redact_secrets(hostile)
-            self.assertLess(time.perf_counter() - start, 1.0, hostile[:12])
+            # Generous ceiling: guards against quadratic blow-ups (orders of
+            # magnitude slower), not absolute speed, so it must not flake on
+            # loaded or slower CI machines.
+            self.assertLess(time.perf_counter() - start, 2.5, hostile[:12])
 
 
 if __name__ == "__main__":

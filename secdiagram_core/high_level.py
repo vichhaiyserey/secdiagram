@@ -782,6 +782,18 @@ def _scan_java(
     return subsystems, connections
 
 
+_POLYGLOT_LANGUAGES = frozenset({"csharp", "javascript", "typescript", "php", "go"})
+_NON_PYTHON_SUFFIXES = (
+    ".java", ".properties", ".xml", ".gradle", ".kts", ".cs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
+    ".mts", ".cts", ".php", ".go",
+)
+
+
+def _non_python_node(node: Node) -> bool:
+    """Java and polyglot nodes have their own high-level scanners."""
+    return bool(node.attrs.get("java")) or node.attrs.get("language") in _POLYGLOT_LANGUAGES
+
+
 def _scan_python_graph(
     root: Path,
     graph: Graph | None,
@@ -799,7 +811,7 @@ def _scan_python_graph(
     # Group nodes by feature; ignore test suites for production architecture
     features: dict[str, list[Node]] = {}
     for n in nodes:
-        if n.attrs.get("java"):
+        if _non_python_node(n):
             continue
         f = n.feature or "core"
         if f.lower() in {"tests", "test", "testing"}:
@@ -814,12 +826,12 @@ def _scan_python_graph(
         f_name = None
         if finding.node_id and finding.node_id in node_by_id:
             node = node_by_id[finding.node_id]
-            if node.attrs.get("java"):
+            if _non_python_node(node):
                 continue
             f_name = node.feature
         elif finding.evidence:
             evidence_path = finding.evidence[0].path
-            if evidence_path.endswith((".java", ".properties", ".xml", ".gradle", ".kts")):
+            if evidence_path.endswith(_NON_PYTHON_SUFFIXES):
                 continue
             f_name = evidence_path.split("/")[0]
         if f_name and f_name.lower() not in {"tests", "test", "testing"}:
@@ -957,6 +969,183 @@ def _scan_python_graph(
     return subsystems, connections
 
 
+_DATA_STORES: tuple[tuple[str, str, str, str, str], ...] = (
+    # (dependency marker, subsystem id, name, kind, technology)
+    ("postgres", "db_postgres", "PostgreSQL Database", "database", "PostgreSQL"),
+    ("pgx", "db_postgres", "PostgreSQL Database", "database", "PostgreSQL"),
+    ("lib/pq", "db_postgres", "PostgreSQL Database", "database", "PostgreSQL"),
+    ("mysql", "db_mysql", "MySQL Database", "database", "MySQL"),
+    ("sqlite", "db_sqlite", "SQLite Database", "database", "SQLite"),
+    ("mongo", "db_mongo", "MongoDB Database", "database", "MongoDB NoSQL"),
+    ("redis", "cache_redis", "Redis Cache", "cache", "Redis In-Memory Cache"),
+    ("kafka", "queue_kafka", "Kafka Event Bus", "queue", "Apache Kafka"),
+    ("amqp", "queue_rabbitmq", "RabbitMQ Broker", "queue", "RabbitMQ"),
+    ("rabbitmq", "queue_rabbitmq", "RabbitMQ Broker", "queue", "RabbitMQ"),
+)
+
+
+def _graph_endpoint_count(graph: Graph | None, language: str, base: str) -> int:
+    if graph is None:
+        return 0
+    prefix = "" if base in ("", ".") else base.rstrip("/") + "/"
+    return sum(
+        1
+        for node in graph.nodes.values()
+        if node.kind == "endpoint"
+        and node.attrs.get("language") == language
+        and (node.path or "").startswith(prefix)
+    )
+
+
+def _wire_data_stores(
+    sub_id: str,
+    dependencies: list[str],
+    existing: list[Subsystem],
+    connections: list[SubsystemConnection],
+) -> None:
+    wired: set[str] = set()
+    for marker, store_id, name, kind, tech in _DATA_STORES:
+        if store_id in wired or not any(marker in dep.lower() for dep in dependencies):
+            continue
+        wired.add(store_id)
+        store = _find_or_create_subsystem(existing, store_id, name, "data", kind, tech)
+        label = "Caches / Publishes" if kind in ("cache", "queue") else "Queries / Persists"
+        connections.append(SubsystemConnection(src=sub_id, dst=store.id, label=label, style="solid"))
+
+
+def _walk_manifests(root: Path, filename: str) -> list[Path]:
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in {".git", ".secdiagram", "vendor", "node_modules"})
+        if filename in filenames:
+            found.append(Path(dirpath) / filename)
+    return sorted(found)
+
+
+def _scan_php(
+    root: Path, existing_subsystems: list[Subsystem], graph: Graph | None
+) -> tuple[list[Subsystem], list[SubsystemConnection]]:
+    """PHP subsystems from composer.json (Laravel, Symfony, Slim, plain PHP)."""
+    subsystems: list[Subsystem] = []
+    connections: list[SubsystemConnection] = []
+    for manifest in _walk_manifests(root, "composer.json"):
+        text = _safe_read(root, manifest)
+        if text is None:
+            continue
+        try:
+            content = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(content, dict):
+            continue
+        requires = sorted({**(content.get("require-dev") or {}), **(content.get("require") or {})})
+        rel_dir = str(manifest.parent.relative_to(root)).replace("\\", "/")
+        raw_name = str(content.get("name") or manifest.parent.name or "php_app")
+        name = raw_name.split("/")[-1]
+        if any(dep.startswith("laravel/") for dep in requires):
+            tech = "Laravel"
+        elif any(dep.startswith("symfony/framework-bundle") for dep in requires):
+            tech = "Symfony"
+        elif any(dep.startswith("slim/") for dep in requires):
+            tech = "Slim"
+        else:
+            tech = "PHP"
+        endpoints = _graph_endpoint_count(graph, "php", rel_dir)
+        sub_id = _clean_id(f"php_{name}")
+        subsystems.append(
+            Subsystem(
+                id=sub_id,
+                name=name,
+                tier="gateway" if endpoints or tech != "PHP" else "services",
+                kind="api" if endpoints or tech != "PHP" else "service",
+                technology=f"{tech} (PHP)",
+                details=[f"{endpoints} Routes"] if endpoints else [],
+                path=str(manifest.relative_to(root)).replace("\\", "/"),
+            )
+        )
+        _wire_data_stores(sub_id, requires, existing_subsystems, connections)
+    return subsystems, connections
+
+
+_GO_REQUIRE_RE = re.compile(r"^\s*(?:require\s+)?([\w.\-]+/[\w.\-/]+)\s+v[\w.\-+]+", re.M)
+
+
+def _scan_go(
+    root: Path, existing_subsystems: list[Subsystem], graph: Graph | None
+) -> tuple[list[Subsystem], list[SubsystemConnection]]:
+    """Go subsystems from go.mod (net/http, gin, echo, chi, fiber)."""
+    subsystems: list[Subsystem] = []
+    connections: list[SubsystemConnection] = []
+    for manifest in _walk_manifests(root, "go.mod"):
+        text = _safe_read(root, manifest)
+        if text is None:
+            continue
+        module = re.search(r"^\s*module\s+(\S+)", text, re.M)
+        name = (module.group(1) if module else manifest.parent.name).rstrip("/").rsplit("/", 1)[-1]
+        requires = sorted(set(_GO_REQUIRE_RE.findall(text)))
+        frameworks = [
+            label
+            for marker, label in (
+                ("gin-gonic/gin", "Gin"),
+                ("labstack/echo", "Echo"),
+                ("go-chi/chi", "Chi"),
+                ("gofiber/fiber", "Fiber"),
+                ("gorilla/mux", "Gorilla Mux"),
+            )
+            if any(marker in dep for dep in requires)
+        ]
+        rel_dir = str(manifest.parent.relative_to(root)).replace("\\", "/")
+        endpoints = _graph_endpoint_count(graph, "go", rel_dir)
+        sub_id = _clean_id(f"go_{name}")
+        subsystems.append(
+            Subsystem(
+                id=sub_id,
+                name=name,
+                tier="gateway" if endpoints or frameworks else "services",
+                kind="api" if endpoints or frameworks else "service",
+                technology=" • ".join([f"Go {frameworks[0]}" if frameworks else "Go"] + frameworks[1:]),
+                details=[f"{endpoints} Routes"] if endpoints else [],
+                path=str(manifest.relative_to(root)).replace("\\", "/"),
+            )
+        )
+        _wire_data_stores(sub_id, requires, existing_subsystems, connections)
+    return subsystems, connections
+
+
+def _annotate_risk(subsystems: list[Subsystem], graph: Graph) -> None:
+    """Badge subsystems with the P0/P1 findings located under their project directory."""
+    counted: list[tuple[str, dict[str, int]]] = []
+    for sub in subsystems:
+        if not sub.path:
+            continue
+        base = sub.path.rsplit("/", 1)[0] if "/" in sub.path else ""
+        counted.append((base, {"P0": 0, "P1": 0}))
+    if not counted:
+        return
+    for finding in graph.findings:
+        priority = (finding.metadata.get("risk") or {}).get("priority")
+        if finding.baseline or priority not in ("P0", "P1") or not finding.evidence:
+            continue
+        path = finding.evidence[0].path
+        # Attribute to the most specific (longest) project directory containing the file.
+        best: dict[str, int] | None = None
+        best_len = -1
+        for base, counts in counted:
+            if (base == "" or path == base or path.startswith(base + "/")) and len(base) > best_len:
+                best, best_len = counts, len(base)
+        if best is not None:
+            best[priority] += 1
+    index = 0
+    for sub in subsystems:
+        if not sub.path:
+            continue
+        counts = counted[index][1]
+        index += 1
+        badge = " ".join(f"{label}x{counts[label]}" for label in ("P0", "P1") if counts[label])
+        if badge:
+            sub.details = [*sub.details, f"⚠ {badge}"]
+
+
 def build_high_level_architecture(root: Path, graph: Graph | None = None) -> HighLevelArchitecture:
     """Build a consolidated high-level system architecture across .NET, Node.js, Python, and IaC."""
     root = root.resolve()
@@ -998,6 +1187,16 @@ def build_high_level_architecture(root: Path, graph: Graph | None = None) -> Hig
         all_connections.extend(java_conns)
         for s in java_subs:
             frameworks.add(s.technology)
+
+    # 4b. Inspect PHP (composer.json) and Go (go.mod) projects
+    for label, scanner in (("PHP", _scan_php), ("Go", _scan_go)):
+        poly_subs, poly_conns = scanner(root, all_subsystems, graph)
+        if poly_subs:
+            languages.add(label)
+            all_subsystems.extend(poly_subs)
+            all_connections.extend(poly_conns)
+            for s in poly_subs:
+                frameworks.add(s.technology.split(" • ")[0])
 
     # 5. Inspect Python
     py_subs, py_conns = _scan_python_graph(root, graph, all_subsystems)
@@ -1110,6 +1309,8 @@ def build_high_level_architecture(root: Path, graph: Graph | None = None) -> Hig
                 seen_conns.add(pair)
                 valid_conns.append(conn)
 
+    if graph is not None:
+        _annotate_risk(all_subsystems, graph)
     return HighLevelArchitecture(
         subsystems=list(unique_subs.values()),
         connections=valid_conns,
