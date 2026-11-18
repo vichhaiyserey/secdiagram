@@ -140,7 +140,8 @@ class OutputTests(unittest.TestCase):
         rce = by_title["Code or command execution on the host"]
         self.assertEqual((rce.status, rce.priority), ("observed", "P0"))
         entry = by_title["Entry points reachable without (detected) authentication"]
-        self.assertEqual(entry.status, "observed")
+        # Even a source-to-sink trace cannot prove that inherited auth is absent.
+        self.assertEqual(entry.status, "review")
         text = render_threat_model(graph, threats)
         text.encode("ascii")
         self.assertIn("## Internet -> Application", text)

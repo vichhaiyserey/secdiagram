@@ -788,6 +788,17 @@ def merge_graphs(
         for finding in graph.findings:
             from .model import Finding
 
+            metadata = {**finding.metadata, "workspace_repo": repo_name}
+            if finding.metadata.get("flow"):
+                flow = []
+                for hop in finding.metadata["flow"]:
+                    path, separator, line = str(hop.get("loc", "")).rpartition(":")
+                    flow.append({
+                        **hop,
+                        "loc": f"{_prefix_path(path, repo_name)}:{line}" if separator else hop.get("loc", ""),
+                        "node": id_map.get((repo_name, hop.get("node"))),
+                    })
+                metadata["flow"] = flow
             new_finding = Finding(
                 id=stable_id("workspace-finding", repo_name, finding.id),
                 category=finding.category,
@@ -808,7 +819,7 @@ def merge_graphs(
                 ],
                 source=finding.source,
                 external_id=finding.external_id,
-                metadata={**finding.metadata, "workspace_repo": repo_name},
+                metadata=metadata,
             )
             merged.findings.append(new_finding)
 

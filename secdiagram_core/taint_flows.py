@@ -152,7 +152,7 @@ def _hops_from_trace(finding: Finding, locator: _NodeLocator) -> list[FlowHop]:
     return hops
 
 
-def build_taint_flows(graph: Graph) -> list[TaintFlow]:
+def build_taint_flows(graph: Graph, *, deduplicate: bool = True) -> list[TaintFlow]:
     """One flow per tainted finding (with a source-to-sink path), deterministic."""
     locator = _NodeLocator(graph)
     flows: list[TaintFlow] = []
@@ -168,7 +168,7 @@ def build_taint_flows(graph: Graph) -> list[TaintFlow]:
         flow = TaintFlow(finding=finding, hops=hops)
         sink_ref = finding.evidence[0].ref if finding.evidence else hops[-1].loc.ref
         key = (finding.category, sink_ref, tuple(flow.node_path))
-        if key in seen:  # several rules on one sink: draw the path once
+        if deduplicate and key in seen:  # several rules on one sink: draw the path once
             continue
         seen.add(key)
         flows.append(flow)

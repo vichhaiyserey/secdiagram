@@ -46,7 +46,7 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
 | :--- | :--- | :--- |
 | `--dir DIR` | `.` | Target repository directory to inspect |
 | `--out OUT` | `<dir>/.secdiagram` | Output directory for all generated artifacts |
-| `--format FORMAT` | `json,md,mermaid` | Comma-separated outputs: `json` (`graph.json`), `md` (`ARCHITECTURE.md`, plus `THREAT_MODEL.md` when security analysis is on), `mermaid` (`diagram.mmd`, `diagram-highlevel.mmd`, `diagram-taint.mmd`), `sarif`, `vex`, `html`, `png`, `svg`, `pdf` |
+| `--format FORMAT` | `json,md,mermaid` | Comma-separated outputs: `json` (`graph.json`), `md` (`ARCHITECTURE.md`, plus `THREAT_MODEL.md` when security analysis is on), `mermaid` (`diagram.mmd`, `diagram-highlevel.mmd`, `diagram-taint.mmd`), `sarif`, `vex`, `html`, `png`, `svg`, `pdf`. Security-enabled `json` or `md` also writes `threat-model.json`. |
 | `--high-level` | `false` | Generate high-level system overview diagram (`secdiagram.com` style) as primary diagram |
 | `--diagram-detail` | `architecture` | Visual detail level: `architecture`, `full`, `high-level`, `overview` |
 | `--image [FORMAT]` | `png` | Render visual diagrams to image (`png`, `svg`, `pdf`) |
@@ -238,3 +238,19 @@ secdiagram audit [DIR] [--policy FILE] [--json PATH] [--quiet]
 | `--quiet` | `false` | Print only the violation line or PASS |
 
 Exit codes: `0` policy satisfied, `1` policy violated or execution error.
+
+## 6. `secdiagram threat-diff` Subcommand
+
+```text
+secdiagram threat-diff BEFORE.json AFTER.json [--format md|json] [--out FILE] [--output text|json]
+```
+
+Compares saved `threat-model.json` artifacts offline. The default Markdown diff
+shows added/removed/changed records with source evidence, verification steps and
+analysis coverage changes. `--format json` emits the raw comparison; `--output
+json` emits the standard CI console envelope containing `diff`. Without `--out`,
+output goes to stdout. Input snapshots cannot be overwritten.
+
+Exit codes: `0` comparison completed (including differences), `1` unreadable or
+invalid snapshots, `2` invalid arguments. Removed records are not proof of fixes.
+See [Threat modeling](THREAT_MODELING.md) for identity and coverage limitations.
