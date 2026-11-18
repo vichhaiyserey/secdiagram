@@ -81,7 +81,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("flowchart LR", capped_text)
         # Should contain at most 5 node definitions plus subgraph lines
         node_lines = [line for line in capped_text.splitlines() if line.strip().startswith("n_") and "-->" not in line and "-.->" not in line and "==>" not in line]
-        self.assertLessEqual(len(node_lines), 5)
+        self.assertEqual(len(node_lines), 5, "an empty diagram must not satisfy the node-cap test")
 
     def test_markdown_is_cited_and_ascii(self) -> None:
         text = render_markdown(self.graph, self.meta)

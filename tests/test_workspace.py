@@ -457,8 +457,7 @@ class TestInterRepoEdgeDetection(unittest.TestCase):
             "api": RepoInfo(root=Path("/tmp/api"), name="api", rel_files=[]),
         }
         edges = _detect_inter_repo_edges(repos, infos)
-        for e in edges:
-            self.assertNotEqual(e.src_repo, e.dst_repo)
+        self.assertEqual(edges, [], "a single unreferenced repository must not create inferred edges")
 
 
 class TestMergeGraphs(unittest.TestCase):
@@ -696,6 +695,7 @@ class TestMergeGraphsDeterminism(unittest.TestCase):
 
         # Regardless of input dict order, same nodes should appear
         self.assertEqual(sorted(m1.nodes.keys()), sorted(m2.nodes.keys()))
+        self.assertEqual(m1.to_dict(), m2.to_dict(), "node IDs alone do not prove deterministic graph content")
 
     def test_feature_prefixed_with_repo_name(self):
         g1 = Graph()

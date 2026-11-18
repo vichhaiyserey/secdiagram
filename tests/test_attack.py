@@ -206,6 +206,7 @@ class PolicyGateTests(unittest.TestCase):
         result = _scored("sample_app")
         evals = evaluate_attack(result.graph)
         base = policy_violations(evals, parse_policy(DEFAULT_POLICY_YAML))
+        self.assertTrue(base, "the unsuppressed control must contain violations")
         text = "fail_priorities: [P0, P1]\nmin_score: 6.0\nignore_techniques:\n"
         text += "".join(f"  - {e.technique}\n" for e in base)
         self.assertEqual(policy_violations(evals, parse_policy(text)), [])
@@ -225,10 +226,12 @@ class PolicyGateTests(unittest.TestCase):
         self.assertEqual(policy_violations(evals, policy_strict), [])
 
     def test_technique_allowlist_restricts_gate(self) -> None:
-        result = _scored("sample_app")
-        evals = evaluate_attack(result.graph)
+        graph = _graph_with(None, ("tls", "secret"))
+        evals = evaluate_attack(graph)
         policy = parse_policy("fail_priorities: [P0, P1, P2, P3]\nmin_score: 0.0\ntechniques:\n  - T1040\n")
-        self.assertTrue(all(e.technique == "T1040" for e in policy_violations(evals, policy)))
+        unfiltered = parse_policy("fail_priorities: [P0, P1, P2, P3]\nmin_score: 0.0\n")
+        self.assertEqual({e.technique for e in policy_violations(evals, unfiltered)}, {"T1040", "T1552"})
+        self.assertEqual({e.technique for e in policy_violations(evals, policy)}, {"T1040"})
 
     def test_summary_renders_violations_and_pass(self) -> None:
         evals = evaluate_attack(_graph_with(None, ("secret",)))

@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,7 +53,9 @@ class BaselineUnitTests(unittest.TestCase):
         self.assertEqual(finding_fingerprint(finding), "abc123")
         other = fixture_result().graph.sorted_findings()[0]
         self.assertEqual(finding_fingerprint(other), other.id)
-        self.assertEqual(finding_fingerprint(other), finding_fingerprint(other))
+        changed = replace(other, id="mock_different_finding")
+        self.assertEqual(finding_fingerprint(changed), "mock_different_finding")
+        self.assertNotEqual(finding_fingerprint(changed), finding_fingerprint(other))
 
     def test_write_baseline_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
