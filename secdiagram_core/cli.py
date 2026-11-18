@@ -14,11 +14,22 @@ from typing import Any
 from . import __version__
 from .analyzer import AnalysisConfig, run_analysis
 from .baseline import apply_baseline, ignore_baseline, load_suppressions, write_baseline
+from .diagram_model import build_diagram_model
+from .diagram_quality import (
+    SEVERITY_ORDER,
+    analyze_diagram_quality,
+    format_quality_report,
+    has_errors,
+)
 from .discover import discover
 from .health import health_summary
-from .high_level import build_high_level_architecture, render_mermaid_highlevel
+from .high_level import (
+    HighLevelArchitecture,
+    build_high_level_architecture,
+    render_mermaid_highlevel,
+)
 from .llm import NarrativeError, generate_narrative
-from .model import SEVERITY_RANK
+from .model import SEVERITY_RANK, Graph
 from .policy import POLICY_MODES, apply_policy
 from .protocols import get_registered_exporters
 from .redaction import redact_secrets
@@ -26,7 +37,7 @@ from .render_html import render_html
 from .render_image import ImageRenderError, render_image
 from .render_json import write_json
 from .render_markdown import render_markdown
-from .render_mermaid import render_mermaid
+from .render_mermaid import build_mermaid_model, render_mermaid
 from .render_sarif import render_sarif
 from .render_security import render_security_html, render_security_markdown
 from .render_vex import render_vex
@@ -691,6 +702,23 @@ def _parse_role_args(role_args: list[str]) -> dict[str, str]:
     return manual_roles
 
 
+def _validate_diagrams(graph: Graph, hla: HighLevelArchitecture, args: argparse.Namespace) -> bool:
+    """Validate the primary projection and accompanying high-level diagram before writes."""
+    models = [build_diagram_model(graph, hla)]
+    if args.diagram_detail not in {"high-level", "overview"}:
+        models.append(build_mermaid_model(graph, args.diagram_detail, args.max_diagram_nodes))
+    issues = sorted(
+        {issue for model in models for issue in analyze_diagram_quality(model)},
+        key=lambda issue: (SEVERITY_ORDER.get(issue.severity, 9), issue.code, issue.subjects, issue.message),
+    )
+    for line in format_quality_report(issues):
+        print(line)
+    if has_errors(issues):
+        print("secdiagram: diagram validation failed; rendering skipped", file=sys.stderr)
+        return False
+    return True
+
+
 def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | None) -> int:
     """Handle the --workspace flag: analyze multiple repos as a unified product."""
     from .analyzer import run_workspace_analysis
@@ -730,18 +758,6 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
         return 1
 
     graph = ws_result.merged_graph
-    out.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-
-    # Write workspace manifest
-    ws_json_path = out / "workspace.json"
-    ws_json_path.write_text(
-        json.dumps(ws_result.workspace.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    written.append(ws_json_path)
-
     # Score and build threat model on merged graph
     score_findings(graph)
     hla = build_high_level_architecture(workspace_root, graph)
@@ -752,6 +768,19 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
             if sub.path and repo_role.name in sub.path:
                 sub.metadata["workspace_role"] = repo_role.role
                 sub.metadata["workspace_repo"] = repo_role.name
+
+    if args.validate and not _validate_diagrams(graph, hla, args):
+        return 1
+
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    ws_json_path = out / "workspace.json"
+    ws_json_path.write_text(
+        json.dumps(ws_result.workspace.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    written.append(ws_json_path)
 
     highlevel_mermaid = render_mermaid_highlevel(
         hla,
@@ -907,6 +936,8 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
         cache_dir = _normalize_cli_path(args.cache_dir) if args.cache_dir else out / "cache"
 
     # ── Workspace mode: multi-repo analysis ───────────────────────────
+    if args.high_level:
+        args.diagram_detail = "high-level"
     if args.workspace:
         if args.dry_run or args.output == "json" or args.verbose or any(
             item.split("=", 1)[0] in {"--max-files", "--max-file-bytes", "--max-total-bytes", "--config"} for item in argv
@@ -992,6 +1023,10 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
             if finding.confidence >= args.min_finding_confidence
         ]
     graph.meta["finding_confidence_floor"] = args.min_finding_confidence
+    if args.validate:
+        validation_hla = build_high_level_architecture(root, graph)
+        if not _validate_diagrams(graph, validation_hla, args):
+            return 1
     try:
         out.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -1079,23 +1114,8 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
     if "security_baseline" in graph.meta:
         meta["security_baseline"] = graph.meta["security_baseline"]
 
-    if args.high_level:
-        args.diagram_detail = "high-level"
-
     progress("rendering")
     hla = build_high_level_architecture(root, graph)
-
-    if args.validate:
-        from .diagram_model import build_diagram_model
-        from .diagram_quality import analyze_diagram_quality, format_quality_report, has_errors
-
-        diagram_model = build_diagram_model(graph, hla)
-        quality_issues = analyze_diagram_quality(diagram_model)
-        for line in format_quality_report(quality_issues):
-            print(line)
-        if has_errors(quality_issues):
-            print("secdiagram: diagram validation failed; rendering skipped", file=sys.stderr)
-            return 1
 
     highlevel_mermaid = render_mermaid_highlevel(
         hla,
