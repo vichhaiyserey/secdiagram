@@ -419,6 +419,89 @@ def analyze(
     return run_analysis(cfg)
 
 
+@dataclass(slots=True)
+class WorkspaceAnalysisResult:
+    """Result of analyzing an entire multi-repo workspace."""
+
+    workspace: Any  # workspace.Workspace (lazy to avoid circular import)
+    per_repo: dict[str, AnalysisResult]
+    merged_graph: Graph
+    repo_roles: dict[str, Any]  # workspace.RepoRole
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "workspace": self.workspace.to_dict(),
+            "per_repo": {name: result.to_dict() for name, result in sorted(self.per_repo.items())},
+            "merged_graph": self.merged_graph.to_dict(),
+        }
+
+
+def run_workspace_analysis(
+    workspace_root: str | Path,
+    *,
+    repo_paths: list[str | Path] | None = None,
+    manual_roles: dict[str, str] | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    min_confidence: float = 0.5,
+    max_nodes: int = 2000,
+    security: bool = True,
+    jobs: int = 0,
+    cache_dir: Path | None = None,
+) -> WorkspaceAnalysisResult:
+    """Analyze multiple repos as a unified workspace.
+
+    1. Discovers repos and assigns roles (auto or manual).
+    2. Runs ``run_analysis`` on each repo individually.
+    3. Detects cross-repo relationships.
+    4. Merges all graphs into a single unified graph.
+    """
+    from .workspace import discover_workspace, merge_graphs
+
+    ws = discover_workspace(
+        workspace_root,
+        repo_paths=repo_paths,
+        manual_roles=manual_roles,
+        include=include,
+        exclude=exclude,
+    )
+
+    per_repo: dict[str, AnalysisResult] = {}
+    repo_graphs: dict[str, Graph] = {}
+    repo_roles_map: dict[str, Any] = {}
+
+    for repo_role in sorted(ws.repos, key=lambda r: r.name):
+        repo_roles_map[repo_role.name] = repo_role
+        try:
+            result = run_analysis(AnalysisConfig(
+                root=repo_role.path,
+                include=include or [],
+                exclude=exclude or [],
+                min_confidence=min_confidence,
+                max_nodes=max_nodes,
+                security=security,
+                jobs=jobs,
+                cache_dir=Path(str(cache_dir) + f"/{repo_role.name}") if cache_dir else None,
+            ))
+            per_repo[repo_role.name] = result
+            repo_graphs[repo_role.name] = result.graph
+        except Exception:
+            # Skip repos that fail analysis (e.g. empty dirs)
+            continue
+
+    merged = merge_graphs(repo_graphs, repo_roles_map, ws.inter_repo_edges)
+    merged.meta["workspace"] = ws.to_dict()
+    merged.meta["name"] = ws.name
+    merged.meta["workspace_mode"] = True
+
+    return WorkspaceAnalysisResult(
+        workspace=ws,
+        per_repo=per_repo,
+        merged_graph=merged,
+        repo_roles=repo_roles_map,
+    )
+
+
 def __getattr__(name: str) -> Any:
     """Backward compatibility shims for downstream tools importing across modules."""
     if name in {"build_high_level_architecture", "render_mermaid_highlevel", "HighLevelArchitecture", "Subsystem", "SubsystemConnection"}:
