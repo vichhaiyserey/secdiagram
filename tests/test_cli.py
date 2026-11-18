@@ -284,9 +284,11 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             with mock.patch("os.name", "posix"), mock.patch.object(Path, "exists", autospec=True) as mock_exists:
-                # The fake Git-Bash path does not exist as-is, so the function
-                # must run its translation regex instead of the early return.
-                mock_exists.return_value = False
+                # Simulate the Git-Bash mount namespace: the fake Windows path
+                # does not exist, but the POSIX root "/" does. Returning False
+                # for every path (as this test used to) makes the translation
+                # branch unreachable and the assertion impossible to satisfy.
+                mock_exists.side_effect = lambda candidate: str(candidate) == "/"
                 fake_git_bash_path = f"C:/Program Files/Git/{tmp_path.name}"
                 resolved = _normalize_cli_path(fake_git_bash_path)
                 self.assertTrue(str(resolved).endswith(tmp_path.name))
