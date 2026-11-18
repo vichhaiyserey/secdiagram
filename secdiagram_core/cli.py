@@ -97,6 +97,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dir", default=".", help="repository directory to analyze (default: .)")
     parser.add_argument(
+        "--workspace",
+        default=None,
+        metavar="DIR",
+        help=(
+            "analyze multiple repos under DIR as a unified product workspace; "
+            "each immediate subdirectory is treated as a separate microservice/repo"
+        ),
+    )
+    parser.add_argument(
+        "--role",
+        action="append",
+        default=[],
+        metavar="REPO=ROLE",
+        help=(
+            "manually assign a role to a repo in the workspace (repeatable); "
+            "roles: backend, frontend, gateway, worker, data-layer, infrastructure, library "
+            "(e.g. --role user-service=backend --role web-app=frontend)"
+        ),
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="output directory (default: <dir>/.secdiagram)",
@@ -638,6 +658,160 @@ def audit_main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _parse_role_args(role_args: list[str]) -> dict[str, str]:
+    """Parse ``--role REPO=ROLE`` arguments into a dict."""
+    manual_roles: dict[str, str] = {}
+    for item in role_args:
+        if "=" not in item:
+            continue
+        name, _, role = item.partition("=")
+        name = name.strip()
+        role = role.strip().lower()
+        if name and role:
+            manual_roles[name] = role
+    return manual_roles
+
+
+def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | None) -> int:
+    """Handle the --workspace flag: analyze multiple repos as a unified product."""
+    from .analyzer import run_workspace_analysis
+    from .high_level import build_high_level_architecture, render_mermaid_highlevel
+    from .workspace import VALID_ROLES
+
+    workspace_root = _normalize_cli_path(args.workspace)
+    manual_roles = _parse_role_args(args.role)
+
+    # Validate role names
+    for repo_name, role in manual_roles.items():
+        if role not in VALID_ROLES:
+            print(
+                f"secdiagram: invalid role '{role}' for repo '{repo_name}'; "
+                f"valid roles: {', '.join(sorted(VALID_ROLES))}",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        ws_result = run_workspace_analysis(
+            workspace_root,
+            manual_roles=manual_roles,
+            include=args.include,
+            exclude=args.exclude,
+            min_confidence=args.min_confidence,
+            max_nodes=args.max_nodes,
+            security=args.security,
+            jobs=args.jobs,
+            cache_dir=cache_dir,
+        )
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        print(f"secdiagram: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # pragma: no cover - defensive top-level guard
+        print(f"secdiagram: workspace analysis failed: {exc}", file=sys.stderr)
+        return 1
+
+    graph = ws_result.merged_graph
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    # Write workspace manifest
+    ws_json_path = out / "workspace.json"
+    ws_json_path.write_text(
+        json.dumps(ws_result.workspace.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    written.append(ws_json_path)
+
+    # Score and build threat model on merged graph
+    score_findings(graph)
+    hla = build_high_level_architecture(workspace_root, graph)
+
+    # Enrich HLA with workspace role metadata
+    for repo_role in ws_result.workspace.repos:
+        for sub in hla.subsystems:
+            if sub.path and repo_role.name in sub.path:
+                sub.metadata["workspace_role"] = repo_role.role
+                sub.metadata["workspace_repo"] = repo_role.name
+
+    highlevel_mermaid = render_mermaid_highlevel(
+        hla,
+        direction=args.diagram_direction if args.diagram_direction == "LR" else "TB",
+        theme=args.diagram_theme,
+    )
+
+    mermaid_text: str | None = None
+
+    try:
+        if "json" in args.format:
+            path = out / "graph.json"
+            write_json(graph, path)
+            written.append(path)
+        if "md" in args.format:
+            path = out / "ARCHITECTURE.md"
+            meta = dict(graph.meta)
+            meta["name"] = ws_result.workspace.name
+            path.write_text(
+                render_markdown(graph, meta, high_level_mermaid=highlevel_mermaid),
+                encoding="utf-8",
+                newline="\n",
+            )
+            written.append(path)
+        if "mermaid" in args.format:
+            if args.diagram_detail in {"high-level", "overview"}:
+                mermaid_text = highlevel_mermaid
+            else:
+                mermaid_text = render_mermaid(
+                    graph,
+                    link_base=args.link_base,
+                    detail=args.diagram_detail,
+                    direction=args.diagram_direction,
+                    theme=args.diagram_theme,
+                    max_diagram_nodes=args.max_diagram_nodes,
+                )
+            path = out / "diagram.mmd"
+            path.write_text(mermaid_text, encoding="utf-8", newline="\n")
+            written.append(path)
+
+            hl_path = out / "diagram-highlevel.mmd"
+            hl_path.write_text(highlevel_mermaid, encoding="utf-8", newline="\n")
+            written.append(hl_path)
+        if "sarif" in args.format:
+            path = out / "security.sarif"
+            path.write_text(render_sarif(graph), encoding="utf-8", newline="\n")
+            written.append(path)
+    except (OSError, ImageRenderError) as exc:
+        print(f"secdiagram: could not write output: {exc}", file=sys.stderr)
+        return 1
+
+    if not args.quiet:
+        # Print workspace summary
+        total_nodes = len(graph.nodes)
+        total_edges = len(graph.edges)
+        total_findings = len(graph.findings)
+        repo_count = len(ws_result.workspace.repos)
+
+        print(f"secdiagram workspace: {ws_result.workspace.name}")
+        print(f"  {repo_count} repo(s), {total_nodes} nodes, {total_edges} edges, {total_findings} findings")
+        for repo_role in sorted(ws_result.workspace.repos, key=lambda r: r.name):
+            confidence_pct = f"{repo_role.confidence * 100:.0f}%"
+            manual_tag = " (manual)" if repo_role.manual else ""
+            per_repo = ws_result.per_repo.get(repo_role.name)
+            file_count = len(per_repo.repo.rel_files) if per_repo else 0
+            print(f"  • {repo_role.name}: {repo_role.role} ({confidence_pct}{manual_tag}) [{file_count} files]")
+
+        cross_edges = ws_result.workspace.inter_repo_edges
+        if cross_edges:
+            print(f"  {len(cross_edges)} cross-repo relationship(s):")
+            for edge in cross_edges:
+                print(f"    {edge.src_repo} --[{edge.kind}]--> {edge.dst_repo}: {edge.label}")
+
+        for path in written:
+            print(f"  wrote {path}")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -675,6 +849,10 @@ def main(argv: list[str] | None = None) -> int:
     cache_dir = None
     if args.cache:
         cache_dir = _normalize_cli_path(args.cache_dir) if args.cache_dir else out / "cache"
+
+    # ── Workspace mode: multi-repo analysis ───────────────────────────
+    if args.workspace:
+        return _run_workspace_mode(args, out, cache_dir)
 
     try:
         result = run_analysis(
