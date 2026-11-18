@@ -570,14 +570,18 @@ def index_file(root: Path, rel_path: str) -> FileIndex:
     index = FileIndex(path=rel_path, module=module, is_package=is_package, text=text)
     try:
         tree = ast.parse(text, filename=rel_path)
-    except (SyntaxError, ValueError) as exc:
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
         if isinstance(exc, SyntaxError):
             index.error = f"SyntaxError: {exc.msg} (line {exc.lineno})"
         else:
             index.error = f"{type(exc).__name__}: {exc}"
         return index
     visitor = _Indexer(rel_path, module, is_package)
-    visitor.visit(tree)
+    try:
+        visitor.visit(tree)
+    except (RecursionError, MemoryError) as exc:
+        index.error = f"{type(exc).__name__}: source exceeds parser resource limits"
+        return index
     result = visitor.index
     result.text = text
     result.doc = ast.get_docstring(tree, clean=True)

@@ -175,8 +175,8 @@ secdiagram --format json,md,mermaid,png,svg,pdf
 
 ### Rendering Providers (`--image-provider`)
 
-1. **`auto` (default)**: Uses local offline Mermaid CLI (`mmdc`) if available. Otherwise, falls back seamlessly to open-source Kroki or mermaid.ink HTTP endpoints via standard library `urllib` (zero pip packages required).
-2. **`local`**: Offline rendering via bundled Mermaid CLI (`mmdc`) + headless Chromium.
+1. **`auto` (explicit opt-in)**: Uses local offline Mermaid CLI (`mmdc`) if available. Otherwise, falls back to open-source Kroki or mermaid.ink HTTP endpoints via standard library `urllib` (zero pip packages required).
+2. **`local` (default for `secdiagram`)**: Offline rendering via bundled Mermaid CLI (`mmdc`) + headless Chromium.
 3. **`kroki`**: Uses public `https://kroki.io` or your private on-premise Kroki container (`--image-endpoint`).
 4. **`mermaid.ink`**: Uses the public mermaid.ink image service.
 

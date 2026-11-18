@@ -203,12 +203,26 @@ def _git_files(root: Path) -> tuple[list[str], list[str]] | None:
     return sorted(set(files)), skipped
 
 
-def _walk_files(root: Path) -> tuple[list[str], list[str]]:
+def _walk_files(root: Path, exclude: list[str] | None = None) -> tuple[list[str], list[str]]:
     files: list[str] = []
     skipped: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root):
+    def walk_error(error: OSError) -> None:
+        try:
+            path = Path(error.filename or root).relative_to(root).as_posix()
+        except ValueError:
+            path = "."
+        skipped.append(f"unreadable directory: {path}; check read/search permissions")
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=walk_error):
+        excluded_dirs = {
+            name for name in dirnames
+            if _matches((Path(dirpath) / name).relative_to(root).as_posix() + "/", exclude or [])
+        }
+        for name in sorted(dirnames):
+            if _skipped_dir(name) or name in excluded_dirs:
+                skipped.append(f"ignored directory: {(Path(dirpath) / name).relative_to(root).as_posix()}/")
         dirnames[:] = sorted(
-            name for name in dirnames if not _skipped_dir(name) and name != ".git"
+            name for name in dirnames if not _skipped_dir(name) and name != ".git" and name not in excluded_dirs
         )
         for name in sorted(filenames):
             if _skipped_file(name):
@@ -236,7 +250,13 @@ def discover(
     include: list[str] | None = None,
     exclude: list[str] | None = None,
     skip_paths: list[Path] | None = None,
+    *,
+    max_files: int = 10000,
+    max_file_bytes: int = 2 * 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024,
 ) -> RepoInfo:
+    if min(max_files, max_file_bytes, max_total_bytes) < 0:
+        raise ValueError("discovery limits must be zero or positive")
     root_path = Path(root).expanduser().resolve()
     if not root_path.exists():
         raise FileNotFoundError(f"directory does not exist: {root_path}")
@@ -259,14 +279,15 @@ def discover(
     if is_git:
         git_res = _git_files(root_path)
         if git_res is None:
-            found, skipped = _walk_files(root_path)
+            found, skipped = _walk_files(root_path, exclude)
             is_git = False
         else:
             found, skipped = git_res
     else:
-        found, skipped = _walk_files(root_path)
+        found, skipped = _walk_files(root_path, exclude)
 
-    rel_files = []
+    rel_files: list[str] = []
+    total_bytes = 0
     for rel in found:
         if _skipped_file(rel.rsplit("/", 1)[-1]):
             continue
@@ -275,7 +296,28 @@ def discover(
         if any(rel.startswith(prefix) for prefix in skip_prefixes):
             continue
         if _keep(rel, include, exclude):
+            if max_files and len(rel_files) >= max_files:
+                skipped.append(f"file limit: {rel}; narrow --include/--exclude or raise --max-files")
+                continue
+            try:
+                size = (root_path / rel).stat().st_size
+                if not (root_path / rel).is_file():
+                    continue
+                if max_file_bytes and size > max_file_bytes:
+                    skipped.append(f"file size limit: {rel}; raise --max-file-bytes or exclude this path")
+                    continue
+                if max_total_bytes and total_bytes + size > max_total_bytes:
+                    skipped.append(f"input budget: {rel}; narrow --include/--exclude or raise --max-total-bytes")
+                    continue
+                with (root_path / rel).open("rb") as source:
+                    source.read(1)
+            except OSError:
+                skipped.append(f"unreadable file: {rel}; check permissions and file availability")
+                continue
             rel_files.append(rel)
+            total_bytes += size
+        else:
+            skipped.append(f"path filter: {rel}")
 
     commit = branch = None
     dirty = False
