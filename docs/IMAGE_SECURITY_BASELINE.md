@@ -8,7 +8,7 @@ reviewed on every release and superseded whenever a newer scan is published.
 
 | Field | Value |
 | --- | --- |
-| Package version | `0.3.2` (next release carrying the Alpine base migration) |
+| Package version | `0.3.3` (first release carrying the Alpine base migration) |
 | Base images | `python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89`, `node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5` |
 | Runtime user | `secdiagram` (`uid 10001`, `gid 10001`), non-root |
 | Default command | `secdiagram --dir .` (one-shot CLI) |
