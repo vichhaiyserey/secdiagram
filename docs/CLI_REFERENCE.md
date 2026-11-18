@@ -55,6 +55,7 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
 | `--max-diagram-nodes N`| `150` | Maximum components displayed in diagram; `0` for unlimited |
 | `--diagram-direction` | `LR` | Diagram orientation: `LR` (horizontal) or `TB` (top-to-bottom) |
 | `--diagram-theme` | `modern` | Visual theme palette: `modern` (Tailwind) or `classic` |
+| `--validate` | `false` | Validate the canonical diagram model before rendering (`DQ001`-`DQ010`): duplicate ids/labels, orphans, cycles, self-loops, dangling or duplicated relationships, tier inversions, rank skips, and unlabeled edges. Prints a deterministic report and exits `1` without writing artifacts when error-severity issues are found |
 | `--include GLOB` | `None` | Filter source files to include (repeatable) |
 | `--exclude GLOB` | `None` | Patterns to exclude during analysis (repeatable) |
 | `--link-base URL` | `None` | Prefix for clickable source links (e.g. `https://github.com/org/repo/blob/main`) |
@@ -91,7 +92,7 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
 | Exit Code | Meaning |
 | :---: | :--- |
 | `0` | **Success**: Analysis completed without errors, and no `--fail-on` security threshold or strict-policy block decision was violated. Also returned on `--help`, `--version`, or `--create-baseline`. |
-| `1` | **Execution Error**: Fatal runtime error, invalid argument combination, missing required file, or unhandled exception. |
+| `1` | **Execution Error**: Fatal runtime error, invalid argument combination, missing required file, or unhandled exception. Also returned when `--validate` reports an error-severity diagram issue; rendering is skipped and no artifacts are written. |
 | `2` | **Security Violation**: Active security or IaC findings met or exceeded the threshold defined in `--fail-on` (e.g. `--fail-on high`), or a strict-policy run (`--policy strict` / `--fail-on block`) produced at least one `block` enforcement decision. |
 
 ---
@@ -107,6 +108,15 @@ secdiagram --dir . --image
 ```bash
 secdiagram --dir . --high-level --image svg
 ```
+
+### Diagram Model Validation Gate
+```bash
+secdiagram --dir . --validate --format mermaid,json
+```
+
+Fails the build when the canonical diagram model contains structural errors
+such as dependency cycles or dangling relationships, so broken diagrams never
+reach documentation or pull requests.
 
 ### Strict CI Pipeline with SARIF Export and Failure on High Vulnerabilities
 ```bash

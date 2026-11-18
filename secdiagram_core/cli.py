@@ -321,6 +321,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="generate high-level system overview diagram (subsystems, tiers & connections) as primary diagram",
     )
     parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "check the canonical diagram model for quality issues (duplicates, orphans, cycles, "
+            "dangling or duplicated relationships, tier inversions, rank skips) before rendering; "
+            "exits 1 and skips rendering when error-severity issues are found"
+        ),
+    )
+    parser.add_argument(
         "--max-diagram-nodes",
         type=int,
         default=150,
@@ -981,6 +990,19 @@ def main(argv: list[str] | None = None) -> int:
         args.diagram_detail = "high-level"
 
     hla = build_high_level_architecture(root, graph)
+
+    if args.validate:
+        from .diagram_model import build_diagram_model
+        from .diagram_quality import analyze_diagram_quality, format_quality_report, has_errors
+
+        diagram_model = build_diagram_model(graph, hla)
+        quality_issues = analyze_diagram_quality(diagram_model)
+        for line in format_quality_report(quality_issues):
+            print(line)
+        if has_errors(quality_issues):
+            print("secdiagram: diagram validation failed; rendering skipped", file=sys.stderr)
+            return 1
+
     highlevel_mermaid = render_mermaid_highlevel(
         hla,
         direction=args.diagram_direction if args.diagram_direction == "LR" else "TB",
