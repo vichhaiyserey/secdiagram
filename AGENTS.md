@@ -225,7 +225,7 @@ git diff
    - Import abstract collection types from `collections.abc` (`Iterable`, `Mapping`, `Sequence`), **never** from `typing`.
 
 6. **Container Image Security & Vulnerability Gating**:
-   - Always build containers using minimal, hardened base layers (`python:*-slim`, `node:*-slim`) with exact `@sha256:` digest pins.
+   - Always build containers using minimal, hardened base layers (`python:*-alpine`, `node:*-alpine`) with exact `@sha256:` digest pins, and run `apk upgrade --no-cache` before installing packages so stable-branch security revisions are applied.
    - Enforce non-root execution (`USER secdiagram`, UID 10001) and drop unnecessary capabilities.
    - Never suppress or ignore Critical or High image CVEs without a comprehensive, documented contextual reachability evaluation.
    - **Contextual Reachability & Exploitability Analysis Protocol**:
