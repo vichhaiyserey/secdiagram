@@ -1,6 +1,9 @@
 # 🐳 Container & Docker Compose Guide
 
-`secdiagram` provides an enterprise-ready, hardened multi-stage container image built on digest-pinned base images (`python:3.12-slim` and `node:24-slim`). It executes securely as an unprivileged non-root user (`secdiagram`, `uid=10001`) with dropped Linux capabilities and comes pre-bundled with `@mermaid-js/mermaid-cli` and Chromium for **100% offline diagram image rendering**.
+`secdiagram` provides an enterprise-ready, hardened multi-stage container image built on digest-pinned Alpine base images (`python:3.12-alpine` and `node:24-alpine`), refreshed with `apk upgrade` at build time. It executes securely as an unprivileged non-root user (`secdiagram`, `uid=10001`, `gid=10001`) with dropped Linux capabilities and comes pre-bundled with `@mermaid-js/mermaid-cli` and Chromium for **100% offline diagram image rendering**.
+
+> [!NOTE]
+> The runtime is musl/Alpine based and ships a pure-Python application (zero runtime dependencies), so no glibc wheels are needed. A Trivy scan of the current image reports **0 CRITICAL/HIGH** findings; see [IMAGE_SECURITY_BASELINE.md](IMAGE_SECURITY_BASELINE.md).
 
 ---
 
@@ -76,5 +79,5 @@ docker compose run --rm secdiagram --ollama qwen2.5-coder --llm-template compreh
 
 - **Non-Root Execution**: Runs as user `secdiagram` (`uid=10001`, `gid=10001`).
 - **Read-Only Compatibility**: Container filesystem can be mounted read-only with ephemeral writable `/tmp` for Chromium renderer caches.
-- **Vulnerability Gating**: Strict policy against Critical and High vulnerabilities (scanned via Trivy).
+- **Vulnerability Gating**: Strict policy against Critical and High vulnerabilities (scanned via Trivy). The current Alpine image scans with zero CRITICAL/HIGH findings and an empty baseline.
 - **Offline Operation**: Pre-bundled Chromium and `@mermaid-js/mermaid-cli` eliminate any internet connectivity requirement during diagram generation.

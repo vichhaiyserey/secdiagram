@@ -1,5 +1,5 @@
-# Stage 1: Install Mermaid CLI in official Node.js image
-FROM node:24-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9 AS mermaid-builder
+# Stage 1: Install Mermaid CLI in official Node.js (musl/Alpine) image
+FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5 AS mermaid-builder
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 WORKDIR /opt/mermaid
 COPY docker/mermaid/package.json docker/mermaid/package-lock.json ./
@@ -7,7 +7,7 @@ RUN npm ci --omit=dev --ignore-scripts \
     && npm cache clean --force
 
 # Stage 2: Final runtime image
-FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
+FROM python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89
 
 # Labels following OCI specifications
 LABEL org.opencontainers.image.title="secdiagram" \
@@ -15,15 +15,17 @@ LABEL org.opencontainers.image.title="secdiagram" \
       org.opencontainers.image.authors="secdiagram maintainers" \
       org.opencontainers.image.licenses="MIT"
 
-# Install git, ca-certificates, and system Chromium for offline diagram rendering
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    curl \
-    ca-certificates \
-    chromium \
-    fonts-freefont-ttf \
-    zlib1g \
-    && rm -rf /var/lib/apt/lists/*
+# Alpine publishes security fixes as package revision bumps on the stable
+# branch, so upgrade the base distribution first, then install git,
+# ca-certificates, and the headless Chromium renderer with fonts. libstdc++ is
+# required by the Node.js binary copied below.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache \
+        git \
+        ca-certificates \
+        chromium \
+        font-freefont \
+        libstdc++
 
 # Copy Node binary and locked Mermaid CLI dependencies from the builder stage
 COPY --from=mermaid-builder /usr/local/bin/node /usr/local/bin/node
@@ -41,9 +43,10 @@ ENV PUPPETEER_CONFIG=/etc/puppeteer-config.json \
     MERMAID_CONFIG=/etc/mermaid-config.json
 
 # Create non-root user for container security
-RUN useradd -u 10001 -m -s /bin/bash secdiagram \
+RUN addgroup -g 10001 secdiagram \
+    && adduser -D -u 10001 -G secdiagram -h /home/secdiagram -s /bin/sh secdiagram \
     && mkdir -p /repo /app \
-    && chown -R secdiagram:secdiagram /app /repo
+    && chown -R secdiagram:secdiagram /app /repo /home/secdiagram
 
 WORKDIR /app
 

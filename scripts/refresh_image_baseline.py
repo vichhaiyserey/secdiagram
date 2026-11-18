@@ -19,22 +19,31 @@ from pathlib import Path
 
 CORE_PACKAGES = frozenset(
     {
+        # Alpine (current base: python:3.12-alpine / node:24-alpine)
         "chromium",
+        "git",
+        "krb5-libs",
+        "libcrypto3",
+        "libexpat",
+        "libssl3",
+        "libxml2",
+        "musl",
+        "node",
+        "openssl",
+        "python3",
+        "python3.12",
+        "zlib",
+        # Debian (historical baselines)
         "chromium-common",
         "curl",
         "libc6",
         "libc-bin",
-        "libcrypto3",
         "libcurl3t64-gnutls",
         "libcurl4t64",
         "libexpat1",
         "libpython3.12",
         "libsqlite3-0",
         "libssl3t64",
-        "libxml2",
-        "node",
-        "python3",
-        "python3.12",
         "zlib1g",
     }
 )
@@ -99,7 +108,7 @@ def render(findings: dict[str, dict[str, object]], artifact: str, expires: date)
         "# Rule 7 baseline: each entry is CRITICAL/HIGH, has no fixed package",
         "# version, and has a documented reachability rationale. Expired entries",
         "# stop being ignored, so the image gate blocks until they are re-reviewed.",
-        "vulnerabilities:",
+        "vulnerabilities: []" if not findings else "vulnerabilities:",
     ]
     for cve in sorted(findings):
         entry = findings[cve]

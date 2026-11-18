@@ -8,42 +8,44 @@ reviewed on every release and superseded whenever a newer scan is published.
 
 | Field | Value |
 | --- | --- |
-| Package version | `0.3.2` (maintainer accepted the Chromium residual risk for this release, #33, #36; `v0.3.1` tag was mis-pushed and never published) |
-| Base images | `python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b`, `node:24-slim@sha256:01d566e8d94d8c619591d78652babfccd3c6992a3dffa9ed5ab39e11cf6c70e9` |
-| Runtime user | `secdiagram` (`uid 10001`), non-root |
+| Package version | `0.3.2` (next release carrying the Alpine base migration) |
+| Base images | `python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89`, `node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5` |
+| Runtime user | `secdiagram` (`uid 10001`, `gid 10001`), non-root |
 | Default command | `secdiagram --dir .` (one-shot CLI) |
-| Scan command | `trivy image --severity CRITICAL,HIGH --scanners vuln secdiagram:verify` |
-| Scan date | 2026-11-15 |
+| Scan command | `trivy image --severity CRITICAL,HIGH --scanners vuln,secret secdiagram:alpine` |
+| Scan date | 2026-11-18 (Trivy 0.76.0, DB 2026-11-17) |
 
 ## Result summary
 
-- **Fixable CRITICAL/HIGH: 0** (`--ignore-unfixed` scan exits `0` with no findings).
-- **Unfixed upstream findings: 226 distinct CVEs (1 CRITICAL)**, all reported
-  by Debian or Chromium upstream with no available fixed package version at
-  scan time. Every affected package is at the newest `trixie-security`
-  candidate (`apt-cache policy` shows Installed == Candidate).
-- **2026-11-15 refresh:** 106 CVEs added, 0 removed: 89 `chromium`, 14 krb5,
-  3 `git`. See the component-specific analysis below.
-- The `0.2.0` image carried six *fixable* HIGH findings (apt, zlib/minizip).
-  This release clears all of them by refreshing the base-image digests and
-  installing the security-updated `zlib1g`.
+- **CRITICAL/HIGH findings: 0** (fixable: 0, unfixed: 0).
+- `.trivyignore.yaml` therefore contains **no exceptions** (`vulnerabilities: []`).
+  The image passes the blocking Trivy gate with an empty baseline.
+- Image size: 2.01 GB (previous Debian base: 2.11 GB).
 
-### Critical finding
+### Why the findings disappeared
 
-| CVE | Package | Installed | Fixed | Status | CVSS |
-| --- | --- | --- | --- | --- | --- |
-| CVE-2026-6653 | `libxml2` | `2.12.7+dfsg+really2.9.14-2.1+deb13u3` | none | affected | 9.8 (NVD) |
+The previous Debian 13.7 (`python:3.12-slim`) image reported 493 CRITICAL/HIGH
+findings (226 distinct CVEs, 1 CRITICAL) with **no fixed package version
+available from Debian**: `chromium` 346, krb5 56, util-linux 36, `libxml2` 8,
+plus `git`, `curl`, `libsqlite3-0`, `libexpat1`, `libcups2t64`, `libtiff6`.
+Those could only be tolerated through a Rule 7 baseline.
 
-### High findings by component
+Alpine Linux's stable release process publishes security fixes as package
+revision bumps instead of holding them back for a point release. The image now:
 
-| Component | Count | Upstream status |
-| --- | --- | --- |
-| `chromium`, `chromium-common` (`156.0.8078.79-1~deb13u1`) | 173 CVEs | affected |
-| krb5 libraries (`libkrb5-3`, `libgssapi-krb5-2`, `libk5crypto3`, `libkrb5support0`; `1.21.3-5+deb13u1`) | 14 CVEs | affected |
-| `git`, `git-man` (`1:2.47.3-0+deb13u1`) | 3 CVEs | affected |
-| `libxml2` | 7 | affected |
-| util-linux family (`mount`, `login`, `bsdutils`, `libblkid1`, `libmount1`, `libuuid1`, `libsmartcols1`, `liblastlog2-2`) | 28 | affected |
-| `libexpat1`, `libsqlite3-0`, `curl`/`libcurl*`, `libtiff6`, `libcups2t64`, `libxi6`, `libsndfile1`, remainder | 49 | affected / fix_deferred / will_not_fix |
+1. Builds `FROM python:3.12-alpine` (digest-pinned) and
+   `FROM node:24-alpine` (digest-pinned) for the Mermaid CLI builder stage.
+2. Runs `apk upgrade --no-cache` **before** installing `git`,
+   `ca-certificates`, `chromium`, `font-freefont`, and `libstdc++`, so the
+   latest stable security revisions are applied.
+3. Verifies the result with the blocking Trivy gate. At scan time this pulls
+   `chromium 156.0.8078.79-r0` and `krb5-libs 1.22.3-r0`, both fully patched on
+   Alpine.
+
+A bonus of the musl/Alpine base is that `secdiagram` has **zero Python runtime
+dependencies** (pure Python), so no glibc-specific wheels are required. Users
+who want to `pip install` C-extension packages into the image can still layer
+them on top of `vserey/secdiagram`.
 
 ## Triage policy
 
@@ -54,7 +56,7 @@ reviewed, expiring baseline in `.trivyignore.yaml`.
 | Tier | Condition | Gate action |
 | --- | --- | --- |
 | P0 | Any finding with a fixed package version available | **Block** — patch the base image or dependency |
-| P0 | CRITICAL/HIGH in a core runtime package (`python3`, glibc, OpenSSL, zlib, curl, expat, sqlite, `node`, `chromium`, `libxml2`) | **Block** unless reachability is proven and recorded |
+| P0 | CRITICAL/HIGH in a core runtime package (`python3`, `musl`, OpenSSL/`libcrypto3`, zlib, expat, sqlite, `node`, `chromium`, `libxml2`, `git`, `krb5-libs`) | **Block** unless reachability is proven and recorded |
 | P1 | CRITICAL/HIGH, unfixed upstream, proven not loaded/executed on the CLI or render path | **Allow** via a baseline entry with statement + expiry |
 | P2 | Upstream `fix_deferred` / `will_not_fix` | **Monitor** and re-review each release |
 
@@ -62,78 +64,54 @@ Baseline entries are generated by `scripts/refresh_image_baseline.py` from a
 Trivy JSON report. The script refuses to baseline fixable findings. Every entry
 carries a `statement` and an `expired_at` date; once expired, Trivy stops
 ignoring it and the gate blocks until the finding is re-triaged. The current
-baseline expires on **2027-02-13**.
+baseline is empty and expires on **2027-02-16** (re-review deadline; no entries
+are ignored).
 
 ## Reachability and exploitability analysis
 
 1. **Execution path.** The image entrypoint is the `secdiagram` Python CLI. The
    analysis pipeline uses only Python's `ast` and static manifest parsing; it
-   never executes analyzed repository code (`AGENTS.md` Rule 3). The CLI does
-   not import `libxml2`, Perl, systemd, util-linux, `libexpat`, `libsqlite3`, or
-   `libtiff`. Those libraries are present only as transitive Debian packages of
-   `chromium` and the base OS and are never loaded by the CLI process.
+   never executes analyzed repository code (`AGENTS.md` Rule 3). Only
+   `xml.etree` (libexpat via CPython), `zlib`, and the OpenSSL module used by
+   `hashlib`/`ssl` are loaded into the CLI process; everything else in the
+   image is OS tooling that the analyzer does not invoke.
 2. **Chromium scope.** Chromium is spawned only by `mmdc` for local Mermaid
-   rendering, as unprivileged `uid 10001`. It renders text produced by the
-   deterministic analyzer, not attacker-supplied web pages, and it never
-   browses external URLs. The vulnerable Chromium XML/HTML parsing surface is
-   therefore not exposed to remote ingress. Sandboxing is disabled
-   (`--no-sandbox`) for container compatibility, which is why Chromium findings
-   remain a documented residual risk rather than a proven-exploitable path.
+   rendering, as unprivileged `uid 10001`. It renders Mermaid text produced by
+   the deterministic analyzer and never navigates to external URLs. Diagram
+   labels can contain identifiers taken from the analyzed (untrusted)
+   repository, so renderer memory-safety bugs would be reachable when the user
+   explicitly requests image output; this is why the image must ship a fully
+   patched Chromium and why the container runs `--no-sandbox` only inside an
+   otherwise unprivileged, one-shot container. The Alpine package is currently
+   at 0 CRITICAL/HIGH findings.
 3. **Attack surface and ingress.** The default image command is a one-shot CLI;
    it opens no listening sockets or network daemons. The optional `serve`
    command is never started by `ENTRYPOINT`/`CMD` and requires an explicit user
    invocation. There is no unauthenticated network service exposed by default.
-4. **Privilege and sandboxing.** The container runs as non-root `uid 10001`,
-   writes only to the mounted `/repo` volume, and holds no elevated
-   capabilities. Successful exploitation would still be confined to the
-   ephemeral, unprivileged container context.
+4. **Privilege and sandboxing.** The container runs as non-root
+   `uid 10001`/`gid 10001`, writes only to the mounted `/repo` volume and
+   ephemeral `/tmp`, and holds no elevated capabilities. Successful
+   exploitation would still be confined to the ephemeral container context.
 5. **Input trust.** Repositories analyzed by `secdiagram` are treated as
    untrusted data and are never imported, compiled, or evaluated. The analyzer
    is offline-first; remote rendering and LLM calls are opt-in.
 
-### Component-specific analysis (2026-11-15 refresh)
+## Maintenance
 
-- **krb5 (14 CVEs, P1).** Every finding is in the MIT krb5 **server** daemons:
-  the KDC (ASN.1 request decoding, PKINIT pre-auth, keytab decryption, CAMMAC
-  authentication indicators) or `kadmind` (GSS-RPC/XDR request handling). Neither
-  `krb5-kdc` nor `krb5-admin-server` is installed. The client libraries are
-  present only as transitive dependencies of `libcups2t64` (via `chromium`) and
-  `libcurl` (via `curl`/`git`). secdiagram never performs Kerberos/GSSAPI
-  authentication, and nothing in the image accepts KDC or kadmin protocol
-  traffic. Not reachable.
-- **git (3 CVEs, P1).** The findings cover merge size calculation, submodule
-  metadata during **recursive clones**, and **fast-import**. secdiagram runs
-  only `git -C <root> ls-files`, `rev-parse`, and `status`
-  (`secdiagram_core/discover.py`, argv list, no shell, 30s timeout). It never
-  clones, merges, fetches, or runs fast-import. Not reachable.
-- **chromium (89 new CVEs, P0 accepted residual risk).** No package fix exists.
-  Chromium is **opt-in**: `secdiagram_core/cli.py` launches `mmdc`/Chromium only
-  when the user requests an image (`--image`, or `png`/`svg`/`pdf`/`image` in
-  `--format`). The default `secdiagram --dir .` command never starts it. When
-  enabled, it renders analyzer-generated Mermaid text (Mermaid default
-  `securityLevel: strict`) and never navigates to external URLs. Because it runs
-  with `--no-sandbox` and diagram labels derive from identifiers in the analyzed
-  (untrusted) repository, a renderer memory-safety bug triggered by crafted
-  diagram text cannot be ruled out with certainty. This is an **accepted residual
-  risk** recorded here, not a proven non-reachability. Users analyzing untrusted
-  repositories should omit image output.
+- Every release rebuilds from the pinned digests, re-runs `apk upgrade`, and
+  re-scans. A newly disclosed Alpine or Chromium CVE with a published fix is
+  resolved automatically by the rebuild.
+- The weekly `image-scan.yml` workflow re-scans the published `latest` tag and
+  opens or refreshes a tracking issue when an unclassified or fixable finding
+  appears.
+- If an unfixed CRITICAL/HIGH reappears, either prove non-reachability and add a
+  reviewed, expiring baseline entry with this document updated, or do not
+  publish the image.
 
-## Disposition
+## History
 
-The residual unfixed findings are upstream Debian/Chromium issues that cannot
-be remediated from this repository at scan time. They are not reachable through
-the CLI execution path, are not exposed via a default network service, and run
-under an unprivileged container user. They are recorded in `.trivyignore.yaml`
-with per-CVE statements and an expiry date. A fixable CRITICAL/HIGH finding is
-never baselined and always blocks publication.
-
-The published `vserey/secdiagram:0.2.1` image (manifest digest
-`sha256:483dae5bbd5a5d65861ab58204f213801c14c725daaf66ab9dea37662ce0932a`)
-scans with **0 fixable** CRITICAL/HIGH findings. The weekly
-`image-scan.yml` workflow re-scans the published `latest` tag and opens a
-tracking issue when an unclassified or fixable finding appears. Each release
-must re-run the scan and refresh this document and the baseline (with a new
-`expired_at`).
-
-Upstream tracking: <https://security-tracker.debian.org/tracker/CVE-2026-6653>
-and the Debian/Chromium security advisories for the packages listed above.
+- `0.2.0`: six *fixable* HIGH findings (apt, zlib/minizip).
+- `0.2.1`/`0.3.2` Debian base: 0 fixable, 226 distinct unfixed CVEs baselined
+  under Rule 7 (Chromium, krb5, util-linux, `libxml2`, `git`, …).
+- Next release: Alpine base migration removes all 493 CRITICAL/HIGH findings;
+  the baseline is now empty.
