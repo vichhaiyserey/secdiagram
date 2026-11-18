@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .analyzer import AnalysisConfig, run_analysis
 from .baseline import apply_baseline, ignore_baseline, load_suppressions, write_baseline
+from .discover import discover
+from .health import health_summary
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .llm import NarrativeError, generate_narrative
 from .model import SEVERITY_RANK
@@ -96,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Build deterministic architecture, relationship, and security diagrams for a Python repository.",
     )
     parser.add_argument("--dir", default=".", help="repository directory to analyze (default: .)")
+    parser.add_argument("--dry-run", action="store_true", help="validate inputs and discover files without parsing, cache writes, rendering or network requests")
+    parser.add_argument("--verbose", action="store_true", help="show detailed diagnostics and skipped paths on stderr")
+    parser.add_argument("--output", choices=("text", "json"), default="text", help="console summary format; JSON stdout is suitable for CI (default: text)")
+    parser.add_argument("--max-files", type=int, default=10000, help="maximum selected files; 0 disables (default: 10000)")
+    parser.add_argument("--max-file-bytes", type=int, default=2097152, help="per-file input byte limit; 0 disables (default: 2097152)")
+    parser.add_argument("--max-total-bytes", type=int, default=67108864, help="total selected input bytes; 0 disables (default: 67108864); bounds input, not process RSS")
     parser.add_argument(
         "--workspace",
         default=None,
@@ -290,8 +300,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--image-provider",
         choices=["auto", "local", "kroki", "mermaid.ink"],
-        default="auto",
-        help="renderer for diagram image: auto, local (mmdc), kroki, mermaid.ink (default: auto)",
+        default="local",
+        help="renderer: local (mmdc, default), auto (permits HTTP fallback), kroki, mermaid.ink",
     )
     parser.add_argument(
         "--image-endpoint",
@@ -821,7 +831,7 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == "serve":
@@ -831,11 +841,48 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.offline = args.offline or os.environ.get("SECDIAGRAM_OFFLINE", "").strip().lower() in {"1", "true", "yes"}
+    summary = summary if summary is not None else {}
+    summary.update({"schema_version": 1, "dry_run": args.dry_run, "stages": []})
+
+    def progress(stage: str) -> None:
+        summary["stages"].append(stage)
+        if not args.quiet:
+            print(f"secdiagram: {stage}", file=sys.stderr)
+
+    def fail(message: str) -> int:
+        summary["error"] = redact_secrets(message)
+        print(f"secdiagram: {summary['error']}", file=sys.stderr)
+        return 1
+
+    if args.config and not args.serve:
+        try:
+            configured = json.loads(_normalize_cli_path(args.config).read_text(encoding="utf-8"))
+            allowed = {"include": list, "exclude": list, "jobs": int, "max_nodes": int,
+                       "max_files": int, "max_file_bytes": int, "max_total_bytes": int, "security": bool}
+            if not isinstance(configured, dict):
+                raise ValueError("expected a JSON object")
+            for key, value in configured.items():
+                if key not in allowed or type(value) is not allowed[key]:
+                    raise ValueError(f"unknown key or invalid type: {key}")
+                if isinstance(value, list) and not all(isinstance(item, str) for item in value):
+                    raise ValueError(f"{key} must contain path glob strings")
+                flag = "--no-security" if key == "security" else "--" + key.replace("_", "-")
+                explicit = any(item.split("=", 1)[0] in {flag, "--security" if key == "security" else flag} for item in argv)
+                if not explicit:
+                    setattr(args, key, value)
+        except (OSError, ValueError) as exc:
+            return fail(f"cannot load --config {args.config}: {exc}; provide a readable scan configuration JSON file")
     if args.jobs < 0:
         parser.error("--jobs must be zero (auto) or a positive integer")
+    for option in ("max_files", "max_file_bytes", "max_total_bytes", "max_nodes"):
+        if getattr(args, option) < 0:
+            return fail(f"--{option.replace('_', '-')} must be zero or positive")
     root = _normalize_cli_path(args.dir)
 
     if args.serve:
+        if args.dry_run:
+            return fail("--dry-run applies to --dir analysis; omit --serve to preview a scan")
         from .server import serve
         cfg_path = _normalize_cli_path(args.config) if args.config else None
         return serve(
@@ -861,7 +908,36 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Workspace mode: multi-repo analysis ───────────────────────────
     if args.workspace:
+        if args.dry_run or args.output == "json" or args.verbose or any(
+            item.split("=", 1)[0] in {"--max-files", "--max-file-bytes", "--max-total-bytes", "--config"} for item in argv
+        ):
+            return fail("these scan controls currently require --dir; scan each workspace project separately")
         return _run_workspace_mode(args, out, cache_dir)
+
+    if args.offline and (args.llm or args.ollama):
+        return fail("--offline disables narrative HTTP requests; omit --llm/--ollama for a fully offline scan")
+    for label, value in (("--sonarqube-report", args.sonarqube_report), ("--xray-report", args.xray_report), ("--mermaid-js", args.mermaid_js)):
+        if value and not _normalize_cli_path(value).is_file():
+            return fail(f"{label} file does not exist or is unreadable: {value}; provide a readable local file or omit {label}")
+    for value in args.advisory_db:
+        if not _normalize_cli_path(value).exists():
+            return fail(f"--advisory-db path does not exist: {value}; supply a local advisory export")
+    if args.dry_run:
+        progress("discovery")
+        try:
+            repo = discover(root, args.include, args.exclude, skip_paths=[out, cache_dir] if cache_dir else [out],
+                            max_files=args.max_files, max_file_bytes=args.max_file_bytes, max_total_bytes=args.max_total_bytes)
+        except OSError as exc:
+            return fail(f"{exc}; check --dir and read permissions")
+        summary["plan"] = {"files": repo.rel_files, "skipped_paths": sorted(repo.skipped), "formats": args.format,
+                           "stages": ["discovery", "parsing", "mapping", "threat analysis", "rendering", "report generation"],
+                           "out": out.as_posix(), "cache": cache_dir.as_posix() if cache_dir else None}
+        if not args.quiet:
+            print(f"secdiagram: dry run: {len(repo.rel_files)} selected files, {len(repo.skipped)} skipped paths; no files written")
+            if args.verbose:
+                for selected_path in repo.rel_files + sorted(repo.skipped):
+                    print(f"  {selected_path}", file=sys.stderr)
+        return 0
 
     try:
         result = run_analysis(
@@ -874,6 +950,11 @@ def main(argv: list[str] | None = None) -> int:
                 security=args.security,
                 jobs=args.jobs,
                 cache_dir=cache_dir,
+                skip_paths=[out],
+                progress=progress,
+                max_files=args.max_files,
+                max_file_bytes=args.max_file_bytes,
+                max_total_bytes=args.max_total_bytes,
                 sonarqube_report=(
                     _normalize_cli_path(args.sonarqube_report)
                     if args.sonarqube_report
@@ -888,13 +969,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     except (FileNotFoundError, NotADirectoryError) as exc:
-        print(f"secdiagram: {exc}", file=sys.stderr)
-        return 1
+        return fail(f"{exc}; check --dir and local input paths")
     except Exception as exc:  # pragma: no cover - defensive top-level guard
-        print(f"secdiagram: analysis failed: {exc}", file=sys.stderr)
-        return 1
+        return fail(f"analysis failed: {exc}; check input permissions, syntax and scan configuration")
 
     graph = result.graph
+    summary["health"] = health_summary(result)
+    graph.meta["health"] = summary["health"]
+    summary["cache"] = result.cache_stats
+    diagnostics = graph.meta.get("diagnostics", [])
+    for item in diagnostics if args.verbose else diagnostics[:20]:
+        print(f"secdiagram: {item['path']}: {item['message']}. {item['hint']}", file=sys.stderr)
+    if not args.verbose and len(diagnostics) > 20:
+        print(f"secdiagram: {len(diagnostics) - 20} more diagnostics; use --verbose or --output json for details", file=sys.stderr)
+    if args.verbose:
+        for skipped_path in sorted(result.repo.skipped):
+            print(f"secdiagram: skipped {skipped_path}", file=sys.stderr)
     if args.min_finding_confidence > 0:
         graph.findings = [
             finding
@@ -902,7 +992,10 @@ def main(argv: list[str] | None = None) -> int:
             if finding.confidence >= args.min_finding_confidence
         ]
     graph.meta["finding_confidence_floor"] = args.min_finding_confidence
-    out.mkdir(parents=True, exist_ok=True)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return fail(f"cannot create output directory: {exc}; use --out with a writable directory")
     written: list[Path] = []
 
     baseline_mode = args.create_baseline or args.baseline is not None
@@ -989,6 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.high_level:
         args.diagram_detail = "high-level"
 
+    progress("rendering")
     hla = build_high_level_architecture(root, graph)
 
     if args.validate:
@@ -1012,6 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
     mermaid_text: str | None = None
     narrative_text: str | None = None
 
+    progress("report generation")
     try:
         if "json" in args.format:
             path = out / "graph.json"
@@ -1142,8 +1237,7 @@ def main(argv: list[str] | None = None) -> int:
                     context_chars=args.llm_context_chars,
                 )
             except NarrativeError as exc:
-                print(f"secdiagram: {exc}", file=sys.stderr)
-                return 1
+                return fail(str(exc))
             path = out / "NARRATIVE.md"
             path.write_text(narrative_text, encoding="utf-8", newline="\n")
             written.append(path)
@@ -1232,10 +1326,13 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     )
     except (OSError, ImageRenderError) as exc:
-        print(f"secdiagram: could not write output: {exc}", file=sys.stderr)
-        return 1
+        return fail(f"could not write output: {exc}; check --out permissions; for offline images install local mmdc/Chromium or use --format mermaid")
 
+    summary["written"] = sorted(path.as_posix() for path in written)
     if not args.quiet:
+        health = summary["health"]
+        print(f"secdiagram health: {health['files_parsed']} files parsed, {health['components_identified']} components, "
+              f"{health['unresolved_references']} unresolved references, {len(health['skipped_paths'])} skipped paths")
         counts: dict[str, int] = {}
         for finding in graph.findings:
             counts[finding.severity] = counts.get(finding.severity, 0) + 1
@@ -1299,3 +1396,38 @@ def main(argv: list[str] | None = None) -> int:
         # clean exit would be a silent false negative in CI security gates.
         return 1
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Keep JSON stdout a single versioned document, including failed scans."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    machine = "--output=json" in argv or any(
+        value == "--output" and index + 1 < len(argv) and argv[index + 1] == "json"
+        for index, value in enumerate(argv)
+    )
+    summary: dict[str, Any] = {"schema_version": 1}
+
+    def run() -> int:
+        try:
+            return _scan_main(argv, summary)
+        except SystemExit as exc:
+            if not machine:
+                raise
+            code = int(exc.code or 0)
+            if code:
+                summary["error"] = "Invalid command arguments; see stderr and --help."
+            return code
+        except (OSError, ValueError, MemoryError, RecursionError) as exc:
+            summary["error"] = redact_secrets(f"scan failed: {exc}; check local inputs and output permissions; reduce --max-total-bytes or use --jobs 1 for resource failures")
+            print(f"secdiagram: {summary['error']}", file=sys.stderr)
+            return 1
+
+    if not machine:
+        return run()
+    with contextlib.redirect_stdout(sys.stderr):
+        code = run()
+    if code == 1 and "error" not in summary:
+        summary["error"] = "Scan could not complete; see stderr diagnostics."
+    summary.update({"exit_code": code, "status": "ok" if code == 0 else "failed"})
+    print(json.dumps(summary, sort_keys=True))
+    return code

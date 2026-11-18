@@ -104,6 +104,20 @@ if result.has_taint_at("app/api.py", line=42):
 
 ## 📦 Generated Artifacts
 
+Preview a scan without writing files, or capture a structured CI summary:
+
+```bash
+secdiagram --dir . --offline --dry-run --verbose
+secdiagram --dir . --offline --output json --format json,sarif > scan-summary.json
+```
+
+Progress stages appear on stderr. The summary reports parsed files, detected languages,
+components, unresolved references and skipped paths. Use `--verbose` for diagnostic
+details, and check `health.complete` in CI to detect partial coverage.
+Image rendering defaults to local `mmdc`; HTTP rendering requires an explicit provider.
+For large repositories, combine repeatable `--include`/`--exclude` filters with the
+incremental cache and configurable input limits. See the [CLI reference](docs/CLI_REFERENCE.md).
+
 By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 
 - `diagram-highlevel.mmd` / `.png` — High-level C4 system tier diagram (`secdiagram.com` style).
