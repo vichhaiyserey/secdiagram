@@ -107,9 +107,21 @@ rendering and prints a stable report keyed by `DQnnn` codes:
 | `DQ009` | warning | Many relationships skip rank levels |
 | `DQ010` | info | Relationship has no kind |
 
+The detailed renderer shares its node collapsing, path-independent ordering,
+and display caps with validation. Both renderers order components and
+relationships using the canonical model while retaining their grouping,
+styles, source links and security overlays.
+
 Issues are ordered by severity then code and subjects are sorted, so CI
-diffs stay explainable. Any error-severity code makes the command exit `1`
-and skip rendering; warnings and info are reported but do not block.
+diffs stay explainable. Validation checks the selected primary projection
+and the accompanying high-level diagram in both `--dir` and `--workspace`
+scans. A cycle inside one subsystem is therefore checked in `architecture`
+or `full` mode; selecting `--high-level` checks the subsystem projection.
+Intentionally hidden or capped nodes are not treated as dangling references.
+Any error-severity code makes the command exit `1` before writing baselines,
+workspace manifests or reports; existing artifacts are preserved. Incremental
+index caches may still be updated during analysis. Warnings and info are
+reported but do not block.
 Acceptance tests in `tests/test_diagram_determinism.py` assert that repeated
 runs are byte-identical and that adding one service changes only that
 service's components plus a single subsystem label.

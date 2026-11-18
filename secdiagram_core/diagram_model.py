@@ -22,9 +22,12 @@ from __future__ import annotations
 import heapq
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from .high_level import HighLevelArchitecture
 from .model import Graph, stable_id
+
+if TYPE_CHECKING:
+    from .high_level import HighLevelArchitecture
 
 TIER_ORDER = ("ingress", "gateway", "services", "data", "external", "platform")
 TIER_INDEX = {tier: index for index, tier in enumerate(TIER_ORDER)}
@@ -62,9 +65,8 @@ class DiagramComponent:
     source: str = "graph"
     evidence: str = ""
 
-    def sort_key(self) -> tuple[str, int, str, str, str, str]:
+    def sort_key(self) -> tuple[int, str, str, str, str]:
         return (
-            self.tier,
             TIER_INDEX.get(self.tier, len(TIER_ORDER)),
             self.group,
             self.kind,
@@ -142,7 +144,7 @@ def _relationship(src: str, dst: str, kind: str, label: str = "", confidence: fl
 
 def _dedupe_relationships(relationships: list[DiagramRelationship]) -> list[DiagramRelationship]:
     merged: dict[tuple[str, str, str], DiagramRelationship] = {}
-    for relationship in sorted(relationships, key=lambda item: (item.src, item.dst, item.kind, item.id)):
+    for relationship in sorted(relationships, key=lambda item: (item.src, item.dst, item.kind, item.label, -item.confidence, item.id)):
         key = (relationship.src, relationship.dst, relationship.kind)
         current = merged.get(key)
         if current is None:
@@ -180,7 +182,6 @@ def _from_subsystems(
     relationships = [
         _relationship(connection.src, connection.dst, "connects", connection.label)
         for connection in hla.connections
-        if connection.src in components and connection.dst in components
     ]
     return [components[key] for key in sorted(components)], relationships
 
@@ -203,7 +204,6 @@ def _from_graph(graph: Graph) -> tuple[list[DiagramComponent], list[DiagramRelat
     relationships = [
         _relationship(edge.src, edge.dst, edge.kind, confidence=edge.confidence)
         for edge in graph.sorted_edges()
-        if edge.src in components and edge.dst in components
     ]
     return [components[key] for key in sorted(components)], relationships
 

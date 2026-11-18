@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 
+from .diagram_model import DiagramModel, build_diagram_model
 from .model import SEVERITY_RANK, Graph, Node
 
 SHAPES = {
@@ -152,24 +154,11 @@ def _severity_for(graph: Graph) -> dict[str, str]:
     return out
 
 
-def render_mermaid(
-    graph: Graph,
-    link_base: str | None = None,
-    detail: str = "architecture",
-    direction: str = "LR",
-    theme: str = "modern",
-    max_diagram_nodes: int = 150,
-    taint_overlay: bool = True,
-) -> str:
-    """Compile graph into clear, structured, human-friendly Mermaid diagram.
-
-    With *taint_overlay*, every hop of a source-to-sink taint flow is drawn in
-    red: existing edges are restyled and missing hops get a ``taint`` edge.
-    """
-    graph.dedupe_edges()
+def _select_diagram_nodes(
+    graph: Graph, detail: str, max_diagram_nodes: int,
+) -> tuple[list[Node], dict[str, str]]:
     all_nodes = graph.sorted_nodes()
     severity = _severity_for(graph)
-
     # In architecture detail mode:
     # 1. Collapse class methods to their parent class
     # 2. Omit private helper functions and redundant container modules
@@ -220,6 +209,71 @@ def render_mermaid(
     else:
         nodes = all_nodes
 
+    return nodes, remap
+
+
+def _project_mermaid_graph(
+    graph: Graph, detail: str, max_diagram_nodes: int,
+) -> tuple[Graph, dict[str, str]]:
+    """Share node collapsing, filters and edge caps between validation and rendering."""
+    nodes, remap = _select_diagram_nodes(graph, detail, max_diagram_nodes)
+    projected = Graph(nodes={node.id: node for node in nodes})
+    seen: set[tuple[str, str, str]] = set()
+    visible_edges = 0
+    for edge in graph.sorted_edges():
+        if edge.kind == "contains":
+            continue
+        src, dst = remap.get(edge.src, edge.src), remap.get(edge.dst, edge.dst)
+        # Preserve malformed input for DQ006; deliberately hidden nodes are different.
+        dangling = edge.src not in graph.nodes or edge.dst not in graph.nodes
+        if not dangling:
+            if src == dst or src not in projected.nodes or dst not in projected.nodes:
+                continue
+            src_node, dst_node = projected.nodes[src], projected.nodes[dst]
+            if detail == "architecture" and edge.kind == "imports":
+                if dst_node.kind != "external" and src_node.feature == dst_node.feature:
+                    continue
+        key = (src, dst, edge.kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not dangling:
+            if detail == "architecture" and visible_edges >= 350:
+                continue
+            visible_edges += 1
+        projected.edges.append(replace(edge, src=src, dst=dst))
+    return projected, remap
+
+
+def build_mermaid_model(
+    graph: Graph, detail: str = "architecture", max_diagram_nodes: int = 150,
+) -> DiagramModel:
+    """Canonical projection of the selected detailed diagram, before taint decoration."""
+    projected, _ = _project_mermaid_graph(graph, detail, max_diagram_nodes)
+    return build_diagram_model(projected)
+
+
+def render_mermaid(
+    graph: Graph,
+    link_base: str | None = None,
+    detail: str = "architecture",
+    direction: str = "LR",
+    theme: str = "modern",
+    max_diagram_nodes: int = 150,
+    taint_overlay: bool = True,
+) -> str:
+    """Compile graph into clear, structured, human-friendly Mermaid diagram.
+
+    With *taint_overlay*, every hop of a source-to-sink taint flow is drawn in
+    red: existing edges are restyled and missing hops get a ``taint`` edge.
+    """
+    graph.dedupe_edges()
+    severity = _severity_for(graph)
+
+    projected, remap = _project_mermaid_graph(graph, detail, max_diagram_nodes)
+    model = build_diagram_model(projected)
+    node_order = {component.id: index for index, component in enumerate(model.components)}
+    nodes = [projected.nodes[component.id] for component in model.components]
     displayed_ids = {node.id for node in nodes}
 
     by_feature: dict[str, list[Node]] = defaultdict(list)
@@ -238,21 +292,21 @@ def render_mermaid(
         lines.append('  empty["No Python nodes were discovered"]')
         return "\n".join(lines) + "\n"
 
-    for feature in sorted(by_feature):
+    for feature in sorted(by_feature, key=lambda name: (min(node_order[n.id] for n in by_feature[name]), name)):
         feature_id = "F_" + "".join(ch if ch.isalnum() else "_" for ch in feature)[:40]
         feature_nodes = by_feature[feature]
 
         if feature == "external":
             lines.append(f'  subgraph {feature_id}["📦 External Dependencies"]')
             lines.append("    direction TB")
-            for node in sorted(feature_nodes, key=lambda n: n.name):
+            for node in sorted(feature_nodes, key=lambda n: node_order[n.id]):
                 style = f":::{severity[node.id]}" if node.id in severity else ":::external"
                 lines.append(f"    n_{node.id}{_shape(node)}{style}")
             lines.append("  end")
         elif feature in {"infra", "infrastructure"}:
             lines.append(f'  subgraph {feature_id}["☁️ Infrastructure & Deployment"]')
             lines.append("    direction TB")
-            for node in sorted(feature_nodes, key=lambda n: n.name):
+            for node in sorted(feature_nodes, key=lambda n: node_order[n.id]):
                 style = f":::{severity[node.id]}" if node.id in severity else ":::infra"
                 lines.append(f"    n_{node.id}{_shape(node)}{style}")
             lines.append("  end")
@@ -278,7 +332,7 @@ def render_mermaid(
                 for sub_id, sub_title, tier_nodes in tiers:
                     lines.append(f'    subgraph {sub_id}["{sub_title}"]')
                     lines.append("      direction TB")
-                    for node in sorted(tier_nodes, key=lambda n: (n.kind, n.qualname)):
+                    for node in sorted(tier_nodes, key=lambda n: node_order[n.id]):
                         shape = _shape(node)
                         style = ""
                         if node.id in severity:
@@ -289,7 +343,7 @@ def render_mermaid(
                         lines.append(f"      n_{node.id}{shape}{style}")
                     lines.append("    end")
             else:
-                for node in sorted(feature_nodes, key=lambda n: (n.kind, n.qualname)):
+                for node in sorted(feature_nodes, key=lambda n: node_order[n.id]):
                     shape = _shape(node)
                     style = ""
                     if node.id in severity:
@@ -304,37 +358,13 @@ def render_mermaid(
     defs = CLASS_DEFS_MODERN if theme == "modern" else CLASS_DEFS_CLASSIC
     lines.append(defs.rstrip())
 
-    seen_edges: set[tuple[str, str, str]] = set()
-    node_by_id = {n.id: n for n in nodes}
     edge_lines: list[str] = []
     edge_pairs: list[tuple[str, str]] = []
 
-    for edge in graph.sorted_edges():
-        if edge.kind == "contains":
-            continue
-
-        src = remap.get(edge.src, edge.src)
-        dst = remap.get(edge.dst, edge.dst)
-
-        if src == dst:
-            continue
+    for edge in model.relationships:
+        src, dst = edge.src, edge.dst
         if src not in displayed_ids or dst not in displayed_ids:
             continue
-
-        src_node = node_by_id.get(src)
-        dst_node = node_by_id.get(dst)
-
-        # In architecture mode, suppress intra-feature imports to prevent visual noise
-        if detail == "architecture" and edge.kind == "imports":
-            if dst_node and dst_node.kind != "external":
-                if src_node and dst_node and (src_node.feature == dst_node.feature):
-                    continue
-
-        edge_key = (src, dst, edge.kind)
-        if edge_key in seen_edges:
-            continue
-        seen_edges.add(edge_key)
-
         if edge.kind == "imports":
             arrow = "-.->|imports|"
         elif edge.kind == "inherits":
@@ -345,11 +375,6 @@ def render_mermaid(
             arrow = "-->"
         edge_lines.append(f"  n_{src} {arrow} n_{dst}")
         edge_pairs.append((src, dst))
-
-    # In architecture mode, cap rendered edges to prevent exceeding Mermaid layout limits (500 maxEdges)
-    if detail == "architecture" and len(edge_lines) > 350:
-        edge_lines = edge_lines[:350]
-        edge_pairs = edge_pairs[:350]
 
     highlighted: list[int] = []
     if taint_overlay and graph.findings:

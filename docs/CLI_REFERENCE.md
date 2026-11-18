@@ -178,6 +178,12 @@ Fails the build when the canonical diagram model contains structural errors
 such as dependency cycles or dangling relationships, so broken diagrams never
 reach documentation or pull requests.
 
+The gate covers the selected primary diagram and its high-level companion,
+including workspace scans. Detailed modes check the same node collapsing,
+filters and caps used by rendering. On failure, existing baselines and reports
+remain unchanged, and no new baseline or workspace manifest is written.
+Incremental index caches can still be updated during analysis.
+
 ### Strict CI Pipeline with SARIF Export and Failure on High Vulnerabilities
 ```bash
 secdiagram --dir . --format sarif,json,html --fail-on high --baseline .secdiagram/security.baseline.json

@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from concurrent.futures import as_completed
 from pathlib import Path
 from unittest import mock
 
@@ -52,12 +53,39 @@ def _sample_repo(root: Path) -> None:
 
 
 class ScaleTests(unittest.TestCase):
+    def test_worker_pool_failure_preserves_serial_analysis(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            _sample_repo(root)
+            serial = run_analysis(AnalysisConfig(root=root, jobs=1))
+            self.assertTrue(serial.graph.nodes)
+            with mock.patch("secdiagram_core.ast_index.ProcessPoolExecutor", side_effect=OSError("mock Python pool failure")), mock.patch(
+                "secdiagram_core.java_index.ProcessPoolExecutor", side_effect=OSError("mock Java pool failure")
+            ):
+                recovered = run_analysis(AnalysisConfig(root=root, jobs=2))
+            self.assertEqual(recovered.graph.to_dict(), serial.graph.to_dict())
+            self.assertEqual(recovered.parse_errors, serial.parse_errors)
+
     def test_parallel_matches_serial(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "repo"
             _sample_repo(root)
             serial = run_analysis(AnalysisConfig(root=root, jobs=1))
-            parallel = run_analysis(AnalysisConfig(root=root, jobs=2))
+            worker_errors: dict[str, list[BaseException | None]] = {"python": [], "java": []}
+
+            def observed_completed(futures, language):
+                for future in as_completed(futures):
+                    worker_errors[language].append(future.exception())
+                    yield future
+
+            with mock.patch("secdiagram_core.ast_index.as_completed", side_effect=lambda futures: observed_completed(futures, "python")), mock.patch(
+                "secdiagram_core.java_index.as_completed", side_effect=lambda futures: observed_completed(futures, "java")
+            ):
+                parallel = run_analysis(AnalysisConfig(root=root, jobs=2))
+            self.assertEqual(worker_errors["python"], [None] * serial.python_files,
+                             "serial fallback must not count as a successful Python parallel test")
+            self.assertEqual(worker_errors["java"], [None] * serial.java_files,
+                             "serial fallback must not count as a successful Java parallel test")
             self.assertEqual(serial.graph.to_dict(), parallel.graph.to_dict())
             self.assertEqual(serial.parse_errors, parallel.parse_errors)
 

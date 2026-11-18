@@ -54,11 +54,13 @@ class MisconfigFixtureTests(unittest.TestCase):
 
     def test_findings_have_cwe_evidence_and_recommendation(self) -> None:
         graph = run_analysis(AnalysisConfig(root=FIXTURE, security=True)).graph
-        for finding in graph.findings:
-            if str(finding.metadata.get("rule_id", "")).startswith("CFG-"):
-                self.assertTrue(finding.cwe and finding.cwe.startswith("CWE-"))
-                self.assertTrue(finding.recommendation)
-                self.assertEqual(len(finding.evidence), 1)
+        findings = [finding for finding in graph.findings
+                    if str(finding.metadata.get("rule_id", "")).startswith("CFG-")]
+        self.assertTrue(findings, "the evidence assertions must exercise actual configuration findings")
+        for finding in findings:
+            self.assertTrue(finding.cwe and finding.cwe.startswith("CWE-"))
+            self.assertTrue(finding.recommendation)
+            self.assertEqual(len(finding.evidence), 1)
 
 
 class MisconfigSuppressionTests(unittest.TestCase):

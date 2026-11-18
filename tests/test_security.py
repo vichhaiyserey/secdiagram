@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import sys
 import unittest
 from pathlib import Path
@@ -171,8 +172,10 @@ class SecurityTests(unittest.TestCase):
             symlink_env = repo / ".env"
             try:
                 os.symlink(secret, symlink_env)
-            except OSError:
-                return  # OS does not support symlinks without elevated privileges
+            except OSError as exc:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                    self.skipTest(f"symlink creation is unavailable: {exc}")
+                raise
 
             res = run_analysis(AnalysisConfig(root=repo))
             secret_findings = [f for f in res.graph.findings if f.category == "secret"]
