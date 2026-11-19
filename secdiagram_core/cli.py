@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import studio as studio_install
 from .analyzer import AnalysisConfig, run_analysis
 from .baseline import apply_baseline, ignore_baseline, load_suppressions, write_baseline
 from .diagram_model import build_diagram_model
@@ -118,7 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="secdiagram",
         description="Build deterministic architecture, relationship, and security diagrams for a Python repository.",
-        epilog="Compare saved threat models offline: secdiagram threat-diff BEFORE.json AFTER.json --format md|json [--out FILE]",
+        epilog=(
+            "Compare saved threat models offline: secdiagram threat-diff BEFORE.json AFTER.json "
+            "--format md|json [--out FILE]\n"
+            "Install the user-level Studio and agent skill: secdiagram studio install\n"
+            "Serve the agentic Studio: secdiagram studio serve --dir . --user analyst --password 'change-me'"
+        ),
     )
     parser.add_argument("--dir", default=".", help="repository directory to analyze (default: .)")
     parser.add_argument("--dry-run", action="store_true", help="validate inputs and discover files without parsing, cache writes, rendering or network requests")
@@ -605,6 +611,113 @@ def server_main(argv: list[str] | None = None) -> int:
     )
 
 
+def studio_main(argv: list[str] | None = None) -> int:
+    """``secdiagram studio``: user-level installer, status, and Studio server."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "serve":
+        return server_main(argv[1:])
+
+    parser = argparse.ArgumentParser(
+        prog="secdiagram studio",
+        description=(
+            "Install the user-level AI skill and serve the agentic Studio UI. "
+            "The Studio is served by the hardened stdlib platform server."
+        ),
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    install_parser = sub.add_parser("install", help="create the Studio home, venv, launchers, and agent skill")
+    install_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
+    install_parser.add_argument("--project-root", type=Path, default=None, help="secdiagram source checkout")
+    install_parser.add_argument("--no-venv", action="store_true", help="skip virtual environment creation")
+    install_parser.add_argument("--force", action="store_true", help="update or repair an existing install")
+    install_parser.add_argument("--profile", default="default", help="skill profile name (default: default)")
+    install_parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+    status_parser = sub.add_parser("status", help="show installer status")
+    status_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
+    status_parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+    uninstall_parser = sub.add_parser("uninstall", help="remove managed Studio files")
+    uninstall_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
+    uninstall_parser.add_argument("--keep-venv", action="store_true", help="keep the private virtual environment")
+    uninstall_parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+    serve_parser = sub.add_parser(
+        "serve",
+        help="serve the Studio and REST API (forwards to secdiagram serve)",
+        add_help=False,
+    )
+    serve_parser.add_argument("--dir", default=".", help="repository directory to serve (default: .)")
+
+    args, unknown = parser.parse_known_args(argv)
+    if args.command is None:
+        parser.print_help()
+        print("\nExamples:\n  secdiagram studio install\n  secdiagram studio serve --dir .", file=sys.stderr)
+        return 0
+    if args.command == "serve":
+        return server_main(["--dir", args.dir, *unknown])
+    if args.command == "install":
+        try:
+            result = studio_install.install(
+                studio_install.InstallOptions(
+                    home=args.home,
+                    project_root=args.project_root,
+                    create_venv=not args.no_venv,
+                    force=args.force,
+                    profile=args.profile,
+                )
+            )
+        except studio_install.StudioError as exc:
+            print(f"secdiagram studio: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        else:
+            print(f"secdiagram Studio installed at {result.home}")
+            print(f"  project root: {result.project_root}")
+            print(f"  virtualenv: {'created' if result.venv_created else 'present'}")
+            print(f"  skill: {(result.home / studio_install.SKILL_DIRNAME / 'SKILL.md').as_posix()}")
+            print(f"  launcher: {(result.home / 'bin' / 'secdiagram-studio').as_posix()}")
+            print("  next: secdiagram studio serve --dir .")
+        return 0
+    if args.command == "status":
+        payload = studio_install.status(args.home)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif not payload.get("installed"):
+            print(f"secdiagram Studio is not installed (home: {payload.get('home')})")
+            print("  install: secdiagram studio install")
+        else:
+            print(f"secdiagram Studio home: {payload.get('home')}")
+            print(f"  version: {payload.get('version')} (current {payload.get('current_version')})")
+            print(f"  healthy: {'yes' if payload.get('healthy') else 'no'}")
+            print(f"  skill: {'present' if payload.get('skill_installed') else 'missing'}")
+            print(f"  virtualenv: {'present' if payload.get('venv_present') else 'missing'}")
+        return 0
+    if args.command == "uninstall":
+        try:
+            uninstall_result = studio_install.uninstall(args.home, keep_venv=args.keep_venv)
+        except studio_install.StudioError as exc:
+            print(f"secdiagram studio: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(uninstall_result, indent=2, sort_keys=True))
+        else:
+            print(
+                f"Removed {len(uninstall_result['removed'])} managed path(s) "
+                f"from {uninstall_result['home']}"
+            )
+            if uninstall_result["skipped"]:
+                print(
+                    f"  skipped {len(uninstall_result['skipped'])} unmanaged path(s)",
+                    file=sys.stderr,
+                )
+        return 0
+    parser.print_help()
+    return 0
+
+
 def audit_main(argv: list[str] | None = None) -> int:
     """``secdiagram audit <dir>``: ATT&CK evaluation gated by policy.yaml.
 
@@ -933,6 +1046,8 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
         return audit_main(argv[1:])
     if argv and argv[0] == "threat-diff":
         return threat_diff_main(argv[1:], summary)
+    if argv and argv[0] == "studio":
+        return studio_main(argv[1:])
 
     parser = build_parser()
     args = parser.parse_args(argv)
