@@ -32,6 +32,7 @@
 - **MITRE ATT&CK Audit Gate**: `secdiagram audit <dir>` maps the parsed architecture to ATT&CK techniques (T1190 Exploit Public-Facing Application, T1040 Network Sniffing, T1552 Unsecured Credentials, …) with evidence and missing mitigations, and **fails CI/CD with exit code 1** when findings violate `policy.yaml` thresholds.
 - **CycloneDX 1.6 VEX & SARIF Export**: Generates industry-standard `security.sarif` and CycloneDX 1.6 VEX documents (`vex.json`) with automated reachability justifications (`code_not_reachable`) for dead/internal code.
 - **AI Architectural & Threat Modeling Reviews**: Integrates with local/containerized **Ollama (Qwen, LLaMA, DeepSeek)** or OpenAI endpoints to generate evidence-grounded architectural reviews citing exact `path:line` with zero hallucinations.
+- **Agentic Studio & Portable AI Skill**: User-level installer with a private venv, portable launchers, and an agent skill manifest. The hardened Studio SPA adds interactive diagram overrides, a five-phase discover/model/secure/review/handoff state machine with evidence gates, executable handoff artifacts, and local-Ollama or OpenAI reviews -- all without adding a runtime dependency. See [Agentic Studio](docs/STUDIO.md).
 - **100% Deterministic & Air-Gapped**: Byte-for-byte reproducible outputs across runs. Fully functional in offline, isolated, or air-gapped environments.
 
 ---
@@ -71,7 +72,21 @@ docker run --rm -v "${PWD}:/repo" secdiagram:local --image
 docker run --rm -v "$(pwd):/repo:z" secdiagram:local --image
 ```
 
-### 3. Python Public Facade
+### 3. Agentic Studio & Portable AI Skill
+
+```bash
+# Install the user-level Studio home, launchers, and agent skill:
+python secdiagram.py studio install
+
+# Serve the Studio on loopback with authentication:
+python secdiagram.py studio serve --dir . --user analyst --password 'change-me'
+```
+
+Open `http://127.0.0.1:8080/studio` to edit diagrams, drive the SDLC phases, request local AI
+reviews, and generate handoff artifacts. The installer is CLI-only; the Studio reuses the
+hardened platform server. See the [Agentic Studio guide](docs/STUDIO.md).
+
+### 4. Python Public Facade
 
 Integrate directly into custom automation scripts or DevSecOps pipelines:
 
@@ -147,6 +162,7 @@ For comprehensive guides, references, and deployment patterns, see:
 | [**Container & Docker Compose Guide**](docs/CONTAINER_AND_COMPOSE.md) | Standalone Docker & Podman, Windows Git Bash tips, SELinux mode, and local Ollama Compose. |
 | [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
 | [**Hardened Platform Server & REST API**](docs/SERVER_API.md) | Daemon mode (`secdiagram serve`), authentication, rate limits, request caps, and config schema. |
+| [**Agentic Studio & AI-Skill Installer**](docs/STUDIO.md) | User-level install, portable agent skill, Studio UI, diagram overrides, SDLC evidence gates, handoffs, and local AI reviews. |
 | [**CLI Reference Manual**](docs/CLI_REFERENCE.md) | Complete command-line syntax, options breakdown table, and exit codes. |
 | [**Python Public Facade & Developer API**](docs/PYTHON_API.md) | Stable facade (`secdiagram_core`), taint/reachability queries, SCA bridge, and cache serialization. |
 | [**Task Tracking Guide**](docs/TASK_TRACKING.md) | GitHub Issues & Projects v2 task lifecycle tracking with `taskctl.py`. |

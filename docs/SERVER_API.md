@@ -31,6 +31,10 @@ secdiagram serve --dir . --host 0.0.0.0 --user analyst --password 'change-me'
 - **Path Traversal & Scan Root Containment**: Scans are strictly restricted to the served repository directory and any paths specified in `--scan-root`. Requests targeting paths outside allowlisted roots are rejected with HTTP `403 Forbidden`.
 - **Credential & Host Path Scrubbing**: Absolute host paths, secret tokens, and sensitive environment variables are automatically scrubbed from responses, graph exports, and audit logs.
 - **Structured JSON Audit Logging**: Security events (auth failures, scan requests, rejected paths, rate limits, SARIF downloads, server lifecycle) are emitted to stderr or `--audit-log FILE` as structured JSON Lines (`audit.jsonl`).
+- **Same-Origin State Changes**: Studio POSTs reject cross-origin `Origin` values with `403 Forbidden`.
+- **Bounded Studio State**: Diagram overrides are schema-validated, capped at 1 MiB and 5,000 entries, and persisted atomically under `.secdiagram/studio/`.
+- **Installer Isolation**: The HTTP API exposes installer status only; all installer writes remain CLI-only.
+- **LLM Endpoint Allowlist**: Studio AI requests accept loopback/private addresses and OpenAI hosts; link-local metadata endpoints such as `169.254.169.254` are rejected.
 
 ---
 
@@ -74,6 +78,19 @@ All endpoints require Basic Authentication unless the server was explicitly star
 | `GET` | `/api/v1/threat-model` | STRIDE threat model per trust boundary (Markdown) |
 | `GET` | `/api/v1/diagram` | Mermaid diagram. `?detail=architecture` (default, taint paths highlighted), `?detail=high-level` (C4 tiers) or `?detail=taint` (attack-path diagram) |
 | `POST` | `/api/v1/scan` | Trigger a new scan. Body accepts JSON options (`{"dir": "...", "security": true}`). Disabled when `read_only: true`. |
+| `GET` | `/studio` | Agentic Studio single-page app (offline assets only). |
+| `GET` | `/api/v1/studio/status` | Read-only installer, SDLC, overrides, and capability status. |
+| `GET` | `/api/v1/studio/sdlc` | Deterministic SDLC phase state and progress. |
+| `GET` | `/api/v1/studio/nodes` | Bounded, sorted node list for the diagram editor. |
+| `GET` | `/api/v1/studio/diagram` | Mermaid from the edited graph (`detail`, `direction`, `theme`). |
+| `GET` | `/api/v1/studio/render` | Local `mmdc` SVG/PNG render; returns `503` when unavailable. |
+| `GET` | `/api/v1/studio/handoff` | Preview the stable Markdown handoff. |
+| `GET` | `/api/v1/studio/skill` | Installed or built-in agent skill manifest and Markdown. |
+| `POST` | `/api/v1/studio/sdlc` | Apply `start`, `complete`, `block`, `unblock`, `reset`, `note`, or `evidence`. |
+| `POST` | `/api/v1/studio/overrides` | Persist diagram renames/hidden nodes/direction/theme, or `{"action":"reset"}`. |
+| `POST` | `/api/v1/studio/handoff` | Write `HANDOFF.md`/`handoff.json` with `{"write":true}` after all phases are done. |
+| `POST` | `/api/v1/studio/generate` | Optional evidence-grounded narrative from Ollama or OpenAI. |
+| `POST` | `/api/v1/studio/installer` | Always `403`; installer writes are CLI-only. |
 
 ---
 

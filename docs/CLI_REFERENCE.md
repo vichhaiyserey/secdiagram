@@ -254,3 +254,14 @@ output goes to stdout. Input snapshots cannot be overwritten.
 Exit codes: `0` comparison completed (including differences), `1` unreadable or
 invalid snapshots, `2` invalid arguments. Removed records are not proof of fixes.
 See [Threat modeling](THREAT_MODELING.md) for identity and coverage limitations.
+
+## 7. `secdiagram studio` Subcommand
+
+```text
+secdiagram studio install [--home DIR] [--project-root DIR] [--no-venv] [--force] [--profile NAME] [--json]
+secdiagram studio status  [--home DIR] [--json]
+secdiagram studio uninstall [--home DIR] [--keep-venv] [--json]
+secdiagram studio serve   [--dir DIR] [server flags...]
+```
+
+Installs a user-level Studio home with a private virtual environment, portable launchers, and the `secdiagram-diagramming` agent skill. `serve` forwards to `secdiagram serve` and exposes the Studio at `/studio`. The default home is `~/.secdiagram/studio`; set `SECDIAGRAM_STUDIO_HOME` to override it. Installer writes are CLI-only. See [Agentic Studio](STUDIO.md).
