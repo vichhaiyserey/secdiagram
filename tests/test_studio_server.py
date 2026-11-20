@@ -79,6 +79,8 @@ class StudioServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("secdiagram Studio", html)
         self.assertIn("app.js", html)
+        self.assertIn('class="skip-link"', html)
+        self.assertIn('role="tablist"', html)
 
         self.assertEqual(self.studio.get("/studio/app.css")[0], 200)
         self.assertEqual(self.studio.get("/studio/app.js")[0], 200)
