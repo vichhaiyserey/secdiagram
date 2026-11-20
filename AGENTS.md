@@ -123,6 +123,12 @@ When implementing fixes or enhancements, modify only the relevant modules:
 | [`secdiagram_core/render_markdown.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/render_markdown.py) | Markdown architecture report with citations | `render_markdown()` |
 | [`secdiagram_core/render_json.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/render_json.py) | Full structured graph JSON serializer | `render_json()` |
 | [`secdiagram_core/llm.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/llm.py) | Structured prompt templates & streaming/request handling for Ollama/OpenAI | `generate_narrative()`, `NarrativeError` |
+| [`secdiagram_core/agentic.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/agentic.py) | Five-phase SDLC state machine, evidence gates, and handoff artifacts | `SdlcState`, `apply_action()`, `write_handoff()` |
+| [`secdiagram_core/diagram_edit.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/diagram_edit.py) | Validated diagram overrides: renames, hidden nodes, direction, theme | `DiagramOverrides`, `apply_overrides()`, `save_overrides()` |
+| [`secdiagram_core/studio.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/studio.py) | User-level Studio installer, portable launchers, agent skill, safe uninstall | `install()`, `status()`, `uninstall()`, `skill_manifest()` |
+| [`secdiagram_core/studio_ui.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/studio_ui.py) | Embedded offline Studio HTML/CSS/JS asset delivery | `render_studio_html()`, `read_asset()`, `StudioAssetError` |
+| [`secdiagram_core/studio_ui/`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/studio_ui) | Self-contained Studio SPA assets (HTML, CSS, JavaScript) | `index.html`, `app.css`, `app.js` |
+| [`secdiagram_core/server.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/server.py) | Hardened stdlib HTTP server, REST/Studio routes, auth, rate limits, audit logging | `create_server()`, `serve()`, `BasicAuthenticator`, `RateLimiter` |
 | [`secdiagram_core/cli.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/cli.py) | CLI argument parser, pipeline orchestration, exit codes | `main()`, `build_parser()` |
 | [`secdiagram_core/model.py`](file:///C:/Users/Lenovo/projects/secdiagram/secdiagram_core/model.py) | Data models: `Graph`, `Node`, `Edge`, `Finding`, `Loc`, `stable_id` | `stable_id()`, `SEVERITY_RANK` |
 
