@@ -28,9 +28,14 @@ def render_studio_html() -> str:
 
 def read_asset(name: str) -> tuple[str, str]:
     """Return ``(content_type, content)`` for a known Studio asset."""
-    if name not in _CONTENT_TYPES:
+    if name == "index.html":
+        path = _ASSET_DIR / "index.html"
+    elif name == "app.css":
+        path = _ASSET_DIR / "app.css"
+    elif name == "app.js":
+        path = _ASSET_DIR / "app.js"
+    else:
         raise StudioAssetError(f"unknown Studio asset: {name!r}")
-    path = _ASSET_DIR / name
     try:
         content = path.read_text(encoding="utf-8")
     except OSError as exc:
