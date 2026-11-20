@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "secdiagram"
 version = "0.3.3"
-description = "Deterministic architecture, relationship, and security diagrams for Python repositories."
+description = "Deterministic architecture, relationship, and security analysis for polyglot repositories."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
