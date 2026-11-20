@@ -148,13 +148,39 @@ Narratives are optional: the Studio remains fully useful offline with static ana
 
 ---
 
-## 7. Verification
+## 7. Keyboard and Accessibility
+
+The Studio is designed to be usable without a mouse:
+
+- Press `Tab` once to reveal **Skip to content**; `Enter` moves focus to the main workspace.
+- Section tabs support `Tab`, `Shift+Tab`, arrow keys, `Home`, and `End`. Selecting a tab
+  updates `aria-selected`, the visible panel, and the document title.
+- Every input, select, textarea, and generated node control has an accessible name.
+- Async actions set `aria-busy`; results and failures are announced through polite and
+  assertive live regions, not only through the visual toast.
+- The diagram preview, Mermaid source, component list, handoff preview, AI narrative, and
+  skill preview are keyboard-focusable scroll regions.
+- Toggle buttons expose `aria-expanded`; the SDLC progress bar exposes progressbar values.
+- Status is never communicated by color alone; every state also has text.
+- `prefers-reduced-motion` disables panel fades, progress transitions, and button movement.
+- Narrow layouts wrap toolbars and long paths, and code/diagram panels scroll instead of
+  truncating content.
+
+Accessibility changes are checked with static asset tests, but no screen-reader
+certification is implied. Validate changes with the assistive technology you support.
+
+---
+
+## 8. Verification
 
 ```bash
 python -m unittest tests.test_agentic tests.test_diagram_edit \
-  tests.test_studio_installer tests.test_studio_server -v
+  tests.test_studio_installer tests.test_studio_server \
+  tests.test_studio_ui_accessibility -v
+node --check secdiagram_core/studio_ui/app.js
 ```
 
 The tests cover phase gates, deterministic state/handoff files, override validation and
 non-mutation, installer containment and idempotency, Studio asset serving, read-only mode,
-origin rejection, SSRF rejection, and the complete phase flow through the REST API.
+origin rejection, SSRF rejection, the complete phase flow through the REST API, and the
+Studio's landmark, tab, labelling, live-region, focus, and reduced-motion hooks.
