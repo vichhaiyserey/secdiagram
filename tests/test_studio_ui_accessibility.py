@@ -4,6 +4,8 @@ import unittest
 from html.parser import HTMLParser
 from pathlib import Path
 
+from secdiagram_core import studio_ui
+
 ASSET_DIR = Path(__file__).resolve().parents[1] / "secdiagram_core" / "studio_ui"
 FOCUSABLE_TAGS = {"a", "button", "input", "select", "textarea"}
 
@@ -52,6 +54,12 @@ class StudioAccessibilityAssetTests(unittest.TestCase):
         cls.js = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
         cls.parser = _AssetParser()
         cls.parser.feed(cls.html)
+
+    def test_unknown_and_traversal_assets_are_rejected(self) -> None:
+        for name in ("missing.js", "../server.py", "studio_ui/../app.js", ""):
+            with self.subTest(name=name):
+                with self.assertRaises(studio_ui.StudioAssetError):
+                    studio_ui.read_asset(name)
 
     def test_document_language_and_landmarks(self) -> None:
         html = next(attrs for tag, attrs in self.parser.elements if tag == "html")
