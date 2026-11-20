@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import subprocess
 import sys
 import tempfile
@@ -94,8 +95,10 @@ class DiscoverTests(unittest.TestCase):
             symlink_py = repo / "symlinked.py"
             try:
                 os.symlink(secret, symlink_py)
-            except OSError:
-                return  # OS does not support symlinks without elevated privileges
+            except OSError as exc:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                    self.skipTest(f"symlink creation is unavailable: {exc}")
+                raise
 
             info = discover(repo)
             self.assertNotIn("symlinked.py", info.rel_files)
@@ -108,14 +111,16 @@ class DiscoverTests(unittest.TestCase):
             secret.write_text("classified", encoding="utf-8")
             repo = Path(repo_dir)
             try:
-                subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            except (OSError, subprocess.SubprocessError):
-                return
+                subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=30)
+            except FileNotFoundError:
+                self.skipTest("Git is not installed")
             symlink_py = repo / "symlinked.py"
             try:
                 os.symlink(secret, symlink_py)
-            except OSError:
-                return  # OS does not support symlinks without elevated privileges
+            except OSError as exc:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                    self.skipTest(f"symlink creation is unavailable: {exc}")
+                raise
 
             info = discover(repo)
             self.assertTrue(info.is_git)

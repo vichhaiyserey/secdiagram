@@ -3,18 +3,34 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from . import __version__
+from . import studio as studio_install
 from .analyzer import AnalysisConfig, run_analysis
 from .baseline import apply_baseline, ignore_baseline, load_suppressions, write_baseline
-from .high_level import build_high_level_architecture, render_mermaid_highlevel
+from .diagram_model import build_diagram_model
+from .diagram_quality import (
+    SEVERITY_ORDER,
+    analyze_diagram_quality,
+    format_quality_report,
+    has_errors,
+)
+from .discover import discover
+from .health import health_summary
+from .high_level import (
+    HighLevelArchitecture,
+    build_high_level_architecture,
+    render_mermaid_highlevel,
+)
 from .llm import NarrativeError, generate_narrative
-from .model import SEVERITY_RANK
+from .model import SEVERITY_RANK, Graph
 from .policy import POLICY_MODES, apply_policy
 from .protocols import get_registered_exporters
 from .redaction import redact_secrets
@@ -22,7 +38,7 @@ from .render_html import render_html
 from .render_image import ImageRenderError, render_image
 from .render_json import write_json
 from .render_markdown import render_markdown
-from .render_mermaid import render_mermaid
+from .render_mermaid import build_mermaid_model, render_mermaid
 from .render_sarif import render_sarif
 from .render_security import render_security_html, render_security_markdown
 from .render_vex import render_vex
@@ -31,6 +47,7 @@ from .security_report import build_security_report
 from .taint_flows import render_taint_mermaid
 from .threat_model import (
     DEFAULT_POLICY_YAML,
+    Threat,
     attack_status_label,
     build_threat_model,
     evaluate_attack,
@@ -41,6 +58,14 @@ from .threat_model import (
     render_threat_model,
     summarize_attack,
     summarize_threat_model,
+)
+from .threat_review import (
+    build_threat_snapshot,
+    diff_threat_snapshots,
+    load_threat_snapshot,
+    render_snapshot,
+    render_threat_diff,
+    threat_analysis_context,
 )
 
 FORMATS = {"json", "md", "mermaid", "sarif", "png", "svg", "pdf", "image", "html", "vex"}
@@ -94,8 +119,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="secdiagram",
         description="Build deterministic architecture, relationship, and security diagrams for a Python repository.",
+        epilog=(
+            "Compare saved threat models offline: secdiagram threat-diff BEFORE.json AFTER.json "
+            "--format md|json [--out FILE]\n"
+            "Install the user-level Studio and agent skill: secdiagram studio install\n"
+            "Serve the agentic Studio: secdiagram studio serve --dir . --user analyst --password 'change-me'"
+        ),
     )
     parser.add_argument("--dir", default=".", help="repository directory to analyze (default: .)")
+    parser.add_argument("--dry-run", action="store_true", help="validate inputs and discover files without parsing, cache writes, rendering or network requests")
+    parser.add_argument("--verbose", action="store_true", help="show detailed diagnostics and skipped paths on stderr")
+    parser.add_argument("--output", choices=("text", "json"), default="text", help="console summary format; JSON stdout is suitable for CI (default: text)")
+    parser.add_argument("--max-files", type=int, default=10000, help="maximum selected files; 0 disables (default: 10000)")
+    parser.add_argument("--max-file-bytes", type=int, default=2097152, help="per-file input byte limit; 0 disables (default: 2097152)")
+    parser.add_argument("--max-total-bytes", type=int, default=67108864, help="total selected input bytes; 0 disables (default: 67108864); bounds input, not process RSS")
     parser.add_argument(
         "--workspace",
         default=None,
@@ -290,8 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--image-provider",
         choices=["auto", "local", "kroki", "mermaid.ink"],
-        default="auto",
-        help="renderer for diagram image: auto, local (mmdc), kroki, mermaid.ink (default: auto)",
+        default="local",
+        help="renderer: local (mmdc, default), auto (permits HTTP fallback), kroki, mermaid.ink",
     )
     parser.add_argument(
         "--image-endpoint",
@@ -319,6 +356,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--high-level",
         action="store_true",
         help="generate high-level system overview diagram (subsystems, tiers & connections) as primary diagram",
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help=(
+            "check the canonical diagram model for quality issues (duplicates, orphans, cycles, "
+            "dangling or duplicated relationships, tier inversions, rank skips) before rendering; "
+            "exits 1 and skips rendering when error-severity issues are found"
+        ),
     )
     parser.add_argument(
         "--max-diagram-nodes",
@@ -565,6 +611,113 @@ def server_main(argv: list[str] | None = None) -> int:
     )
 
 
+def studio_main(argv: list[str] | None = None) -> int:
+    """``secdiagram studio``: user-level installer, status, and Studio server."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "serve":
+        return server_main(argv[1:])
+
+    parser = argparse.ArgumentParser(
+        prog="secdiagram studio",
+        description=(
+            "Install the user-level AI skill and serve the agentic Studio UI. "
+            "The Studio is served by the hardened stdlib platform server."
+        ),
+    )
+    sub = parser.add_subparsers(dest="command")
+
+    install_parser = sub.add_parser("install", help="create the Studio home, venv, launchers, and agent skill")
+    install_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
+    install_parser.add_argument("--project-root", type=Path, default=None, help="secdiagram source checkout")
+    install_parser.add_argument("--no-venv", action="store_true", help="skip virtual environment creation")
+    install_parser.add_argument("--force", action="store_true", help="update or repair an existing install")
+    install_parser.add_argument("--profile", default="default", help="skill profile name (default: default)")
+    install_parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+    status_parser = sub.add_parser("status", help="show installer status")
+    status_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
+    status_parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+    uninstall_parser = sub.add_parser("uninstall", help="remove managed Studio files")
+    uninstall_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
+    uninstall_parser.add_argument("--keep-venv", action="store_true", help="keep the private virtual environment")
+    uninstall_parser.add_argument("--json", action="store_true", help="print machine-readable JSON")
+
+    serve_parser = sub.add_parser(
+        "serve",
+        help="serve the Studio and REST API (forwards to secdiagram serve)",
+        add_help=False,
+    )
+    serve_parser.add_argument("--dir", default=".", help="repository directory to serve (default: .)")
+
+    args, unknown = parser.parse_known_args(argv)
+    if args.command is None:
+        parser.print_help()
+        print("\nExamples:\n  secdiagram studio install\n  secdiagram studio serve --dir .", file=sys.stderr)
+        return 0
+    if args.command == "serve":
+        return server_main(["--dir", args.dir, *unknown])
+    if args.command == "install":
+        try:
+            result = studio_install.install(
+                studio_install.InstallOptions(
+                    home=args.home,
+                    project_root=args.project_root,
+                    create_venv=not args.no_venv,
+                    force=args.force,
+                    profile=args.profile,
+                )
+            )
+        except studio_install.StudioError as exc:
+            print(f"secdiagram studio: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+        else:
+            print(f"secdiagram Studio installed at {result.home}")
+            print(f"  project root: {result.project_root}")
+            print(f"  virtualenv: {'created' if result.venv_created else 'present'}")
+            print(f"  skill: {(result.home / studio_install.SKILL_DIRNAME / 'SKILL.md').as_posix()}")
+            print(f"  launcher: {(result.home / 'bin' / 'secdiagram-studio').as_posix()}")
+            print("  next: secdiagram studio serve --dir .")
+        return 0
+    if args.command == "status":
+        payload = studio_install.status(args.home)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif not payload.get("installed"):
+            print(f"secdiagram Studio is not installed (home: {payload.get('home')})")
+            print("  install: secdiagram studio install")
+        else:
+            print(f"secdiagram Studio home: {payload.get('home')}")
+            print(f"  version: {payload.get('version')} (current {payload.get('current_version')})")
+            print(f"  healthy: {'yes' if payload.get('healthy') else 'no'}")
+            print(f"  skill: {'present' if payload.get('skill_installed') else 'missing'}")
+            print(f"  virtualenv: {'present' if payload.get('venv_present') else 'missing'}")
+        return 0
+    if args.command == "uninstall":
+        try:
+            uninstall_result = studio_install.uninstall(args.home, keep_venv=args.keep_venv)
+        except studio_install.StudioError as exc:
+            print(f"secdiagram studio: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(uninstall_result, indent=2, sort_keys=True))
+        else:
+            print(
+                f"Removed {len(uninstall_result['removed'])} managed path(s) "
+                f"from {uninstall_result['home']}"
+            )
+            if uninstall_result["skipped"]:
+                print(
+                    f"  skipped {len(uninstall_result['skipped'])} unmanaged path(s)",
+                    file=sys.stderr,
+                )
+        return 0
+    parser.print_help()
+    return 0
+
+
 def audit_main(argv: list[str] | None = None) -> int:
     """``secdiagram audit <dir>``: ATT&CK evaluation gated by policy.yaml.
 
@@ -672,6 +825,67 @@ def _parse_role_args(role_args: list[str]) -> dict[str, str]:
     return manual_roles
 
 
+def _write_threat_outputs(graph: Graph, threats: list[Threat], args: argparse.Namespace, out: Path) -> list[Path]:
+    if not args.security or not {"json", "md"}.intersection(args.format):
+        return []
+    paths = [out / "threat-model.json"]
+    paths[0].write_text(render_snapshot(build_threat_snapshot(graph, threats)), encoding="utf-8", newline="\n")
+    if "md" in args.format:
+        paths.append(out / "THREAT_MODEL.md")
+        paths[-1].write_text(render_threat_model(graph, threats), encoding="utf-8", newline="\n")
+    return paths
+
+
+def threat_diff_main(argv: list[str], summary: dict[str, Any] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="secdiagram threat-diff", description="Compare two saved threat-model.json snapshots without executing or checking out source.")
+    parser.add_argument("before", help="older threat-model.json snapshot")
+    parser.add_argument("after", help="newer threat-model.json snapshot")
+    parser.add_argument("--format", choices=("md", "json"), default="md")
+    parser.add_argument("--out", help="write diff to this file; otherwise print to stdout")
+    parser.add_argument("--output", choices=("text", "json"), default="text", help="use the standard CI JSON console envelope")
+    args = parser.parse_args(argv)
+    before, after = _normalize_cli_path(args.before), _normalize_cli_path(args.after)
+    output = _normalize_cli_path(args.out) if args.out else None
+    if output and output.resolve() in {before.resolve(), after.resolve()}:
+        parser.error("--out must differ from both input snapshots")
+    try:
+        diff = diff_threat_snapshots(load_threat_snapshot(before), load_threat_snapshot(after))
+        if output and output.exists() and (output.samefile(before) or output.samefile(after)):
+            raise ValueError("--out aliases an input snapshot; choose a separate output file")
+        if summary is not None:
+            summary["diff"] = diff
+        text = render_snapshot(diff) if args.format == "json" else render_threat_diff(diff)
+        if output:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(text, encoding="utf-8", newline="\n")
+        elif args.output != "json":
+            print(text, end="")
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+        message = redact_secrets(f"cannot compare threat snapshots: {exc}; provide readable threat-model.json files from the same schema")
+        if summary is not None:
+            summary["error"] = message
+        print(f"secdiagram: {message}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _validate_diagrams(graph: Graph, hla: HighLevelArchitecture, args: argparse.Namespace) -> bool:
+    """Validate the primary projection and accompanying high-level diagram before writes."""
+    models = [build_diagram_model(graph, hla)]
+    if args.diagram_detail not in {"high-level", "overview"}:
+        models.append(build_mermaid_model(graph, args.diagram_detail, args.max_diagram_nodes))
+    issues = sorted(
+        {issue for model in models for issue in analyze_diagram_quality(model)},
+        key=lambda issue: (SEVERITY_ORDER.get(issue.severity, 9), issue.code, issue.subjects, issue.message),
+    )
+    for line in format_quality_report(issues):
+        print(line)
+    if has_errors(issues):
+        print("secdiagram: diagram validation failed; rendering skipped", file=sys.stderr)
+        return False
+    return True
+
+
 def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | None) -> int:
     """Handle the --workspace flag: analyze multiple repos as a unified product."""
     from .analyzer import run_workspace_analysis
@@ -711,20 +925,17 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
         return 1
 
     graph = ws_result.merged_graph
-    out.mkdir(parents=True, exist_ok=True)
-    written: list[Path] = []
-
-    # Write workspace manifest
-    ws_json_path = out / "workspace.json"
-    ws_json_path.write_text(
-        json.dumps(ws_result.workspace.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    written.append(ws_json_path)
-
     # Score and build threat model on merged graph
     score_findings(graph)
+    graph.meta["workspace_analysis"] = {
+        "repositories": {
+            name: {"analysis": threat_analysis_context(result.graph), "commit": result.repo.commit}
+            for name, result in sorted(ws_result.per_repo.items())
+        },
+        "unavailable_repositories": sorted(role.name for role in ws_result.workspace.repos if role.name not in ws_result.per_repo),
+    }
+    threats = build_threat_model(graph)
+    summarize_threat_model(graph, threats)
     hla = build_high_level_architecture(workspace_root, graph)
 
     # Enrich HLA with workspace role metadata
@@ -733,6 +944,19 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
             if sub.path and repo_role.name in sub.path:
                 sub.metadata["workspace_role"] = repo_role.role
                 sub.metadata["workspace_repo"] = repo_role.name
+
+    if args.validate and not _validate_diagrams(graph, hla, args):
+        return 1
+
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    ws_json_path = out / "workspace.json"
+    ws_json_path.write_text(
+        json.dumps(ws_result.workspace.to_dict(), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    written.append(ws_json_path)
 
     highlevel_mermaid = render_mermaid_highlevel(
         hla,
@@ -743,6 +967,7 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
     mermaid_text: str | None = None
 
     try:
+        written.extend(_write_threat_outputs(graph, threats, args, out))
         if "json" in args.format:
             path = out / "graph.json"
             write_json(graph, path)
@@ -812,21 +1037,62 @@ def _run_workspace_mode(args: argparse.Namespace, out: Path, cache_dir: Path | N
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv and argv[0] == "serve":
         return server_main(argv[1:])
     if argv and argv[0] == "audit":
         return audit_main(argv[1:])
+    if argv and argv[0] == "threat-diff":
+        return threat_diff_main(argv[1:], summary)
+    if argv and argv[0] == "studio":
+        return studio_main(argv[1:])
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.offline = args.offline or os.environ.get("SECDIAGRAM_OFFLINE", "").strip().lower() in {"1", "true", "yes"}
+    summary = summary if summary is not None else {}
+    summary.update({"schema_version": 1, "dry_run": args.dry_run, "stages": []})
+
+    def progress(stage: str) -> None:
+        summary["stages"].append(stage)
+        if not args.quiet:
+            print(f"secdiagram: {stage}", file=sys.stderr)
+
+    def fail(message: str) -> int:
+        summary["error"] = redact_secrets(message)
+        print(f"secdiagram: {summary['error']}", file=sys.stderr)
+        return 1
+
+    if args.config and not args.serve:
+        try:
+            configured = json.loads(_normalize_cli_path(args.config).read_text(encoding="utf-8"))
+            allowed = {"include": list, "exclude": list, "jobs": int, "max_nodes": int,
+                       "max_files": int, "max_file_bytes": int, "max_total_bytes": int, "security": bool}
+            if not isinstance(configured, dict):
+                raise ValueError("expected a JSON object")
+            for key, value in configured.items():
+                if key not in allowed or type(value) is not allowed[key]:
+                    raise ValueError(f"unknown key or invalid type: {key}")
+                if isinstance(value, list) and not all(isinstance(item, str) for item in value):
+                    raise ValueError(f"{key} must contain path glob strings")
+                flag = "--no-security" if key == "security" else "--" + key.replace("_", "-")
+                explicit = any(item.split("=", 1)[0] in {flag, "--security" if key == "security" else flag} for item in argv)
+                if not explicit:
+                    setattr(args, key, value)
+        except (OSError, ValueError) as exc:
+            return fail(f"cannot load --config {args.config}: {exc}; provide a readable scan configuration JSON file")
     if args.jobs < 0:
         parser.error("--jobs must be zero (auto) or a positive integer")
+    for option in ("max_files", "max_file_bytes", "max_total_bytes", "max_nodes"):
+        if getattr(args, option) < 0:
+            return fail(f"--{option.replace('_', '-')} must be zero or positive")
     root = _normalize_cli_path(args.dir)
 
     if args.serve:
+        if args.dry_run:
+            return fail("--dry-run applies to --dir analysis; omit --serve to preview a scan")
         from .server import serve
         cfg_path = _normalize_cli_path(args.config) if args.config else None
         return serve(
@@ -851,8 +1117,39 @@ def main(argv: list[str] | None = None) -> int:
         cache_dir = _normalize_cli_path(args.cache_dir) if args.cache_dir else out / "cache"
 
     # ── Workspace mode: multi-repo analysis ───────────────────────────
+    if args.high_level:
+        args.diagram_detail = "high-level"
     if args.workspace:
+        if args.dry_run or args.output == "json" or args.verbose or any(
+            item.split("=", 1)[0] in {"--max-files", "--max-file-bytes", "--max-total-bytes", "--config"} for item in argv
+        ):
+            return fail("these scan controls currently require --dir; scan each workspace project separately")
         return _run_workspace_mode(args, out, cache_dir)
+
+    if args.offline and (args.llm or args.ollama):
+        return fail("--offline disables narrative HTTP requests; omit --llm/--ollama for a fully offline scan")
+    for label, value in (("--sonarqube-report", args.sonarqube_report), ("--xray-report", args.xray_report), ("--mermaid-js", args.mermaid_js)):
+        if value and not _normalize_cli_path(value).is_file():
+            return fail(f"{label} file does not exist or is unreadable: {value}; provide a readable local file or omit {label}")
+    for value in args.advisory_db:
+        if not _normalize_cli_path(value).exists():
+            return fail(f"--advisory-db path does not exist: {value}; supply a local advisory export")
+    if args.dry_run:
+        progress("discovery")
+        try:
+            repo = discover(root, args.include, args.exclude, skip_paths=[out, cache_dir] if cache_dir else [out],
+                            max_files=args.max_files, max_file_bytes=args.max_file_bytes, max_total_bytes=args.max_total_bytes)
+        except OSError as exc:
+            return fail(f"{exc}; check --dir and read permissions")
+        summary["plan"] = {"files": repo.rel_files, "skipped_paths": sorted(repo.skipped), "formats": args.format,
+                           "stages": ["discovery", "parsing", "mapping", "threat analysis", "rendering", "report generation"],
+                           "out": out.as_posix(), "cache": cache_dir.as_posix() if cache_dir else None}
+        if not args.quiet:
+            print(f"secdiagram: dry run: {len(repo.rel_files)} selected files, {len(repo.skipped)} skipped paths; no files written")
+            if args.verbose:
+                for selected_path in repo.rel_files + sorted(repo.skipped):
+                    print(f"  {selected_path}", file=sys.stderr)
+        return 0
 
     try:
         result = run_analysis(
@@ -865,6 +1162,11 @@ def main(argv: list[str] | None = None) -> int:
                 security=args.security,
                 jobs=args.jobs,
                 cache_dir=cache_dir,
+                skip_paths=[out],
+                progress=progress,
+                max_files=args.max_files,
+                max_file_bytes=args.max_file_bytes,
+                max_total_bytes=args.max_total_bytes,
                 sonarqube_report=(
                     _normalize_cli_path(args.sonarqube_report)
                     if args.sonarqube_report
@@ -879,13 +1181,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     except (FileNotFoundError, NotADirectoryError) as exc:
-        print(f"secdiagram: {exc}", file=sys.stderr)
-        return 1
+        return fail(f"{exc}; check --dir and local input paths")
     except Exception as exc:  # pragma: no cover - defensive top-level guard
-        print(f"secdiagram: analysis failed: {exc}", file=sys.stderr)
-        return 1
+        return fail(f"analysis failed: {exc}; check input permissions, syntax and scan configuration")
 
     graph = result.graph
+    summary["health"] = health_summary(result)
+    graph.meta["health"] = summary["health"]
+    summary["cache"] = result.cache_stats
+    diagnostics = graph.meta.get("diagnostics", [])
+    for item in diagnostics if args.verbose else diagnostics[:20]:
+        print(f"secdiagram: {item['path']}: {item['message']}. {item['hint']}", file=sys.stderr)
+    if not args.verbose and len(diagnostics) > 20:
+        print(f"secdiagram: {len(diagnostics) - 20} more diagnostics; use --verbose or --output json for details", file=sys.stderr)
+    if args.verbose:
+        for skipped_path in sorted(result.repo.skipped):
+            print(f"secdiagram: skipped {skipped_path}", file=sys.stderr)
     if args.min_finding_confidence > 0:
         graph.findings = [
             finding
@@ -893,7 +1204,14 @@ def main(argv: list[str] | None = None) -> int:
             if finding.confidence >= args.min_finding_confidence
         ]
     graph.meta["finding_confidence_floor"] = args.min_finding_confidence
-    out.mkdir(parents=True, exist_ok=True)
+    if args.validate:
+        validation_hla = build_high_level_architecture(root, graph)
+        if not _validate_diagrams(graph, validation_hla, args):
+            return 1
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return fail(f"cannot create output directory: {exc}; use --out with a writable directory")
     written: list[Path] = []
 
     baseline_mode = args.create_baseline or args.baseline is not None
@@ -977,10 +1295,9 @@ def main(argv: list[str] | None = None) -> int:
     if "security_baseline" in graph.meta:
         meta["security_baseline"] = graph.meta["security_baseline"]
 
-    if args.high_level:
-        args.diagram_detail = "high-level"
-
+    progress("rendering")
     hla = build_high_level_architecture(root, graph)
+
     highlevel_mermaid = render_mermaid_highlevel(
         hla,
         direction=args.diagram_direction if args.diagram_direction == "LR" else "TB",
@@ -990,7 +1307,9 @@ def main(argv: list[str] | None = None) -> int:
     mermaid_text: str | None = None
     narrative_text: str | None = None
 
+    progress("report generation")
     try:
+        written.extend(_write_threat_outputs(graph, threats, args, out))
         if "json" in args.format:
             path = out / "graph.json"
             write_json(graph, path)
@@ -1002,10 +1321,6 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8",
                 newline="\n",
             )
-            written.append(path)
-        if "md" in args.format and args.security:
-            path = out / "THREAT_MODEL.md"
-            path.write_text(render_threat_model(graph, threats), encoding="utf-8", newline="\n")
             written.append(path)
         if "mermaid" in args.format:
             if args.diagram_detail in {"high-level", "overview"}:
@@ -1120,8 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
                     context_chars=args.llm_context_chars,
                 )
             except NarrativeError as exc:
-                print(f"secdiagram: {exc}", file=sys.stderr)
-                return 1
+                return fail(str(exc))
             path = out / "NARRATIVE.md"
             path.write_text(narrative_text, encoding="utf-8", newline="\n")
             written.append(path)
@@ -1210,10 +1524,13 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     )
     except (OSError, ImageRenderError) as exc:
-        print(f"secdiagram: could not write output: {exc}", file=sys.stderr)
-        return 1
+        return fail(f"could not write output: {exc}; check --out permissions; for offline images install local mmdc/Chromium or use --format mermaid")
 
+    summary["written"] = sorted(path.as_posix() for path in written)
     if not args.quiet:
+        health = summary["health"]
+        print(f"secdiagram health: {health['files_parsed']} files parsed, {health['components_identified']} components, "
+              f"{health['unresolved_references']} unresolved references, {len(health['skipped_paths'])} skipped paths")
         counts: dict[str, int] = {}
         for finding in graph.findings:
             counts[finding.severity] = counts.get(finding.severity, 0) + 1
@@ -1277,3 +1594,38 @@ def main(argv: list[str] | None = None) -> int:
         # clean exit would be a silent false negative in CI security gates.
         return 1
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Keep JSON stdout a single versioned document, including failed scans."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    machine = "--output=json" in argv or any(
+        value == "--output" and index + 1 < len(argv) and argv[index + 1] == "json"
+        for index, value in enumerate(argv)
+    )
+    summary: dict[str, Any] = {"schema_version": 1}
+
+    def run() -> int:
+        try:
+            return _scan_main(argv, summary)
+        except SystemExit as exc:
+            if not machine:
+                raise
+            code = int(exc.code or 0)
+            if code:
+                summary["error"] = "Invalid command arguments; see stderr and --help."
+            return code
+        except (OSError, ValueError, MemoryError, RecursionError) as exc:
+            summary["error"] = redact_secrets(f"scan failed: {exc}; check local inputs and output permissions; reduce --max-total-bytes or use --jobs 1 for resource failures")
+            print(f"secdiagram: {summary['error']}", file=sys.stderr)
+            return 1
+
+    if not machine:
+        return run()
+    with contextlib.redirect_stdout(sys.stderr):
+        code = run()
+    if code == 1 and "error" not in summary:
+        summary["error"] = "Scan could not complete; see stderr diagnostics."
+    summary.update({"exit_code": code, "status": "ok" if code == 0 else "failed"})
+    print(json.dumps(summary, sort_keys=True))
+    return code

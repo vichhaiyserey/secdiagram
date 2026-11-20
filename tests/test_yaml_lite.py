@@ -78,8 +78,14 @@ class YamlLiteTests(unittest.TestCase):
         self.assertEqual(doc.child("image").value, "repo.example:5000/app:1.0")
 
     def test_malformed_input_does_not_raise(self) -> None:
-        docs = parse_yaml("\n\t\t:\n  ]]\n  : :\nplain string\n")
-        self.assertTrue(all(doc.child("x") is None or True for doc in docs))
+        malformed = "\n\t\t:\n  ]]\n  : :\nplain string\n"
+        docs = parse_yaml(malformed)
+        self.assertEqual(len(docs), 1)
+        self.assertIsNone(docs[0].child("x"))
+        recovered = parse_yaml(malformed + "valid: recovered\n")[0].child("valid")
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.value, "recovered")
+        self.assertEqual(recovered.line, 6)
 
     def test_empty_input(self) -> None:
         self.assertEqual(parse_yaml(""), [])

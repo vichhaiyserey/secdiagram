@@ -162,7 +162,11 @@ class ConfidenceTests(unittest.TestCase):
             exposure="public",
             mitigation_status="none",
         )
-        self.assertEqual(compute_confidence(finding, **args), compute_confidence(finding, **args))
+        scores = [compute_confidence(finding, **args) for _ in range(3)]
+        # A proven public flow at detector confidence 0.90 has decision confidence 1.00.
+        self.assertEqual(scores, [1.0, 1.0, 1.0])
+        finding.confidence = 0.5
+        self.assertEqual(compute_confidence(finding, **args), 0.56)
 
 
 class ReachabilityTests(unittest.TestCase):
@@ -437,6 +441,8 @@ class PolicyCliTests(unittest.TestCase):
             self._run(self._args(Path(tmp) / "out", ["--policy", "shadow"]))
             sarif = json.loads((Path(tmp) / "out" / "security.sarif").read_text(encoding="utf-8"))
             results = sarif["runs"][0]["results"]
+            self.assertTrue(any(row["properties"].get("enforcement") == "block" for row in results))
+            self.assertTrue(any(row["properties"].get("enforcement") != "block" for row in results))
             for result in results:
                 enforcement = result["properties"].get("enforcement")
                 if enforcement == "block":

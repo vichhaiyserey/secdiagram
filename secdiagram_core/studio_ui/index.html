@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>secdiagram Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%235eead4'/%3E%3Cpath d='M4 5h6v6H4zM14 13h6v6h-6zM10 8h4v5h-4z' fill='%2304121a'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/studio/app.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<div id="status-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+<div id="error-live" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
+<div class="shell">
+  <aside class="side">
+    <div class="brand">
+      <div class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M4 5h6v6H4zM14 13h6v6h-6zM10 8h4v5h-4z" fill="currentColor" opacity=".9"/></svg>
+      </div>
+      <div><b>secdiagram</b><span>studio</span></div>
+    </div>
+    <nav aria-label="Studio sections">
+      <div id="nav" role="tablist">
+        <button class="navbtn active" id="tab-dashboard" role="tab" aria-selected="true" aria-controls="view-dashboard" tabindex="0" data-view="dashboard"><span aria-hidden="true">01</span>Overview</button>
+        <button class="navbtn" id="tab-diagram" role="tab" aria-selected="false" aria-controls="view-diagram" tabindex="-1" data-view="diagram"><span aria-hidden="true">02</span>Diagram</button>
+        <button class="navbtn" id="tab-pipeline" role="tab" aria-selected="false" aria-controls="view-pipeline" tabindex="-1" data-view="pipeline"><span aria-hidden="true">03</span>SDLC</button>
+        <button class="navbtn" id="tab-ai" role="tab" aria-selected="false" aria-controls="view-ai" tabindex="-1" data-view="ai"><span aria-hidden="true">04</span>AI review</button>
+        <button class="navbtn" id="tab-installer" role="tab" aria-selected="false" aria-controls="view-installer" tabindex="-1" data-view="installer"><span aria-hidden="true">05</span>Installer</button>
+      </div>
+    </nav>
+    <div class="side-foot">
+      <div id="side-repo">repository</div>
+      <div class="muted" id="side-version">v0.0.0</div>
+      <a class="muted" href="/">Classic report</a>
+    </div>
+  </aside>
+
+  <main id="main" tabindex="-1">
+    <header class="topbar">
+      <div>
+        <h1 id="view-title">Overview</h1>
+        <p id="view-sub" class="muted">Deterministic architecture intelligence for this repository.</p>
+      </div>
+      <div class="top-actions">
+        <button id="rescan" class="btn">Rescan</button>
+        <span id="health" class="pill">connecting</span>
+      </div>
+    </header>
+
+    <section class="view active" id="view-dashboard" role="tabpanel" aria-labelledby="tab-dashboard" tabindex="0">
+      <p class="panel-status muted" id="dashboard-status">Loading repository summary…</p>
+      <div class="grid stats" aria-label="Repository summary">
+        <article class="card"><div class="k">Nodes</div><div class="v" id="stat-nodes">-</div><div class="s">parsed components</div></article>
+        <article class="card"><div class="k">Edges</div><div class="v" id="stat-edges">-</div><div class="s">resolved relationships</div></article>
+        <article class="card"><div class="k">Findings</div><div class="v" id="stat-findings">-</div><div class="s">security observations</div></article>
+        <article class="card"><div class="k">SDLC</div><div class="v" id="stat-phases">-</div><div class="s">phases complete</div></article>
+      </div>
+
+      <div class="grid two">
+        <article class="card">
+          <div class="card-head"><h2>Severity profile</h2><span class="muted" id="sev-total"></span></div>
+          <div id="sev-bars" class="bars" role="list" aria-label="Findings by severity"></div>
+        </article>
+        <article class="card">
+          <div class="card-head"><h2>Pipeline</h2><button class="linkbtn" data-goto="pipeline">Open SDLC</button></div>
+          <ol id="phase-mini" class="timeline" aria-label="Phase status"></ol>
+        </article>
+      </div>
+
+      <div class="grid two">
+        <article class="card">
+          <div class="card-head"><h2>Artifacts</h2><span class="muted">.secdiagram/</span></div>
+          <div id="artifact-list" class="chips"></div>
+        </article>
+        <article class="card">
+          <div class="card-head"><h2>Quick actions</h2></div>
+          <div class="actions">
+            <button class="btn primary" data-goto="diagram">Open diagram studio</button>
+            <button class="btn" data-goto="ai">Generate AI review</button>
+            <button class="btn" data-goto="installer">Inspect agent skill</button>
+          </div>
+          <p class="note">Static analysis only. No repository code is executed. Network access is opt-in for LLM reviews and remote image rendering.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="view" id="view-diagram" role="tabpanel" aria-labelledby="tab-diagram" tabindex="0">
+      <div class="card">
+        <div class="card-head wrap">
+          <h2>Diagram studio</h2>
+          <div class="toolbar">
+            <div class="seg" id="detail-seg" role="group" aria-label="Diagram detail">
+              <button data-detail="architecture" class="active" aria-pressed="true">Architecture</button>
+              <button data-detail="high-level" aria-pressed="false">C4 high-level</button>
+              <button data-detail="taint" aria-pressed="false">Attack paths</button>
+            </div>
+            <select id="direction" aria-label="Diagram direction">
+              <option value="">Default direction</option>
+              <option value="LR">Left to right</option>
+              <option value="TB">Top to bottom</option>
+              <option value="RL">Right to left</option>
+              <option value="BT">Bottom to top</option>
+            </select>
+            <select id="theme" aria-label="Diagram theme">
+              <option value="">Default theme</option>
+              <option value="modern">Modern</option>
+              <option value="classic">Classic</option>
+            </select>
+          </div>
+        </div>
+        <div class="toolbar">
+          <button class="btn primary" id="render-svg">Render SVG</button>
+          <button class="btn" id="show-source" aria-expanded="false" aria-controls="mermaid-source">Show Mermaid source</button>
+          <button class="btn" id="save-overrides">Save edits</button>
+          <button class="btn danger" id="reset-overrides">Reset edits</button>
+          <span class="muted" id="override-meta"></span>
+        </div>
+        <p class="panel-status muted" id="diagram-status">Choose “Render SVG” for a local render, or show the Mermaid source.</p>
+        <div class="split">
+          <div class="preview" id="diagram-preview" role="region" aria-label="Diagram preview" tabindex="0" aria-busy="false">
+            <div class="placeholder">Choose “Render SVG” for a local Mermaid render, or show the Mermaid source.</div>
+          </div>
+          <aside class="editor" aria-label="Diagram component editor">
+            <div class="editor-head">
+              <strong>Components</strong>
+              <input id="node-filter" type="search" placeholder="Filter nodes" aria-label="Filter nodes">
+            </div>
+            <div id="node-list" class="node-list" role="region" aria-label="Diagram components" tabindex="0"></div>
+          </aside>
+        </div>
+        <pre id="mermaid-source" class="code hidden" role="region" aria-label="Mermaid source" tabindex="0"></pre>
+      </div>
+    </section>
+
+    <section class="view" id="view-pipeline" role="tabpanel" aria-labelledby="tab-pipeline" tabindex="0">
+      <div class="card">
+        <div class="card-head wrap">
+          <div>
+            <h2>Agentic SDLC handoff</h2>
+            <p class="muted">Each phase carries evidence forward. Handoff stays gated until every phase is done.</p>
+          </div>
+          <div class="toolbar">
+            <button class="btn" id="handoff-preview">Preview handoff</button>
+            <button class="btn primary" id="handoff-write">Write HANDOFF.md</button>
+          </div>
+        </div>
+        <p class="panel-status muted" id="pipeline-status">Loading pipeline state…</p>
+        <div class="progress" role="progressbar" aria-label="SDLC completion" aria-valuemin="0" aria-valuemax="5" aria-valuenow="0"><div id="phase-progress"></div></div>
+        <div id="phase-cards" class="phase-grid"></div>
+        <pre id="handoff-output" class="code hidden" role="region" aria-label="Handoff preview" tabindex="0"></pre>
+      </div>
+    </section>
+
+    <section class="view" id="view-ai" role="tabpanel" aria-labelledby="tab-ai" tabindex="0">
+      <div class="grid two">
+        <article class="card">
+          <div class="card-head"><h2>Evidence-grounded review</h2></div>
+          <p class="note">Credentials are read from the server environment only (<code>SECDIAGRAM_LLM_API_KEY</code> or <code>OPENAI_API_KEY</code>). They are never accepted from the browser.</p>
+          <div class="form">
+            <label>Provider
+              <select id="llm-provider">
+                <option value="ollama">Local Ollama</option>
+                <option value="openai">OpenAI-compatible</option>
+              </select>
+            </label>
+            <label>Model
+              <input id="llm-model" placeholder="qwen2.5-coder / gpt-4o-mini">
+            </label>
+            <label>Base URL (optional)
+              <input id="llm-base" placeholder="http://localhost:11434">
+            </label>
+            <label>Template
+              <select id="llm-template">
+                <option value="comprehensive">Comprehensive</option>
+                <option value="threat-model">STRIDE threat model</option>
+                <option value="remediation">Remediation playbook</option>
+                <option value="compliance">Compliance audit</option>
+              </select>
+            </label>
+            <button class="btn primary" id="generate-ai">Generate review</button>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card-head"><h2>Narrative</h2><span class="muted" id="ai-status">idle</span></div>
+          <pre id="ai-output" class="code tall" role="region" aria-label="AI review narrative" tabindex="0" aria-busy="false">No review generated yet.</pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="view" id="view-installer" role="tabpanel" aria-labelledby="tab-installer" tabindex="0">
+      <div class="grid two">
+        <article class="card">
+          <div class="card-head"><h2>AI skill installer</h2><span class="pill" id="installer-pill">checking</span></div>
+          <p class="panel-status muted" id="installer-status">Loading installer status…</p>
+          <dl class="kv" id="installer-kv"></dl>
+          <div class="actions">
+            <button class="btn" data-copy="secdiagram studio install">Copy install command</button>
+            <button class="btn" data-copy="secdiagram studio status">Copy status command</button>
+          </div>
+          <p class="note">Installer writes are CLI-only for safety. This panel is read-only and reports the user-level home, virtual environment, launcher, and skill paths.</p>
+        </article>
+        <article class="card">
+          <div class="card-head"><h2>Portable agent skill</h2></div>
+          <pre id="skill-preview" class="code tall" role="region" aria-label="Portable agent skill" tabindex="0">Loading…</pre>
+        </article>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <span>secdiagram Studio</span>
+      <span class="muted">Zero-dependency core · offline-first · deterministic output</span>
+    </footer>
+  </main>
+</div>
+<div id="toast" class="toast" aria-hidden="true"></div>
+<script src="/studio/app.js"></script>
+</body>
+</html>

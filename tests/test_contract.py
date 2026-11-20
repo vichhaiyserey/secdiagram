@@ -32,6 +32,20 @@ SAMPLE_APP_DIR = FIXTURES_DIR / "sample_app"
 
 
 class ConsumerContractTests(unittest.TestCase):
+    def test_fixture_consumers_do_not_share_mutable_results(self) -> None:
+        from tests.support import fixture_result
+
+        first, second = fixture_result(), fixture_result()
+        self.assertIsNot(first, second)
+        self.assertTrue(second.graph.nodes)
+        self.assertTrue(second.graph.findings)
+        first.graph.nodes.clear()
+        first.graph.findings[0].baseline = True
+        first.repo.skipped.append("mock_test_mutation")
+        self.assertTrue(second.graph.nodes)
+        self.assertFalse(second.graph.findings[0].baseline)
+        self.assertNotIn("mock_test_mutation", second.repo.skipped)
+
     def test_downstream_consumer_contract(self) -> None:
         """Verifies that attributes consumed by devsecops-toolkit remain present and valid."""
         # 1. AnalysisConfig constructor contract

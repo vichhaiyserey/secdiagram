@@ -8,19 +8,19 @@ reviewed on every release and superseded whenever a newer scan is published.
 
 | Field | Value |
 | --- | --- |
-| Package version | `0.3.3` (first release carrying the Alpine base migration) |
+| Package version | `0.4.0` (Agentic Studio and accessibility release) |
 | Base images | `python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89`, `node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5` |
 | Runtime user | `secdiagram` (`uid 10001`, `gid 10001`), non-root |
 | Default command | `secdiagram --dir .` (one-shot CLI) |
 | Scan command | `trivy image --severity CRITICAL,HIGH --scanners vuln,secret secdiagram:alpine` |
-| Scan date | 2026-11-18 (Trivy 0.76.0, DB 2026-11-17) |
+| Scan date | 2026-11-20 (Trivy 0.76.0, DB 2026-11-19) |
 
 ## Result summary
 
 - **CRITICAL/HIGH findings: 0** (fixable: 0, unfixed: 0).
 - `.trivyignore.yaml` therefore contains **no exceptions** (`vulnerabilities: []`).
   The image passes the blocking Trivy gate with an empty baseline.
-- Image size: 2.01 GB (previous Debian base: 2.11 GB).
+- Image size: 1.88 GB (`v0.3.3`: 2.01 GB; previous Debian base: 2.11 GB).
 
 ### Why the findings disappeared
 
@@ -113,5 +113,7 @@ are ignored).
 - `0.2.0`: six *fixable* HIGH findings (apt, zlib/minizip).
 - `0.2.1`/`0.3.2` Debian base: 0 fixable, 226 distinct unfixed CVEs baselined
   under Rule 7 (Chromium, krb5, util-linux, `libxml2`, `git`, …).
-- Next release: Alpine base migration removes all 493 CRITICAL/HIGH findings;
-  the baseline is now empty.
+- `0.3.3`: Alpine base migration removes all 493 CRITICAL/HIGH findings;
+  the baseline is empty.
+- `0.4.0`: Agentic Studio and accessibility release; rebuilt from the pinned
+  Alpine digests, 0 CRITICAL/HIGH vulnerabilities and 0 secrets, empty baseline.

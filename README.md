@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-success.svg?style=flat-square)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/Tests-353%2F353%20Passing-brightgreen.svg?style=flat-square)](tests/)
+[![Tests](https://img.shields.io/badge/Tests-653%2F653%20Passing-brightgreen.svg?style=flat-square)](tests/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=flat-square&logo=docker&logoColor=white)](Dockerfile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Cross Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Ubuntu%20%7C%20RHEL%20%7C%20Windows-blueviolet.svg?style=flat-square)](docs/CONTAINER_AND_COMPOSE.md)
@@ -28,10 +28,11 @@
 - **Security & IaC SAST Overlay**: Discovers entrypoints, traces taint dataflows **across functions and files** (controller → service → repository) to dangerous sinks (CWE-78, CWE-89, CWE-502), draws them as an attack-path diagram, catches hardcoded secrets, and audits Dockerfile, Kubernetes, Terraform, and GitHub Actions configurations.
 - **Web/API Misconfiguration Checks**: Flags broken JWT validation (`alg=none`, signature/expiry checks off), CORS that trusts any origin **with credentials**, disabled CSRF protection, cookies without `HttpOnly`/`Secure`, XXE-prone XML parsers, non-cryptographic RNGs used for tokens, and JS prototype pollution across C#, JS/TS, PHP, Go, and Java.
 - **Risk-Ranked "Fix First" List**: Scores every finding 0–10 by impact × exposure (anonymous, authenticated, or internal entry point, detected from framework auth markers) × evidence × confidence × CISA KEV, and groups them P0–P3 in reports, SARIF, and diagrams.
-- **STRIDE Threat Model**: Generates `THREAT_MODEL.md` per trust boundary (Internet, data stores, external services, host, supply chain) with evidence-backed statuses, priorities, and mitigations — and states honestly what static analysis cannot assess.
+- **STRIDE Threat Model**: Generates `THREAT_MODEL.md` and `threat-model.json` with affected components, assets, source evidence, static flows, severity/confidence, and verification steps. Facts and assessments are separated; `secdiagram threat-diff` compares saved versions offline. See [Threat modeling](docs/THREAT_MODELING.md).
 - **MITRE ATT&CK Audit Gate**: `secdiagram audit <dir>` maps the parsed architecture to ATT&CK techniques (T1190 Exploit Public-Facing Application, T1040 Network Sniffing, T1552 Unsecured Credentials, …) with evidence and missing mitigations, and **fails CI/CD with exit code 1** when findings violate `policy.yaml` thresholds.
 - **CycloneDX 1.6 VEX & SARIF Export**: Generates industry-standard `security.sarif` and CycloneDX 1.6 VEX documents (`vex.json`) with automated reachability justifications (`code_not_reachable`) for dead/internal code.
 - **AI Architectural & Threat Modeling Reviews**: Integrates with local/containerized **Ollama (Qwen, LLaMA, DeepSeek)** or OpenAI endpoints to generate evidence-grounded architectural reviews citing exact `path:line` with zero hallucinations.
+- **Agentic Studio & Portable AI Skill**: User-level installer with a private venv, portable launchers, and an agent skill manifest. The hardened Studio SPA adds interactive diagram overrides, a five-phase discover/model/secure/review/handoff state machine with evidence gates, executable handoff artifacts, and local-Ollama or OpenAI reviews -- all without adding a runtime dependency. See [Agentic Studio](docs/STUDIO.md).
 - **100% Deterministic & Air-Gapped**: Byte-for-byte reproducible outputs across runs. Fully functional in offline, isolated, or air-gapped environments.
 
 ---
@@ -71,7 +72,21 @@ docker run --rm -v "${PWD}:/repo" secdiagram:local --image
 docker run --rm -v "$(pwd):/repo:z" secdiagram:local --image
 ```
 
-### 3. Python Public Facade
+### 3. Agentic Studio & Portable AI Skill
+
+```bash
+# Install the user-level Studio home, launchers, and agent skill:
+python secdiagram.py studio install
+
+# Serve the Studio on loopback with authentication:
+python secdiagram.py studio serve --dir . --user analyst --password 'change-me'
+```
+
+Open `http://127.0.0.1:8080/studio` to edit diagrams, drive the SDLC phases, request local AI
+reviews, and generate handoff artifacts. The installer is CLI-only; the Studio reuses the
+hardened platform server. See the [Agentic Studio guide](docs/STUDIO.md).
+
+### 4. Python Public Facade
 
 Integrate directly into custom automation scripts or DevSecOps pipelines:
 
@@ -104,6 +119,20 @@ if result.has_taint_at("app/api.py", line=42):
 
 ## 📦 Generated Artifacts
 
+Preview a scan without writing files, or capture a structured CI summary:
+
+```bash
+secdiagram --dir . --offline --dry-run --verbose
+secdiagram --dir . --offline --output json --format json,sarif > scan-summary.json
+```
+
+Progress stages appear on stderr. The summary reports parsed files, detected languages,
+components, unresolved references and skipped paths. Use `--verbose` for diagnostic
+details, and check `health.complete` in CI to detect partial coverage.
+Image rendering defaults to local `mmdc`; HTTP rendering requires an explicit provider.
+For large repositories, combine repeatable `--include`/`--exclude` filters with the
+incremental cache and configurable input limits. See the [CLI reference](docs/CLI_REFERENCE.md).
+
 By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 
 - `diagram-highlevel.mmd` / `.png` — High-level C4 system tier diagram (`secdiagram.com` style).
@@ -111,6 +140,7 @@ By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 - `diagram-taint.mmd` / `.png` — Attack-path diagram: untrusted input → entry points → every function on the path → vulnerable sink.
 - `ARCHITECTURE.md` — Complete markdown architecture report with embedded diagrams and a risk-ranked "Fix first" table.
 - `THREAT_MODEL.md` — STRIDE threat model per trust boundary, backed by findings and their risk priority.
+- `threat-model.json` — Versioned source-backed observations and coverage context; compare versions with `secdiagram threat-diff before/threat-model.json after/threat-model.json`.
 - `audit-result.json` — Machine-readable ATT&CK audit result (`secdiagram audit --json`): policy, per-technique status/evidence, and violations.
 - `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings with hop-by-hop `metadata.flow` and `metadata.risk`).
 - `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`; `rank` and `riskScore`/`riskPriority` follow the risk model.
@@ -132,6 +162,7 @@ For comprehensive guides, references, and deployment patterns, see:
 | [**Container & Docker Compose Guide**](docs/CONTAINER_AND_COMPOSE.md) | Standalone Docker & Podman, Windows Git Bash tips, SELinux mode, and local Ollama Compose. |
 | [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
 | [**Hardened Platform Server & REST API**](docs/SERVER_API.md) | Daemon mode (`secdiagram serve`), authentication, rate limits, request caps, and config schema. |
+| [**Agentic Studio & AI-Skill Installer**](docs/STUDIO.md) | User-level install, portable agent skill, Studio UI, diagram overrides, SDLC evidence gates, handoffs, and local AI reviews. |
 | [**CLI Reference Manual**](docs/CLI_REFERENCE.md) | Complete command-line syntax, options breakdown table, and exit codes. |
 | [**Python Public Facade & Developer API**](docs/PYTHON_API.md) | Stable facade (`secdiagram_core`), taint/reachability queries, SCA bridge, and cache serialization. |
 | [**Task Tracking Guide**](docs/TASK_TRACKING.md) | GitHub Issues & Projects v2 task lifecycle tracking with `taskctl.py`. |
@@ -140,7 +171,7 @@ For comprehensive guides, references, and deployment patterns, see:
 
 ## 🧪 Verification & Testing
 
-`secdiagram` maintains a comprehensive test suite (380+ unit tests) covering AST and lexical indexers for seven languages, interprocedural taint, misconfiguration rules, risk scoring, the STRIDE threat model and MITRE ATT&CK audit gate, graph builders, image rendering, and deterministic CLI behaviors. The suite is enforced cross-platform: CI runs the unit-test matrix on Ubuntu **and** Windows for every supported Python version.
+`secdiagram` maintains a comprehensive test suite (653 unit tests) covering AST and lexical indexers for six application languages plus infrastructure-as-code, interprocedural taint, misconfiguration rules, risk scoring, the STRIDE threat model and MITRE ATT&CK audit gate, graph builders, image rendering, and deterministic CLI behaviors. The suite is enforced cross-platform: CI runs the unit-test matrix on Ubuntu **and** Windows for every supported Python version.
 
 ```bash
 # Run unit test suite:

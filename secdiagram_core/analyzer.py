@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from .external_reports import load_external_reports
 from .features import assign_features
 from .frameworks import annotate, load_frameworks_config
 from .graph_builder import BuildStats, GraphBuilder
+from .health import diagnostic
 from .iac import analyze_iac
 from .java_index import analyze_java_security, build_java_graph, index_java
 from .misconfig import analyze_misconfig
@@ -73,6 +75,11 @@ class AnalysisConfig:
     advisory_dbs: list[Path] = field(default_factory=list)
     jobs: int = 0
     cache_dir: Path | None = None
+    skip_paths: list[Path] = field(default_factory=list)
+    max_files: int = 10000
+    max_file_bytes: int = 2 * 1024 * 1024
+    max_total_bytes: int = 64 * 1024 * 1024
+    progress: Callable[[str], None] | None = None
 
 
 @dataclass(slots=True)
@@ -228,27 +235,38 @@ def _disambiguate_plugin_findings(
 
 
 def run_analysis(config: AnalysisConfig) -> AnalysisResult:
+    def stage(name: str) -> None:
+        if config.progress is not None:
+            config.progress(name)
+
+    stage("discovery")
     load_frameworks_config(config.root)
     repo = discover(
         config.root,
         config.include,
         config.exclude,
-        skip_paths=[config.cache_dir] if config.cache_dir is not None else None,
+        skip_paths=config.skip_paths + ([config.cache_dir] if config.cache_dir is not None else []),
+        max_files=config.max_files,
+        max_file_bytes=config.max_file_bytes,
+        max_total_bytes=config.max_total_bytes,
     )
+    stage("parsing")
     python_cache = IndexCache(config.cache_dir, "python", repo.commit) if config.cache_dir else None
     java_cache = IndexCache(config.cache_dir, "java", repo.commit) if config.cache_dir else None
     indexes = index_repo(repo.root, repo.python_files, jobs=config.jobs, cache=python_cache)
     annotate(indexes)
 
+    java_index = index_java(repo.root, repo.rel_files, jobs=config.jobs, cache=java_cache)
+    polyglot_index = index_polyglot(repo.root, repo.rel_files)
+
+    stage("mapping")
     resolver = Resolver(indexes)
     builder = GraphBuilder(indexes, resolver, max_nodes=config.max_nodes)
     graph = builder.build()
 
-    java_index = index_java(repo.root, repo.rel_files, jobs=config.jobs, cache=java_cache)
     if java_index.files:
         build_java_graph(graph, java_index)
 
-    polyglot_index = index_polyglot(repo.root, repo.rel_files)
     if polyglot_index.files:
         build_polyglot_graph(graph, polyglot_index)
 
@@ -263,6 +281,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             graph.nodes, graph.edges, graph.features = snapshot
             plugin_errors.append(_plugin_error("indexer", custom_indexer.name, exc, repo.root))
 
+    stage("threat analysis")
     findings: list[Finding] = []
     if config.security:
         findings.extend(analyze_iac(graph, repo))
@@ -311,6 +330,19 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     assign_features(graph)
 
     parse_errors = sorted(path for path, index in indexes.items() if index.error)
+    diagnostics = [
+        diagnostic("parse_error", path, indexes[path].error or "Cannot parse source",
+                   "Check syntax and the running Python version; use --exclude to omit this file.")
+        for path in parse_errors
+    ]
+    for module, paths in sorted(builder.stats.duplicate_modules.items()):
+        diagnostics.append(diagnostic(
+            "ambiguous_layout", ", ".join(sorted(paths)), f"Multiple files resolve to module {module}",
+            "Analyze each project with --dir or narrow the scan using --include/--exclude.",
+        ))
+    for path in sorted(repo.skipped):
+        if not path.startswith(("path filter:", "ignored directory:")):
+            diagnostics.append(diagnostic("skipped_path", path, "Path was not analyzed", "Review the skip reason and adjust permissions or scan limits."))
     languages: dict[str, int] = {}
     for rel in repo.rel_files:
         name = rel.rsplit("/", 1)[-1]
@@ -321,6 +353,19 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         if language:
             languages[language] = languages.get(language, 0) + 1
     languages = dict(sorted(languages.items()))
+    parsed_paths = {path for path, index in indexes.items() if not index.error}
+    parsed_paths.update(java_index.files)
+    parsed_paths.update(polyglot_index.files)
+    for rel in repo.rel_files:
+        language = LANGUAGE_BY_SUFFIX.get(Path(rel).suffix.lower())
+        if language and rel not in parsed_paths and rel not in parse_errors:
+            diagnostics.append(diagnostic(
+                "not_parsed", rel, f"No architecture index produced for {language} source",
+                "Built-in indexers cover Python, Java, C#, JavaScript/TypeScript, PHP and Go; check file size and syntax or supply an indexer plugin.",
+            ))
+    if not parsed_paths:
+        diagnostics.append(diagnostic("empty_project", ".", "No supported source files were parsed",
+                                      "Check --dir and path filters; use --workspace for a directory containing separate repositories."))
     unsupported_languages = sorted(
         language for language in languages if language not in SECURITY_LANGUAGES
     )
@@ -331,6 +376,9 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         str(config.min_confidence),
         str(config.max_nodes),
         str(config.security),
+        str(config.max_files),
+        str(config.max_file_bytes),
+        str(config.max_total_bytes),
     )
     graph.meta.update(
         {
@@ -344,6 +392,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             "polyglot_files": polyglot_index.language_counts(),
             "iac_files": len(repo.iac_files),
             "files_discovered": len(repo.rel_files),
+            "files_parsed": len(parsed_paths),
+            "diagnostics": sorted(diagnostics, key=lambda item: (item["path"], item["code"])),
             "files_skipped": len(repo.skipped),
             "skipped_samples": sorted(repo.skipped)[:20],
             "languages": languages,

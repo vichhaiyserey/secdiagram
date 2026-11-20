@@ -7,7 +7,9 @@ import base64
 import ipaddress
 import json
 import secrets
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Mapping
@@ -17,13 +19,29 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
-from . import __version__
+from . import __version__, agentic, studio_ui
+from . import studio as studio_install
 from .analyzer import AnalysisConfig, AnalysisResult, run_analysis
 from .config import SecdiagramConfig, load_config
+from .diagram_edit import (
+    DiagramOverrideError,
+    DiagramOverrides,
+    apply_overrides,
+    clear_overrides,
+    summarize_overrides,
+)
+from .diagram_edit import (
+    load_overrides as load_diagram_overrides,
+)
+from .diagram_edit import (
+    save_overrides as save_diagram_overrides,
+)
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
+from .llm import NarrativeError, generate_narrative
 from .model import SEVERITY_RANK, Finding, Graph
 from .redaction import redact_secrets, sanitize_path_text, sanitize_url_path
 from .render_html import render_html
+from .render_image import ImageRenderError, render_image
 from .render_json import render_json
 from .render_mermaid import render_mermaid
 from .render_sarif import render_sarif
@@ -76,6 +94,116 @@ SECURITY_HEADERS = {
     "Permissions-Policy": "geolocation=(), camera=(), microphone=()",
     "Cache-Control": "no-store, no-cache, must-revalidate",
 }
+
+
+STUDIO_DIR_REL = Path(".secdiagram") / "studio"
+_ALLOWED_DIRECTIONS = frozenset({"LR", "RL", "TB", "TD", "BT"})
+_ALLOWED_THEMES = frozenset({"modern", "classic"})
+_ALLOWED_LLM_TEMPLATES = frozenset(
+    {"comprehensive", "threat-model", "remediation", "compliance"}
+)
+_ALLOWED_LLM_PROVIDERS = frozenset({"ollama", "openai"})
+
+
+def _sdlc_payload(state: agentic.SdlcState) -> dict[str, Any]:
+    """Return the UI/API projection of SDLC state."""
+    return {
+        "state": state.to_dict(),
+        "progress": state.progress,
+        "blockers": agentic.blockers(state),
+        "can_handoff": not agentic.blockers(state),
+        "phases": [
+            {
+                "phase": phase,
+                "title": agentic.PHASE_TITLES[phase],
+                "description": agentic.PHASE_DESCRIPTIONS[phase],
+                "status": state.phases[phase].status,
+                "evidence": list(state.phases[phase].evidence),
+                "note": state.phases[phase].note,
+                "expected_artifacts": list(agentic.PHASE_ARTIFACTS[phase]),
+                "can_start": agentic.can_start(state, phase),
+            }
+            for phase in agentic.PHASES
+        ],
+    }
+
+
+def _llm_base_url_allowed(url: str) -> bool:
+    """Restrict Studio LLM calls to loopback, private, or OpenAI hosts.
+
+    This prevents the authenticated UI from being used as an SSRF pivot into
+    arbitrary internet or metadata endpoints.
+    """
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    host = parsed.hostname.lower()
+    if host == "api.openai.com" or host.endswith(".openai.com"):
+        return True
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    # Link-local addresses (including cloud metadata endpoints such as
+    # 169.254.169.254) are deliberately rejected, even though some Python
+    # releases also classify them as private.
+    if address.is_link_local:
+        return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None and mapped.is_link_local:
+        return False
+    return address.is_loopback or address.is_private
+
+
+def _query_choice(query: dict[str, list[str]], key: str, allowed: frozenset[str]) -> str | None:
+    values = query.get(key)
+    if not values:
+        return None
+    value = values[0].strip()
+    if value.upper() in allowed:
+        return value.upper()
+    if value.lower() in allowed:
+        return value.lower()
+    return None
+
+
+def _read_text_bounded(path: Path, limit: int = 512 * 1024) -> str | None:
+    try:
+        if not path.is_file() or path.stat().st_size > limit:
+            return None
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _studio_skill_payload() -> dict[str, Any]:
+    """Read the installed skill, or render the canonical preview."""
+    home = studio_install.default_home()
+    status = studio_install.status(home)
+    skill_dir = home / studio_install.SKILL_DIRNAME
+    manifest_path = skill_dir / "skill.json"
+    markdown_path = skill_dir / "SKILL.md"
+    installed_manifest = _read_text_bounded(manifest_path)
+    installed_markdown = _read_text_bounded(markdown_path)
+    manifest_data: Any = None
+    if installed_manifest:
+        try:
+            manifest_data = json.loads(installed_manifest)
+        except json.JSONDecodeError:
+            manifest_data = None
+    if manifest_data is None:
+        manifest_data = studio_install.skill_manifest()
+    markdown = installed_markdown or studio_install.render_skill_markdown()
+    return {
+        "installed": status.get("installed", False),
+        "manifest": manifest_data,
+        "markdown": markdown,
+    }
 
 
 # ------------------------------------------------------------------- Authentication
@@ -252,6 +380,47 @@ class PlatformState:
         self.last_scan_timestamp: float = 0.0
         self.html_cache: str | None = None
 
+    @property
+    def studio_dir(self) -> Path:
+        return self.root / STUDIO_DIR_REL
+
+    def get_sdlc(self) -> agentic.SdlcState:
+        try:
+            return agentic.load_state(self.root)
+        except agentic.SdlcError:
+            return agentic.default_state()
+
+    def get_overrides(self) -> DiagramOverrides:
+        try:
+            return load_diagram_overrides(self.root)
+        except DiagramOverrideError:
+            return DiagramOverrides()
+
+    def get_edited_graph(self) -> Graph:
+        return apply_overrides(self.get_analysis().graph, self.get_overrides())
+
+    def render_studio_diagram(
+        self,
+        detail: str = "architecture",
+        direction: str | None = None,
+        theme: str | None = None,
+    ) -> str:
+        overrides = self.get_overrides()
+        chosen_direction = direction or overrides.direction or self.config.analysis.diagram_direction
+        chosen_theme = theme or overrides.theme or self.config.analysis.diagram_theme
+        graph = apply_overrides(self.get_analysis().graph, overrides)
+        if detail == "taint":
+            return render_taint_mermaid(graph)
+        if detail in {"high-level", "overview"}:
+            hla = build_high_level_architecture(self.root, graph)
+            return render_mermaid_highlevel(hla, direction=chosen_direction, theme=chosen_theme)
+        return render_mermaid(
+            graph,
+            detail=detail,
+            direction=chosen_direction,
+            theme=chosen_theme,
+        )
+
     def rescan(self) -> AnalysisResult:
         with self.lock:
             ana_cfg = self.config.analysis
@@ -360,6 +529,35 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         self.send_security_headers()
         self.end_headers()
         self.wfile.write(payload)
+
+    def _send_bytes(self, status_code: int, payload: bytes, content_type: str) -> None:
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_security_headers()
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _check_origin(self) -> bool:
+        """Reject cross-origin state-changing requests (defence in depth)."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        host = self.headers.get("Host") or ""
+        try:
+            parsed = urlsplit(origin)
+        except ValueError:
+            parsed = None
+        if parsed is None or parsed.netloc.lower() != host.lower():
+            self.platform_server.audit.log(
+                "request_rejected",
+                remote=self._client_key(),
+                path=self._request_path(),
+                reason="cross_origin",
+            )
+            self._send_json(403, {"error": "Forbidden", "message": "Cross-origin request rejected."})
+            return False
+        return True
 
     def _client_key(self) -> str:
         address = self.client_address
@@ -486,7 +684,24 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(500, {"error": "InternalServerError", "message": "The report could not be generated."})
             return
 
-        # 2. REST API v1
+        # 2. Studio single-page app and static assets
+        if path in {"/studio", "/studio/index.html"}:
+            try:
+                self._send_text(200, studio_ui.render_studio_html(), "text/html; charset=utf-8")
+            except studio_ui.StudioAssetError:
+                self._send_json(500, {"error": "InternalServerError", "message": "Studio UI assets are missing."})
+            return
+        if path.startswith("/studio/"):
+            name = path[len("/studio/"):]
+            try:
+                content_type, content = studio_ui.read_asset(name)
+            except studio_ui.StudioAssetError:
+                self._send_json(404, {"error": "NotFound", "message": f"Studio asset '{name}' does not exist."})
+                return
+            self._send_text(200, content, content_type)
+            return
+
+        # 3. REST API v1
         if path == "/api/v1/health":
             last_dt = (
                 datetime.fromtimestamp(state.last_scan_timestamp, tz=timezone.utc).isoformat()
@@ -590,6 +805,149 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             self._send_text(200, diagram_text, "text/plain; charset=utf-8")
             return
 
+        # 4. Studio API
+        if path == "/api/v1/studio/status":
+            analysis = state.get_analysis()
+            overrides = state.get_overrides()
+            sdlc = state.get_sdlc()
+            self._send_json(200, {
+                "installer": studio_install.status(),
+                "studio_dir": STUDIO_DIR_REL.as_posix(),
+                "sdlc": _sdlc_payload(sdlc),
+                "overrides": summarize_overrides(overrides, analysis.graph),
+                "capabilities": {
+                    "local_svg": bool(shutil.which("mmdc")),
+                    "llm_providers": sorted(_ALLOWED_LLM_PROVIDERS),
+                    "offline_first": True,
+                    "static_analysis_only": True,
+                },
+            })
+            return
+
+        if path == "/api/v1/studio/sdlc":
+            self._send_json(200, _sdlc_payload(state.get_sdlc()))
+            return
+
+        if path == "/api/v1/studio/overrides":
+            overrides = state.get_overrides()
+            self._send_json(200, {
+                "overrides": overrides.to_dict(),
+                "summary": summarize_overrides(overrides, state.get_analysis().graph),
+            })
+            return
+
+        if path == "/api/v1/studio/nodes":
+            graph = state.get_edited_graph()
+            nodes = [
+                {
+                    "id": node.id,
+                    "name": node.name,
+                    "kind": node.kind,
+                    "qualname": node.qualname,
+                    "path": node.path,
+                    "line": node.line,
+                    "feature": node.feature,
+                }
+                for node in sorted(
+                    graph.nodes.values(),
+                    key=lambda item: (
+                        item.feature or "",
+                        item.kind,
+                        item.qualname,
+                        item.path or "",
+                        item.id,
+                    ),
+                )
+            ]
+            self._send_json(200, {"total": len(nodes), "nodes": nodes})
+            return
+
+        if path == "/api/v1/studio/diagram":
+            detail = (query.get("detail", ["architecture"])[0] or "architecture").strip()
+            if detail not in {"architecture", "high-level", "overview", "taint"}:
+                self._send_json(400, {
+                    "error": "BadRequest",
+                    "message": "detail must be architecture, high-level, overview, or taint.",
+                })
+                return
+            direction = _query_choice(query, "direction", _ALLOWED_DIRECTIONS)
+            theme = _query_choice(query, "theme", _ALLOWED_THEMES)
+            self._send_text(
+                200,
+                state.render_studio_diagram(detail, direction=direction, theme=theme),
+                "text/plain; charset=utf-8",
+            )
+            return
+
+        if path == "/api/v1/studio/render":
+            detail = (query.get("detail", ["high-level"])[0] or "high-level").strip()
+            if detail not in {"architecture", "high-level", "overview", "taint"}:
+                self._send_json(400, {"error": "BadRequest", "message": "Unsupported diagram detail."})
+                return
+            image_format = (query.get("format", ["svg"])[0] or "svg").strip().lower()
+            if image_format not in {"svg", "png"}:
+                self._send_json(400, {"error": "BadRequest", "message": "format must be svg or png."})
+                return
+            direction = _query_choice(query, "direction", _ALLOWED_DIRECTIONS)
+            theme = _query_choice(query, "theme", _ALLOWED_THEMES)
+            source = state.render_studio_diagram(detail, direction=direction, theme=theme)
+            try:
+                with tempfile.TemporaryDirectory(prefix="secdiagram-studio-") as tmp:
+                    output = Path(tmp) / f"diagram.{image_format}"
+                    render_image(
+                        source,
+                        output,
+                        image_format=image_format,
+                        provider="local",
+                        timeout=30.0,
+                        offline=True,
+                    )
+                    image_payload = output.read_bytes()
+            except (ImageRenderError, OSError, ValueError) as exc:
+                self.platform_server.audit.log(
+                    "studio_render_failed", remote=self._client_key(), error=type(exc).__name__
+                )
+                self._send_json(503, {
+                    "error": "RenderUnavailable",
+                    "message": redact_secrets(str(exc)),
+                })
+                return
+            content_type = "image/svg+xml" if image_format == "svg" else "image/png"
+            self._send_bytes(200, image_payload, content_type)
+            return
+
+        if path == "/api/v1/studio/handoff":
+            sdlc = state.get_sdlc()
+            graph = state.get_analysis().graph
+            handoff_payload = agentic.build_handoff(
+                sdlc,
+                repo_name=state.root.name,
+                graph=graph,
+                out_dir=state.root / ".secdiagram",
+            )
+            self._send_text(
+                200,
+                agentic.render_handoff_markdown(handoff_payload),
+                "text/markdown; charset=utf-8",
+            )
+            return
+
+        if path == "/api/v1/studio/skill":
+            self._send_json(200, _studio_skill_payload())
+            return
+
+        if path == "/api/v1/studio/brief":
+            phase = (query.get("phase", [""])[0] or "").strip()
+            try:
+                markdown = agentic.render_phase_brief(
+                    state.get_sdlc(), phase, repo_name=state.root.name
+                )
+            except agentic.SdlcError as exc:
+                self._send_json(400, {"error": "BadRequest", "message": str(exc)})
+                return
+            self._send_text(200, markdown, "text/markdown; charset=utf-8")
+            return
+
         # 404 Not Found
         self._send_json(404, {"error": "NotFound", "message": f"Endpoint '{path}' does not exist."})
 
@@ -598,10 +956,232 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             return
         if not self._check_auth():
             return
+        if not self._check_origin():
+            return
 
         parsed = urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
         state: PlatformState = self.platform_server.platform_state
+
+        if path == "/api/v1/studio/sdlc":
+            body_ok, body = self._read_json_body()
+            if not body_ok:
+                return
+            if state.config.server.read_only:
+                self._send_json(403, {
+                    "error": "Forbidden",
+                    "message": "Platform is running in read-only mode; SDLC state cannot be changed.",
+                })
+                return
+            action = body.get("action")
+            phase = body.get("phase")
+            evidence = body.get("evidence")
+            note = body.get("note")
+            if evidence is not None and not isinstance(evidence, str):
+                self._send_json(400, {"error": "BadRequest", "message": "evidence must be a string."})
+                return
+            if note is not None and not isinstance(note, str):
+                self._send_json(400, {"error": "BadRequest", "message": "note must be a string."})
+                return
+            sdlc = state.get_sdlc()
+            try:
+                agentic.apply_action(
+                    sdlc,
+                    str(action),
+                    str(phase),
+                    evidence=evidence,
+                    note=note,
+                )
+            except agentic.SdlcError as exc:
+                self._send_json(400, {"error": "BadRequest", "message": str(exc)})
+                return
+            try:
+                agentic.save_state(state.root, sdlc)
+            except (OSError, agentic.SdlcError) as exc:
+                self._send_json(500, {"error": "StateWriteFailed", "message": redact_secrets(str(exc))})
+                return
+            self.platform_server.audit.log(
+                "studio_sdlc",
+                remote=self._client_key(),
+                user=self._auth_username() or "anonymous",
+                action=str(action),
+                phase=str(phase),
+            )
+            self._send_json(200, {"status": "ok", "state": _sdlc_payload(sdlc)})
+            return
+
+        if path == "/api/v1/studio/overrides":
+            body_ok, body = self._read_json_body()
+            if not body_ok:
+                return
+            if state.config.server.read_only:
+                self._send_json(403, {
+                    "error": "Forbidden",
+                    "message": "Platform is running in read-only mode; diagram edits cannot be changed.",
+                })
+                return
+            if body.get("action") == "reset":
+                try:
+                    clear_overrides(state.root)
+                except (DiagramOverrideError, OSError) as exc:
+                    self._send_json(500, {
+                        "error": "StateWriteFailed",
+                        "message": redact_secrets(str(exc)),
+                    })
+                    return
+                overrides = DiagramOverrides()
+            else:
+                try:
+                    overrides = DiagramOverrides.from_dict(body)
+                    save_diagram_overrides(state.root, overrides)
+                except DiagramOverrideError as exc:
+                    self._send_json(400, {"error": "BadRequest", "message": str(exc)})
+                    return
+                except OSError as exc:
+                    self._send_json(500, {"error": "StateWriteFailed", "message": redact_secrets(str(exc))})
+                    return
+            self.platform_server.audit.log(
+                "studio_overrides",
+                remote=self._client_key(),
+                user=self._auth_username() or "anonymous",
+                renames=len(overrides.renames),
+                hidden=len(overrides.hidden),
+            )
+            self._send_json(200, {
+                "status": "ok",
+                "overrides": overrides.to_dict(),
+                "summary": summarize_overrides(overrides, state.get_analysis().graph),
+            })
+            return
+
+        if path == "/api/v1/studio/generate":
+            body_ok, body = self._read_json_body()
+            if not body_ok:
+                return
+            provider = str(body.get("provider", "ollama") or "ollama").strip().lower()
+            if provider not in _ALLOWED_LLM_PROVIDERS:
+                self._send_json(400, {
+                    "error": "BadRequest",
+                    "message": "provider must be ollama or openai.",
+                })
+                return
+            template = str(body.get("template", "comprehensive") or "comprehensive").strip()
+            if template not in _ALLOWED_LLM_TEMPLATES:
+                self._send_json(400, {
+                    "error": "BadRequest",
+                    "message": "template must be one of " + ", ".join(sorted(_ALLOWED_LLM_TEMPLATES)) + ".",
+                })
+                return
+            model_value = body.get("model")
+            if model_value is not None and (not isinstance(model_value, str) or len(model_value) > 200):
+                self._send_json(400, {"error": "BadRequest", "message": "model must be a string up to 200 characters."})
+                return
+            base_value = body.get("base_url")
+            if base_value is not None:
+                if not isinstance(base_value, str) or len(base_value) > 500:
+                    self._send_json(400, {"error": "BadRequest", "message": "base_url must be a string up to 500 characters."})
+                    return
+                if base_value.strip() and not _llm_base_url_allowed(base_value.strip()):
+                    self._send_json(400, {
+                        "error": "BadRequest",
+                        "message": (
+                            "base_url must target loopback, a private address, or an OpenAI host; "
+                            "use the CLI for other endpoints."
+                        ),
+                    })
+                    return
+            try:
+                narrative = generate_narrative(
+                    state.get_analysis().graph,
+                    model=model_value.strip() if isinstance(model_value, str) and model_value.strip() else None,
+                    base_url=base_value.strip() if isinstance(base_value, str) and base_value.strip() else None,
+                    provider=provider,
+                    template=template,
+                    timeout=120.0,
+                )
+            except (NarrativeError, OSError, TimeoutError, ValueError) as exc:
+                self.platform_server.audit.log(
+                    "studio_llm_failed", remote=self._client_key(), error=type(exc).__name__
+                )
+                self._send_json(502, {
+                    "error": "NarrativeUnavailable",
+                    "message": redact_secrets(str(exc)),
+                })
+                return
+            self.platform_server.audit.log(
+                "studio_llm",
+                remote=self._client_key(),
+                user=self._auth_username() or "anonymous",
+                provider=provider,
+                template=template,
+            )
+            self._send_json(200, {"status": "ok", "narrative": narrative})
+            return
+
+        if path == "/api/v1/studio/handoff":
+            body_ok, body = self._read_json_body()
+            if not body_ok:
+                return
+            write_requested = bool(body.get("write", False))
+            sdlc = state.get_sdlc()
+            graph = state.get_analysis().graph
+            if not write_requested:
+                payload = agentic.build_handoff(
+                    sdlc,
+                    repo_name=state.root.name,
+                    graph=graph,
+                    out_dir=state.root / ".secdiagram",
+                )
+                self._send_text(
+                    200,
+                    agentic.render_handoff_markdown(payload),
+                    "text/markdown; charset=utf-8",
+                )
+                return
+            if state.config.server.read_only:
+                self._send_json(403, {
+                    "error": "Forbidden",
+                    "message": "Platform is running in read-only mode; handoff files cannot be written.",
+                })
+                return
+            try:
+                md_path, json_path = agentic.write_handoff(
+                    state.studio_dir,
+                    sdlc,
+                    repo_name=state.root.name,
+                    graph=graph,
+                    artifact_dir=state.root / ".secdiagram",
+                )
+            except agentic.HandoffBlocked as exc:
+                self._send_json(409, {"error": "HandoffBlocked", "message": str(exc)})
+                return
+            except (OSError, agentic.SdlcError) as exc:
+                self._send_json(500, {"error": "HandoffWriteFailed", "message": redact_secrets(str(exc))})
+                return
+            self.platform_server.audit.log(
+                "studio_handoff",
+                remote=self._client_key(),
+                user=self._auth_username() or "anonymous",
+            )
+            self._send_json(200, {
+                "status": "ok",
+                "markdown": md_path.read_text(encoding="utf-8"),
+                "files": [
+                    str(md_path.relative_to(state.root).as_posix()),
+                    str(json_path.relative_to(state.root).as_posix()),
+                ],
+            })
+            return
+
+        if path == "/api/v1/studio/installer":
+            body_ok, _body = self._read_json_body()
+            if not body_ok:
+                return
+            self._send_json(403, {
+                "error": "Forbidden",
+                "message": "The installer performs writes and is available only through `secdiagram studio install`.",
+            })
+            return
 
         if path == "/api/v1/scan":
             body_ok, body = self._read_json_body()

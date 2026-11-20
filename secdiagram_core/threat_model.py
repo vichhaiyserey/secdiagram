@@ -25,6 +25,7 @@ from typing import Any
 
 from .model import Finding, Graph, Loc, stable_id
 from .risk import endpoint_exposure
+from .threat_review import attach_threat_records, render_threat_records
 
 BOUNDARIES: tuple[tuple[str, str, str], ...] = (
     ("internet", "Internet -> Application", "Requests from clients and other callers cross into entry points."),
@@ -50,9 +51,9 @@ CATALOG: tuple[tuple[str, str, str, frozenset[str], str], ...] = (
     ("internet", "D", "Entry points exhausted by request floods or expensive operations",
      frozenset(), "Apply rate limits, request size limits and timeouts at the edge and per endpoint."),
     ("data", "T", "Injection into data stores",
-     frozenset({"sql", "nosql"}), "Use parameterized queries and typed filters for every data store call."),
+     frozenset({"sql", "nosql", "ldap", "xpath"}), "Use parameterized queries and typed filters for every data store call."),
     ("data", "I", "Data store or file contents disclosed",
-     frozenset({"sql", "nosql", "path"}), "Parameterize queries; resolve file paths against a fixed base directory."),
+     frozenset({"sql", "nosql", "ldap", "xpath", "path"}), "Parameterize queries; resolve file paths against a fixed base directory."),
     ("external", "S", "Outbound connections to untrusted or spoofed peers",
      frozenset({"tls"}), "Keep TLS certificate verification on; pin or allowlist peers."),
     ("external", "I", "Server-side request forgery to internal services / cloud metadata",
@@ -60,7 +61,7 @@ CATALOG: tuple[tuple[str, str, str, frozenset[str], str], ...] = (
     ("external", "T", "Users redirected to attacker-controlled destinations",
      frozenset({"redirect"}), "Redirect only to relative paths or allowlisted hosts."),
     ("host", "E", "Code or command execution on the host",
-     frozenset({"command", "code", "deserialization", "file-inclusion"}),
+     frozenset({"command", "code", "template", "deserialization", "file-inclusion"}),
      "Never pass input to shells, evaluators, type-resolving deserializers or include()."),
     ("host", "T", "Arbitrary file read/write or entity resolution",
      frozenset({"path", "xxe"}), "Canonicalize paths under a base dir; disable DTDs/external entities."),
@@ -73,6 +74,10 @@ CATALOG: tuple[tuple[str, str, str, frozenset[str], str], ...] = (
      "Pin actions/images by digest, least-privilege tokens, verify dependencies."),
     ("supply", "E", "Over-privileged containers or cloud resources",
      frozenset({"container", "cloud"}), "Run as non-root, drop capabilities, least-privilege IAM."),
+    ("internet", "R", "Audit records forged through log injection",
+     frozenset({"log"}), "Use structured logging and prevent caller-controlled record delimiters."),
+    ("data", "I", "Weak cryptography exposes protected data",
+     frozenset({"crypto"}), "Use current cryptographic algorithms appropriate to the protected asset."),
 )
 STRIDE_NAMES = {
     "S": "Spoofing", "T": "Tampering", "R": "Repudiation",
@@ -94,6 +99,7 @@ class Threat:
     priority: str | None = None
     max_score: float = 0.0
     note: str = ""
+    records: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -101,6 +107,7 @@ class Threat:
             "status": self.status, "priority": self.priority, "max_score": self.max_score,
             "finding_ids": self.finding_ids, "evidence": self.evidence, "mitigation": self.mitigation,
             "note": self.note,
+            "records": self.records,
         }
 
 
@@ -145,7 +152,8 @@ def build_threat_model(graph: Graph) -> list[Threat]:
         threat = Threat(
             id=stable_id("threat", "internet", "S", "unauthenticated-entry"),
             boundary="internet", stride="S", title="Entry points reachable without (detected) authentication",
-            status="observed" if reaching else ("review" if open_count else "no-evidence"),
+            # A taint trace does not establish the absence of global authentication.
+            status="review" if open_count else "no-evidence",
             mitigation="Require authentication by default; mark intentionally public routes explicitly.",
             note=f"{open_count} of {len(endpoints)} entry point(s) have no detected auth marker "
             f"({auth_count} authenticated).",
@@ -156,6 +164,11 @@ def build_threat_model(graph: Graph) -> list[Threat]:
             threat.evidence = [f"{f.title} ({f.evidence[0].ref})" for f in reaching[:3] if f.evidence]
             threat.max_score, threat.priority = _risk(reaching[0])
         threats.insert(0, threat)
+    attach_threat_records(graph, threats)
+    for threat in threats:
+        if threat.status == "observed" and not threat.records:
+            threat.status = "review"
+            threat.note = "Matched rule claims have no usable source locations; obtain source evidence before treating them as findings."
     return threats
 
 
@@ -165,6 +178,7 @@ def summarize_threat_model(graph: Graph, threats: list[Threat]) -> None:
         "observed": sum(1 for t in threats if t.status == "observed"),
         "review": sum(1 for t in threats if t.status == "review"),
         "not_assessed": sum(1 for t in threats if t.status == "not-assessed"),
+        "records": sum(len(t.records) for t in threats),
         "by_boundary": {
             key: sum(1 for t in threats if t.boundary == key and t.status == "observed") for key, _, _ in BOUNDARIES
         },
@@ -172,7 +186,7 @@ def summarize_threat_model(graph: Graph, threats: list[Threat]) -> None:
 
 
 def _ascii(text: str) -> str:
-    return " ".join(str(text).split()).replace("|", "/").encode("ascii", "replace").decode("ascii")
+    return " ".join(str(text).split()).replace("|", "/").replace("`", "'").replace("<", "&lt;").encode("ascii", "replace").decode("ascii")
 
 
 def _boundary_diagram(threats: list[Threat]) -> list[str]:
@@ -217,10 +231,16 @@ def render_threat_model(graph: Graph, threats: list[Threat] | None = None) -> st
         "risk model (impact x exposure x evidence x confidence x exploit intel)."
     )
     lines.append("")
-    lines.append("Status legend: **observed** = backed by findings; **review** = structural signal to confirm; "
-                 "**no evidence** = rules ran and matched nothing (not proof of absence); "
+    lines.append("Status legend: **observed** = backed by static rule findings, not a confirmed exploit; **review** = structural signal to confirm; "
+                 "**no evidence** = no matching active finding in this graph (not proof of absence or scan coverage); "
                  "**not assessed** = outside static analysis.")
     lines.append("")
+    lines.extend(["## Actionable observations and review signals", "",
+                  "Facts describe analyzer observations. Assessments, assumptions and runtime verification are separate. "
+                  "Missing authentication markers do not establish public deployment or an authorization bypass.", "",
+                  render_threat_records([record for threat in threats for record in threat.records]) or "No source-backed observations.", "",
+                  "## STRIDE coverage overview", "",
+                  "The catalog below is coverage context; unmatched categories and unassessed controls are not findings.", ""])
     lines.extend(_boundary_diagram(threats))
     lines.append("")
     status_text = {"observed": "observed", "review": "review", "no-evidence": "no evidence",
@@ -231,8 +251,8 @@ def render_threat_model(graph: Graph, threats: list[Threat] | None = None) -> st
         lines.append("")
         lines.append(_ascii(description))
         lines.append("")
-        lines.append("| STRIDE | Threat | Status | Priority | Evidence | Mitigation |")
-        lines.append("|---|---|---|---|---|---|")
+        lines.append("| STRIDE | Threat category | Status | Priority | Evidence |")
+        lines.append("|---|---|---|---|---|")
         for threat in sorted(group, key=lambda t: ("STRIDE".index(t.stride), t.title)):
             evidence = "; ".join(f"`{_ascii(e)}`" for e in threat.evidence) or _ascii(threat.note) or "-"
             if threat.evidence and len(threat.finding_ids) > len(threat.evidence):
@@ -242,7 +262,7 @@ def render_threat_model(graph: Graph, threats: list[Threat] | None = None) -> st
             priority = f"**{threat.priority}** ({threat.max_score})" if threat.priority else "-"
             lines.append(
                 f"| {STRIDE_NAMES[threat.stride]} | {_ascii(threat.title)} | {status_text[threat.status]} | "
-                f"{priority} | {evidence} | {_ascii(threat.mitigation)} |"
+                f"{priority} | {evidence} |"
             )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

@@ -110,6 +110,11 @@ class LimitPrimitiveTests(unittest.TestCase):
     def test_scan_manager_release_without_acquire_is_safe(self) -> None:
         manager = ScanManager(max_concurrent=1)
         manager.release()  # must not raise ValueError
+        self.assertTrue(manager.try_acquire())
+        self.assertFalse(manager.try_acquire(), "an unmatched release must not create an extra permit")
+        manager.release()
+        self.assertTrue(manager.try_acquire())
+        manager.release()
 
 
 class ServerConstructionTests(unittest.TestCase):

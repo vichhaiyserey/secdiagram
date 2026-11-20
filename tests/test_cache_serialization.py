@@ -26,6 +26,7 @@ class CacheSerializationTests(unittest.TestCase):
         self.assertEqual(len(data["graph"]["findings"]), len(original.graph.findings))
 
         restored_from_dict = AnalysisResult.from_dict(data)
+        self.assertEqual(restored_from_dict.to_dict(), data, "all graph, evidence and dependency fields must survive")
         self.assertEqual(restored_from_dict.repo.name, original.repo.name)
         self.assertEqual(len(restored_from_dict.graph.nodes), len(original.graph.nodes))
         self.assertEqual(len(restored_from_dict.graph.edges), len(original.graph.edges))
@@ -33,13 +34,17 @@ class CacheSerializationTests(unittest.TestCase):
 
         # Query methods work on restored object
         self.assertEqual(
-            restored_from_dict.has_taint_at("app.py"),
-            original.has_taint_at("app.py"),
+            restored_from_dict.has_taint_at("app/service.py"),
+            original.has_taint_at("app/service.py"),
         )
         self.assertEqual(
-            restored_from_dict.is_package_reachable("flask"),
-            original.is_package_reachable("flask"),
+            restored_from_dict.is_package_reachable("fastapi"),
+            original.is_package_reachable("fastapi"),
         )
+        self.assertTrue(restored_from_dict.has_taint_at("app/service.py"))
+        self.assertTrue(restored_from_dict.is_package_reachable("fastapi"))
+        self.assertFalse(restored_from_dict.has_taint_at("missing.py"))
+        self.assertFalse(restored_from_dict.is_package_reachable("mock_unused_package"))
 
         # 2. to_json / from_json with file path
         with tempfile.TemporaryDirectory() as tmp:
@@ -48,10 +53,12 @@ class CacheSerializationTests(unittest.TestCase):
             self.assertTrue(json_path.exists())
 
             restored_from_file = AnalysisResult.from_json(json_path)
+            self.assertEqual(restored_from_file.to_dict(), data)
             self.assertEqual(len(restored_from_file.graph.nodes), len(original.graph.nodes))
             self.assertEqual(len(restored_from_file.graph.findings), len(original.graph.findings))
 
             # 3. from_json with string payload
             raw_json = json_path.read_text(encoding="utf-8")
             restored_from_str = AnalysisResult.from_json(raw_json)
+            self.assertEqual(restored_from_str.to_dict(), data)
             self.assertEqual(len(restored_from_str.graph.nodes), len(original.graph.nodes))

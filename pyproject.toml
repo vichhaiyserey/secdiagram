@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "secdiagram"
-version = "0.3.3"
-description = "Deterministic architecture, relationship, and security diagrams for Python repositories."
+version = "0.4.0"
+description = "Deterministic architecture, relationship, and security analysis for polyglot repositories."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -45,6 +45,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["secdiagram_core*"]
+
+[tool.setuptools.package-data]
+secdiagram_core = ["studio_ui/*.html", "studio_ui/*.css", "studio_ui/*.js"]
 
 [tool.ruff]
 target-version = "py310"
