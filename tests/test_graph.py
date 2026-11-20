@@ -83,18 +83,47 @@ class GraphTests(unittest.TestCase):
     def test_min_confidence_filters_edges(self) -> None:
         strict = run_analysis(AnalysisConfig(root=FIXTURE, min_confidence=1.0))
         loose = fixture_result()
-        self.assertLessEqual(len(strict.graph.edges), len(loose.graph.edges))
-        for edge in strict.graph.edges:
-            if edge.kind not in {"contains", "imports"}:
-                self.assertEqual(edge.confidence, 1.0)
+
+        def key(edge):
+            return (edge.src, edge.dst, edge.kind, edge.confidence)
+
+        removable = {
+            key(edge)
+            for edge in loose.graph.edges
+            if edge.kind not in {"contains", "imports"} and edge.confidence < 1.0
+        }
+        exempt = {
+            key(edge)
+            for edge in loose.graph.edges
+            if edge.kind == "imports" and edge.confidence < 1.0
+        }
+        self.assertTrue(removable, "fixture must exercise low-confidence call removal")
+        self.assertTrue(exempt, "low-confidence imports must exercise the exemption")
+        self.assertEqual(
+            {key(edge) for edge in strict.graph.edges},
+            {key(edge) for edge in loose.graph.edges} - removable,
+        )
 
     def test_max_nodes_pruning(self) -> None:
-        capped = run_analysis(AnalysisConfig(root=FIXTURE, max_nodes=5))
+        # Disable IaC nodes so the Python cap is tested directly, without an
+        # arbitrary allowance of ten extra nodes that can hide a broken cap.
+        capped = run_analysis(AnalysisConfig(root=FIXTURE, max_nodes=5, security=False))
         self.assertTrue(capped.graph.meta["analysis"]["truncated"])
         self.assertGreater(capped.graph.meta["analysis"]["dropped_nodes"], 0)
-        self.assertLessEqual(len(capped.graph.nodes), 15)  # Python nodes capped at 5 + IaC nodes
+        self.assertEqual(len(capped.graph.nodes), 5)
         endpoint_nodes = [node for node in capped.graph.nodes.values() if node.kind == "endpoint"]
-        self.assertTrue(endpoint_nodes, "Highest priority endpoints should be retained during pruning")
+        self.assertTrue(
+            endpoint_nodes, "Highest priority endpoints should be retained during pruning"
+        )
+        self.assertEqual(
+            {node.qualname for node in endpoint_nodes},
+            {
+                "app.main.create_user",
+                "app.main.get_file",
+                "app.main.get_user",
+                "app.main.hash_value",
+            },
+        )
 
     def test_edge_deduplication(self) -> None:
         from secdiagram_core.model import Graph

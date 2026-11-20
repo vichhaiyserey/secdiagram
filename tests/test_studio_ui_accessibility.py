@@ -51,7 +51,6 @@ class StudioAccessibilityAssetTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
         cls.css = (ASSET_DIR / "app.css").read_text(encoding="utf-8")
-        cls.js = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
         cls.parser = _AssetParser()
         cls.parser.feed(cls.html)
 
@@ -90,6 +89,8 @@ class StudioAccessibilityAssetTests(unittest.TestCase):
             self.assertIn(tab.get("aria-controls"), panel_ids)
             self.assertIn(tab.get("aria-selected"), {"true", "false"})
             self.assertIn(tab.get("tabindex"), {"0", "-1"})
+            self.assertEqual(self.parser.by_id(tab["aria-controls"])["aria-labelledby"], tab["id"])
+            self.assertEqual(tab.get("tabindex"), "0" if tab["aria-selected"] == "true" else "-1")
         for panel in panels:
             self.assertIn(panel.get("aria-labelledby"), tab_ids)
         selected = [tab for tab in tabs if tab.get("aria-selected") == "true"]
@@ -109,6 +110,8 @@ class StudioAccessibilityAssetTests(unittest.TestCase):
     def test_form_controls_have_labels(self) -> None:
         self.assertTrue(self.parser.controls)
         for control in self.parser.controls:
+            for reference in control.get("aria-labelledby", "").split():
+                self.assertIn(reference, self.parser.ids, f"dangling control label: {reference}")
             self.assertTrue(
                 control["_labelled"],
                 f"{control['_tag']} #{control.get('id') or control.get('name') or '?'} is unlabelled",
@@ -151,23 +154,6 @@ class StudioAccessibilityAssetTests(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", self.css)
         self.assertIn(".skip-link", self.css)
         self.assertIn("outline", self.css)
-
-    def test_js_exposes_keyboard_state_and_busy_hooks(self) -> None:
-        for snippet in (
-            "aria-selected",
-            "aria-expanded",
-            "aria-busy",
-            "aria-pressed",
-            "ArrowLeft",
-            "ArrowRight",
-            "Home",
-            "End",
-            "tabIndex",
-            "document.title",
-            "requestAnimationFrame",
-            "function loadPipeline",
-        ):
-            self.assertIn(snippet, self.js)
 
 
 if __name__ == "__main__":

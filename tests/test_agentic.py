@@ -11,8 +11,8 @@ from secdiagram_core.model import Finding, Graph, Loc, Node
 class SdlcStateTests(unittest.TestCase):
     def test_phases_are_deterministic(self) -> None:
         state = agentic.default_state()
-        self.assertEqual(tuple(state.phases), agentic.PHASES)
-        self.assertEqual(state.progress, {"done": 0, "total": len(agentic.PHASES)})
+        self.assertEqual(tuple(state.phases), ("discover", "model", "secure", "review", "handoff"))
+        self.assertEqual(state.progress, {"done": 0, "total": 5})
         self.assertFalse(state.complete)
 
     def test_entry_gate_requires_previous_phase(self) -> None:
@@ -61,7 +61,12 @@ class SdlcStateTests(unittest.TestCase):
         agentic.apply_action(state, "start", "discover")
         for _ in range(agentic._MAX_EVIDENCE + 10):
             agentic.apply_action(state, "evidence", "discover", evidence="graph.json")
-        self.assertEqual(len(state.phases["discover"].evidence), 1)
+        self.assertEqual(state.phases["discover"].evidence, ["graph.json"])
+        # Repeating one item only tests deduplication, never the list bound.
+        unique = [f"evidence-{index}.json" for index in range(agentic._MAX_EVIDENCE + 10)]
+        for ref in unique:
+            agentic.apply_action(state, "evidence", "discover", evidence=ref)
+        self.assertEqual(state.phases["discover"].evidence, unique[-agentic._MAX_EVIDENCE :])
         agentic.apply_action(state, "note", "discover", note="x" * 5000)
         self.assertEqual(len(state.phases["discover"].note), agentic._MAX_TEXT)
 
@@ -181,9 +186,9 @@ class HandoffTests(unittest.TestCase):
 
     def test_markdown_cells_escape_pipes_and_newlines(self) -> None:
         state = self._complete()
-        payload = agentic.build_handoff(state, repo_name="demo|repo")
+        payload = agentic.build_handoff(state, repo_name="demo|repo\nnext")
         markdown = agentic.render_handoff_markdown(payload)
-        self.assertIn("demo\\|repo", markdown)
+        self.assertEqual(markdown.splitlines()[0], "# Handoff - demo\\|repo next")
 
 
 if __name__ == "__main__":

@@ -59,17 +59,22 @@ class ImageRenderTests(unittest.TestCase):
 
     def test_local_mmdc_mocked_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            out_file = Path(tmp) / "diagram.png"
+            for image_format, image in (("png", b"\x89PNGmock_data"), ("svg", b"<svg>mock diagram</svg>")):
+                with self.subTest(format=image_format):
+                    out_file = Path(tmp) / f"diagram.{image_format}"
+                    source = "flowchart LR\n A --> B"
 
-            def fake_run(cmd, **kwargs):
-                out_file.write_bytes(b"\x89PNGfake")
-                return mock.Mock(returncode=0, stdout="", stderr="")
+                    def fake_run(cmd, image=image, out_file=out_file, source=source, **kwargs):
+                        self.assertEqual(cmd[cmd.index("-o") + 1], str(out_file))
+                        self.assertEqual(Path(cmd[cmd.index("-i") + 1]).read_text(encoding="utf-8"), source)
+                        self.assertEqual(kwargs["timeout"], 12.0)
+                        out_file.write_bytes(image)
+                        return mock.Mock(returncode=0, stdout="", stderr="")
 
-            with mock.patch("shutil.which", return_value="/usr/local/bin/mmdc"):
-                with mock.patch("subprocess.run", side_effect=fake_run):
-                    render_local_mmdc("flowchart LR\n A --> B", out_file)
-            self.assertTrue(out_file.exists())
-            self.assertEqual(out_file.read_bytes(), b"\x89PNGfake")
+                    with mock.patch.dict("os.environ", {"SECDIAGRAM_IMAGE_PROVIDER": "local"}), mock.patch("shutil.which", return_value="/usr/local/bin/mmdc"), mock.patch("subprocess.run", side_effect=fake_run):
+                        result = render_image(source, out_file, image_format=image_format, provider="local", timeout=12.0, offline=True)
+                    self.assertEqual(result, out_file)
+                    self.assertEqual(out_file.read_bytes(), image)
 
     def test_local_mmdc_mocked_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

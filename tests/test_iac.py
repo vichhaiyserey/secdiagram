@@ -607,14 +607,22 @@ class AnalyzerBehaviorTests(unittest.TestCase):
         )
 
     def test_path_escape_is_skipped(self) -> None:
-        _, findings = _run({"Dockerfile": "FROM python\n"})
-        self.assertEqual(findings[0].metadata["rule_id"], "IAC-DOCKER-001")
         from secdiagram_core import iac
 
-        repo = RepoInfo(root=Path.cwd(), name="repo", rel_files=[])
-        result = iac._dockerfile(repo.root, "../outside/Dockerfile")
-        self.assertEqual(result.findings, [])
-        self.assertEqual(result.nodes, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            outside = Path(tmp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            # The escaped file must actually exist and contain a detectable
+            # condition; a missing file would pass with containment disabled.
+            for directory in (root, outside):
+                (directory / "Dockerfile").write_text("FROM python\n", encoding="utf-8")
+            allowed = iac._dockerfile(root, "Dockerfile")
+            self.assertIn("IAC-DOCKER-001", {f.rule_id for f in allowed.findings})
+            self.assertTrue(allowed.nodes)
+            result = iac._dockerfile(root, "../outside/Dockerfile")
+            self.assertEqual((result.findings, result.nodes), ([], []))
 
 
 if __name__ == "__main__":
