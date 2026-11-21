@@ -106,9 +106,6 @@ class SecurityTests(unittest.TestCase):
         self.assertIn("Unpinned GitHub Action", titles)
         self.assertIn("Security group open to the internet", titles)
 
-    def test_env_is_not_treated_as_ssrf_source(self) -> None:
-        self.assertFalse(self._find("network"))
-
     def test_findings_have_evidence_and_ids(self) -> None:
         ids = [finding.id for finding in self.findings]
         self.assertEqual(len(ids), len(set(ids)))

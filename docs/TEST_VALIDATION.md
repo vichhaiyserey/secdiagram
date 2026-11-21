@@ -1,107 +1,121 @@
-# Unit-test accuracy and depth audit
+# Test contracts and validation
 
-The original audit accompanies issue #71 and PR #72. Issue #73 extends it with
-22 threat-model regression tests; the suite now contains 603 tests in 40 files,
-including the diagram review fixes and the strengthened regression suite.
-The review checks assertion meaning, fixture preconditions, mock boundaries,
-exception handling, skips, shared mutable state and test discovery. Test or
-assertion counts are inventory measures, not proof of correctness.
+Issue #82 refactors the suite from 653 to **623 test methods in 45 files**.
+Distinct conditions remain named `unittest.subTest` cases. Method count measures
+inventory, not correctness: tests are retained for observable behavior, meaningful
+failure conditions, source evidence or a documented regression.
 
-## Scope
+This builds on the assertion/isolation audit in issue #71 / PR #72 and the threat
+evidence tests in issue #73 / PR #74. The current review checks every test file
+structurally and reviews candidate consolidations, mocks, positive controls,
+expected failures, environment isolation and cached fixtures.
 
-| Area | Tests | Contracts checked |
-| --- | ---: | --- |
-| Parsing, graph construction and YAML | 84 | Definitions, routes, call edges, exact source locations, malformed input and recovery |
-| SAST and infrastructure rules | 73 | Expected findings and CWE/evidence, safe counterparts, comments/strings and source containment |
-| Policy, ATT&CK, baselines, risk and reachability | 99 | Positive and negative gates, expiry/reactivation, confidence, provenance and known-reachable queries |
-| Discovery, configuration, cache, workspace and consumer contracts | 86 | Filtering, containment, successful workers and fallback, cache invalidation, complete serialization and isolated fixtures |
-| CLI, offline controls and diagram validation | 57 | Exit codes, CI JSON, deterministic output, selected projections and preservation of existing artifacts |
-| Rendering, HTML, images and security reports | 55 | Escaping, source links, styles, exact node caps, severity levels and report content |
-| Imported reports, plugins and LLM adapters | 43 | Provenance, plugin failure rollback, credential boundaries and transport error handling |
-| Server, redaction, task governance and supply chain | 84 | Authentication failures, limits, redaction, pins and scanner gates |
-| Threat evidence, snapshots and version diffs | 22 | Exact source/flow links, conservative auth review, workspace remapping, real vulnerable/safe revisions, coverage changes, malformed input and input-file preservation |
-| **Total** | **603** | |
+## What remains covered
 
-The structural scan found no duplicate test definitions, assertion-method
-overrides or assertion-method reassignments. The review found no malicious test
-behavior. This is an evidence-based review, not a proof that every possible
-implementation defect is detectable.
+| Area | Important contracts |
+| --- | --- |
+| Parsing and resolution | Definitions, routes, imports, lexical exclusions, exact locations, recovery, ambiguous and unresolved symbols |
+| Graphs and discovery | Stable IDs, exact filtering, node caps, priority retention, containment, actual successful workers and serial fallback |
+| SAST and infrastructure | Unsafe/safe counterparts, source-to-sink traces, sanitizers, custom rules, CWE/evidence, existing out-of-root inputs |
+| Security policy | Severity/confidence/exposure, positive and negative gates, baselines, expiry, reachability, STRIDE and ATT&CK |
+| CLI and outputs | Exit codes, real artifacts, full serialization, determinism, offline transport guards and input preservation |
+| Platform and Studio | Authentication, permissions, limits, state transitions, evidence bounds, installer hashes, HTTP response bodies and markup relationships |
+| External integrations | Provider/import provenance, plugin rollback, LLM transport/key boundaries and renderer error handling |
+| Supply chain and governance | Version/digest pins, task linkage and vulnerability gates |
 
-## Weaknesses corrected
+Small tests with distinct contracts remain separate. A security negative case is
+not redundant with its positive counterpart. A fallback test is not evidence that
+parallel workers succeeded. Coverage overlap alone is not grounds for deletion.
 
-- Replaced the malformed-YAML assertion containing `or True` with observable
-  document and parser-recovery assertions.
-- Replaced silent returns in three symlink-security tests with explicit skips
-  for known platform/permission limitations; unexpected errors now fail. Git
-  initialization errors no longer silently pass the containment test.
-- Replaced an ATT&CK allowlist test that could succeed over an empty result with
-  a positive TLS/secret control and an exact filtered technique set.
-- Strengthened serialization checks from object counts to full content equality,
-  including evidence, dependency data and positive/negative query behavior.
-- Required exactly five displayed nodes in the capped-diagram test, preventing
-  an empty diagram from satisfying an upper-bound assertion.
-- Anchored confidence checks to independent expected values and a changed-input
-  counterexample, and strengthened the finding-fingerprint identity check.
-- Required non-empty configuration findings and both blocking/non-blocking SARIF
-  cases before checking per-result fields.
-- Checked scan permits after an unmatched release, rather than checking only
-  that the call did not throw.
-- Compared complete merged graph content for insertion-order determinism, rather
-  than only comparing sorted node IDs.
-- Returned independent copies of the cached fixture analysis and added an
-  isolation test for nodes, baseline flags and skipped-path metadata.
-- Required successful Python and Java worker results in the parallel-equivalence
-  test. Serial fallback no longer counts as evidence that parallel execution
-  worked. A separate test verifies the graceful fallback behavior.
+## Consolidations and corrected conditions
 
-## Fault-injection checks
+| Previous checks | Retained contract |
+| --- | --- |
+| Provider tokens embedded in `token=` / `key=` assignments | A provider matrix in neutral text, exact redaction, preserved surrounding text and identifier-boundary negatives. Generic assignment masking cannot satisfy provider recognition. |
+| Separate quoted/unquoted/key-spelling redaction tests | Exact-output matrices covering all spellings, quoting, punctuation, benign token configuration and surrounding context. |
+| Repeated role, layout, policy and path-glob cases | Named matrices with independent expected values, complete outputs and both slash spellings. |
+| Repeated serialization counts and type checks | Full-content equality plus positive/negative queries for dict, file and text restoration. |
+| Filter results merely smaller / above a threshold | Exact surviving edge/finding sets with fixtures that contain both retained and removed cases. |
+| Node cap with an arbitrary allowance for IaC nodes | A direct five-node Python cap with exact retained endpoint identities. |
+| Custom sanitizer yielding no findings | The same source must first produce a real finding before sanitizer registration; custom sink registration has the inverse control. |
+| Traversal to a nonexistent Dockerfile | An existing unsafe file outside the root, plus the same detectable file inside the root. Missing files cannot stand in for containment. |
+| Repeating one evidence item to test a size limit | Deduplication and a separate sequence of distinct items that must retain exactly the last bounded window. |
+| Installer checksum length of 64 | Independent SHA-256 of actual bytes for every recorded file, with nonempty and complete manifest checks. |
+| First available taint finding and field truthiness | A known command flow with exact source, sink, intermediate locations, severity/CWE and negative queries. |
+| Empty/single-item lists satisfying sortedness | Multiple distinct risks are required before verifying priority order. |
+| Unit rendering test accepting either 200 or 503 | Controlled successful SVG/PNG bytes and a separate controlled error requiring exactly 503; renderer settings and calls are checked. Real rendering stays in container smoke verification. |
+| JavaScript keyword presence | Removed as evidence of keyboard/busy behavior. Asset HTTP bodies and reciprocal tab/panel markup relationships are checked directly. |
 
-Run the audit with:
+The old tab-indentation test raised `ValueError` for a malformed list, not for
+tabs. Its stricter replacement exposed a production defect: indentation was
+computed using spaces only, so the subsequent tab check could never detect a
+leading tab. The one-line fix includes tabs in the prefix being validated.
+Tests now distinguish tabbed/mixed mappings, malformed lines, orphan list items,
+unknown values and out-of-range scores by their actual error messages. Valid
+policy inputs and ATT&CK enforcement remain unchanged.
 
-```bash
+Configuration tests isolate `SECDIAGRAM_*` variables from the caller's environment.
+Unexpected errors do not become successful early returns. Known platform
+limitations remain explicit skips rather than hidden passes. No assertion
+overrides, literal tautologies or duplicate discovered test definitions were found.
+
+## Verification
+
+```sh
+python -m unittest discover -s tests -v
+python -m coverage run --branch -m unittest discover -s tests -v
+python -m coverage report
 python scripts/verify_test_depth.py --output .secdiagram/test-depth.json
 ```
 
-Each control and each injected fault runs in a separate fresh process, so cached
-fixture results cannot mask a changed implementation. Controls must pass. A
-fault counts as detected only when the selected test produces an assertion
-failure: import/setup errors, skips and timeouts never count as detections.
-Production files are never rewritten by the audit.
+The full suite is also checked in shuffled class/method order with seed
+`20261118`. On Windows this uses a real guarded script so multiprocessing
+starts correctly; a stdin runner can accidentally exercise only serial fallback.
+The Linux suite runs as UID 10001 in the verification container with networking
+disabled and source inputs mounted read-only.
 
-The original 17 cases cover removal of dangling edges, omitted detailed validation,
-workspace bypass, premature baseline writes, ignored canonical ordering,
-corrupted serialized fields, empty capped diagrams, empty ATT&CK results,
-constant confidence, excess scan permits, empty YAML results, authentication
-bypass, shared fixture state, disabled redaction, disabled Python SAST,
-disabled polyglot SAST and failed parallel workers. Five additional cases drop
-threat evidence or flows, misclassify auth reviews as observed findings, hide
-threat changes or hide comparison context. All 22 require assertion failures
-with no setup errors or skips. This is a bounded set of
-targeted regressions, not an exhaustive mutation score.
+The test-depth audit contains **37 isolated fault cases**. Every unmodified
+control must pass in its own process. A fault is detected only by actual assertion
+failures; import/setup errors, skips and timeouts never earn credit. Production
+files are not rewritten. Added cases target provider recognition masked by
+assignment redaction, over-redaction, empty sanitizer analysis, ignored filters,
+path escapes, evidence bounds, wrong installer digests, empty risk priorities,
+corrupt taint sources, ignored image flags, accepted tab indentation, empty asset
+bodies, crossed tab associations, dropped unowned findings and corrupt rendered
+bytes. The original diagram, security, policy, serialization, fixture-isolation
+and parallel-worker faults remain included.
 
-## Coverage and execution checks
+The Windows before/after comparison uses exact executed production line and
+branch sets, not only rounded coverage percentages. The baseline is the original
+653-test suite on commit `5cb02f1`; the production tab fix preserves line numbers,
+so the sets can be compared directly. Raw logs, coverage sets and fault reports
+are kept as ignored local evidence and summarized in the tracking issue.
 
-The full suite is checked under ordinary discovery and a fixed shuffled class
-and method order (seed `20261118`). The shuffled runner must be a real script
-with a `__main__` guard: launching it through stdin on Windows prevents worker
-process startup and can exercise the serial fallback instead.
+The final comparison loses **zero previously executed production lines or
+branches**, and gains six lines and three branches. Statement coverage changes
+from 88.122% to 88.163%; branch coverage from 79.194% to 79.239%. The 59 existing
+excluded lines are unchanged. These measurements describe Python execution,
+not browser behavior or exhaustive defect detection.
 
-Coverage is measured with:
+## Limits
 
-```bash
-python -m coverage run --branch -m unittest discover -s tests -v
-python -m coverage report
-```
+Fault injection is a bounded regression audit, not an exhaustive mutation score.
+Coverage is not proof of assertion quality or a substitute for positive/negative
+controls. Existing defensive `pragma: no cover` and type-checking exclusions are
+not expanded by this refactor.
 
-The expanded suite measures 89.08% statement coverage, 79.60% branch coverage
-and 86.05% combined coverage. The new threat-review module measures 94.14%
-statements and 90.15% branches. The diagram model and quality checker are
-approximately 97% combined. Coverage is not treated as a substitute for the
-positive controls, negative controls and fault-injection checks above.
+Static Studio markup/asset tests do not execute JavaScript or certify browser
+keyboard, focus or asynchronous interaction behavior. Those require browser-level
+verification; keyword presence is not presented as a substitute. Optional image
+engines are mocked at unit boundaries and exercised for real by the offline
+Docker PNG/Mermaid smoke checks.
 
-Remaining gaps include advisory formats, cache error paths, resolver branches,
-external-report variants, image-provider errors, server paths and workspace
-language detection. Defensive worker-crash and top-level exception branches
-also have existing `pragma: no cover` exclusions; these were reviewed rather
-than treated as evidence of execution. The passing audit does not certify those
-uncovered paths.
+Container verification refreshes the named `runtime` build stage on each CI
+build while retaining the locked Mermaid dependency cache. Otherwise inherited
+build layers can skip `apk upgrade` and retain fixable OS vulnerabilities even
+after local cache metadata has been invalidated. The vulnerability gate remains
+blocking; no finding is suppressed to obtain a passing check.
+
+Remaining Python coverage gaps include advisory/report format variants,
+resolver/cache error branches, renderer transport failures, server paths and
+workspace language detection. Passing tests do not certify those uncovered paths.

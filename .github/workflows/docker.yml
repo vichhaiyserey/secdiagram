@@ -35,6 +35,9 @@ jobs:
           push: false
           load: true
           tags: secdiagram:ci
+          # Refresh stable-branch OS security revisions even when an older
+          # runtime layer remains available through inherited GHA caches.
+          no-cache-filters: runtime
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test CLI

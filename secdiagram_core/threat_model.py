@@ -510,7 +510,7 @@ def _parse_policy_yaml(text: str) -> dict[str, Any]:
     root: dict[str, Any] = {}
     stack: list[tuple[int, Any]] = [(-1, root)]
     for index, (lineno, raw) in enumerate(significant):
-        indent = len(raw) - len(raw.lstrip(" "))
+        indent = len(raw) - len(raw.lstrip(" \t"))
         if "\t" in raw[:indent]:
             raise ValueError(f"policy line {lineno}: tabs are not allowed for indentation")
         while len(stack) > 1 and indent <= stack[-1][0]:

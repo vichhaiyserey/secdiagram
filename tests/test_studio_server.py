@@ -8,8 +8,10 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from secdiagram_core.config import SecdiagramConfig
+from secdiagram_core.render_image import ImageRenderError
 from secdiagram_core.server import create_server
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample_app"
@@ -82,8 +84,12 @@ class StudioServerTests(unittest.TestCase):
         self.assertIn('class="skip-link"', html)
         self.assertIn('role="tablist"', html)
 
-        self.assertEqual(self.studio.get("/studio/app.css")[0], 200)
-        self.assertEqual(self.studio.get("/studio/app.js")[0], 200)
+        asset_dir = Path(__file__).resolve().parent.parent / "secdiagram_core" / "studio_ui"
+        for name in ("app.css", "app.js"):
+            with self.subTest(asset=name):
+                status, content = self.studio.get(f"/studio/{name}")
+                self.assertEqual(status, 200)
+                self.assertEqual(content, (asset_dir / name).read_text(encoding="utf-8"))
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.studio.get("/studio/../server.py")
         self.assertEqual(ctx.exception.code, 404)
@@ -243,15 +249,34 @@ class StudioServerTests(unittest.TestCase):
         self.assertTrue((studio_dir / "HANDOFF.md").is_file())
         self.assertTrue((studio_dir / "handoff.json").is_file())
 
-    def test_render_returns_image_or_service_unavailable(self) -> None:
-        try:
-            status, body = self.studio.get("/api/v1/studio/render?format=svg&detail=high-level")
-        except urllib.error.HTTPError as exc:
-            self.assertEqual(exc.code, 503)
-            exc.close()
-            return
-        self.assertEqual(status, 200)
-        self.assertIn("<svg", body)
+    def test_render_success_and_unavailability_follow_renderer_outcome(self) -> None:
+        for image_format, payload, content_type in (
+            ("svg", b'<svg xmlns="http://www.w3.org/2000/svg"><text>mock diagram</text></svg>', "image/svg+xml"),
+            ("png", b"\x89PNG\r\n\x1a\nmock_image_data", "image/png"),
+        ):
+            with self.subTest(format=image_format):
+                def render(source, output, payload=payload, **kwargs):
+                    output.write_bytes(payload)
+
+                with mock.patch("secdiagram_core.server.render_image", side_effect=render) as renderer:
+                    with urllib.request.urlopen(self.studio.base_url + f"/api/v1/studio/render?format={image_format}&detail=high-level", timeout=60) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.headers["Content-Type"], content_type)
+                        self.assertEqual(response.read(), payload)
+                renderer.assert_called_once()
+                self.assertIn("flowchart", renderer.call_args.args[0])
+                self.assertEqual(renderer.call_args.kwargs, {"image_format": image_format, "provider": "local", "timeout": 30.0, "offline": True})
+
+        with mock.patch("secdiagram_core.server.render_image", side_effect=ImageRenderError("mock renderer unavailable")) as renderer:
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.studio.get("/api/v1/studio/render?format=svg&detail=high-level")
+            try:
+                self.assertEqual(caught.exception.code, 503)
+                error = json.loads(caught.exception.read())
+                self.assertEqual(error, {"error": "RenderUnavailable", "message": "mock renderer unavailable"})
+            finally:
+                caught.exception.close()
+        renderer.assert_called_once()
 
 
 class StudioReadOnlyTests(unittest.TestCase):

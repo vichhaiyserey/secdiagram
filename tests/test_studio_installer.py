@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -40,10 +41,15 @@ class StudioInstallerTests(unittest.TestCase):
             manifest = result.manifest
             self.assertEqual(manifest["project_root"], REPO.as_posix())
             recorded = {entry["path"]: entry for entry in manifest["files"]}
+            self.assertTrue(recorded, "an empty manifest must not appear verified")
+            self.assertEqual(set(result.files), set(recorded))
             for rel_path in result.files:
                 self.assertIn(rel_path, recorded)
                 self.assertEqual(recorded[rel_path]["bytes"], (home / rel_path).stat().st_size)
-                self.assertEqual(len(recorded[rel_path]["sha256"]), 64)
+                self.assertEqual(
+                    recorded[rel_path]["sha256"],
+                    hashlib.sha256((home / rel_path).read_bytes()).hexdigest(),
+                )
 
             status = studio.status(home)
             self.assertTrue(status["installed"])

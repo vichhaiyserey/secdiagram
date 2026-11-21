@@ -193,33 +193,28 @@ class TestDetectRoleFromPython(unittest.TestCase):
 
 
 class TestDetectRoleFromDirectoryName(unittest.TestCase):
-    def test_frontend_name(self):
-        role, conf, ev = _detect_role_from_directory_name("my-frontend-app")
-        self.assertEqual(role, "frontend")
-
-    def test_backend_name(self):
-        role, conf, ev = _detect_role_from_directory_name("user-service-api")
-        self.assertEqual(role, "backend")
-
-    def test_gateway_name(self):
-        role, conf, ev = _detect_role_from_directory_name("api-gateway")
-        self.assertEqual(role, "gateway")
-
-    def test_worker_name(self):
-        role, conf, ev = _detect_role_from_directory_name("email-worker")
-        self.assertEqual(role, "worker")
-
-    def test_infra_name(self):
-        role, conf, ev = _detect_role_from_directory_name("infrastructure")
-        self.assertEqual(role, "infrastructure")
-
-    def test_library_name(self):
-        role, conf, ev = _detect_role_from_directory_name("shared-utils")
-        self.assertEqual(role, "library")
-
-    def test_unknown_name(self):
-        role, conf, ev = _detect_role_from_directory_name("xyz123")
-        self.assertEqual(role, "unknown")
+    def test_directory_role_matrix_keeps_evidence_and_gateway_precedence(self):
+        for name, expected in (
+            ("my-frontend-app", "frontend"),
+            ("user-service-api", "backend"),
+            ("api-gateway", "gateway"),
+            ("API_GATEWAY", "gateway"),
+            ("email-worker", "worker"),
+            ("database", "data-layer"),
+            ("infrastructure", "infrastructure"),
+            ("shared-utils", "library"),
+            ("xyz123", "unknown"),
+        ):
+            with self.subTest(name=name):
+                role, confidence, evidence = _detect_role_from_directory_name(name)
+                self.assertEqual(role, expected)
+                self.assertEqual(confidence, 0.0 if expected == "unknown" else 0.4)
+                self.assertEqual(
+                    evidence,
+                    []
+                    if expected == "unknown"
+                    else [f"directory name matches '{expected}' pattern"],
+                )
 
 
 class TestDetectRepoRole(unittest.TestCase):
@@ -426,7 +421,7 @@ class TestInterRepoEdgeDetection(unittest.TestCase):
             "api": RepoInfo(root=Path("/tmp/api"), name="api", rel_files=[]),
         }
         edges = _detect_inter_repo_edges(repos, infos)
-        # Should infer frontend→backend edge
+        # Should infer frontendâ†’backend edge
         http_edges = [e for e in edges if e.kind == "http"]
         self.assertGreater(len(http_edges), 0)
         self.assertEqual(http_edges[0].src_repo, "web")

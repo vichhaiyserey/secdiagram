@@ -37,6 +37,26 @@ def _java_findings(source: str):
 
 
 class PythonRelevanceTests(unittest.TestCase):
+    def test_ssrf_request_source_is_flagged_but_environment_configuration_is_not(self) -> None:
+        for source, expected_count in (
+            ("request.args.get('url')", 1),
+            ("os.environ.get('SERVICE_URL')", 0),
+        ):
+            with self.subTest(source=source):
+                result = _analyze(
+                    {
+                        "app.py": (
+                            "import os\nimport requests\nfrom flask import Flask, request\n"
+                            "app = Flask(__name__)\n@app.get('/fetch')\ndef fetch():\n"
+                            f"    url = {source}\n    return requests.get(url)\n"
+                        )
+                    }
+                )
+                ssrf = [f for f in result.graph.findings if f.cwe == "CWE-918"]
+                self.assertEqual(len(ssrf), expected_count)
+                if expected_count:
+                    self.assertEqual(ssrf[0].evidence[0].ref, "app.py:8")
+
     def test_parameterized_sql_is_not_reported(self) -> None:
         result = _analyze(
             {
@@ -105,10 +125,11 @@ class PythonRelevanceTests(unittest.TestCase):
         self.assertEqual([f for f in result.graph.findings if f.category == "command"], [])
 
     def test_modern_tokens_and_quoted_secrets(self) -> None:
+        dummy_token = "sk-proj-" + "mocktoken1234567890abcdefghij"
         result = _analyze(
             {
                 "config.py": (
-                    "payload = 'sk-proj-mocktoken1234567890abcdefghij'\n"
+                    f"payload = '{dummy_token}'\n"
                     "settings = {'client_secret': 'mock_secret_value_12345'}\n"
                 )
             }
