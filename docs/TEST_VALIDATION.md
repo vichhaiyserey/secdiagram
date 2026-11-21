@@ -110,6 +110,12 @@ verification; keyword presence is not presented as a substitute. Optional image
 engines are mocked at unit boundaries and exercised for real by the offline
 Docker PNG/Mermaid smoke checks.
 
+Container verification refreshes the named `runtime` build stage on each CI
+build while retaining the locked Mermaid dependency cache. Otherwise inherited
+build layers can skip `apk upgrade` and retain fixable OS vulnerabilities even
+after local cache metadata has been invalidated. The vulnerability gate remains
+blocking; no finding is suppressed to obtain a passing check.
+
 Remaining Python coverage gaps include advisory/report format variants,
 resolver/cache error branches, renderer transport failures, server paths and
 workspace language detection. Passing tests do not certify those uncovered paths.
