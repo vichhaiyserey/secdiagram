@@ -971,7 +971,7 @@ def discover_workspace(
         "Chart.yaml",  # Helm
     }
     _source_suffixes = {
-        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb",
+        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb", ".rs",
         ".tf",  # Terraform
     }
 

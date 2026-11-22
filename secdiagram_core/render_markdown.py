@@ -430,7 +430,7 @@ def render_markdown(
     unsupported = meta.get("unsupported_security_languages") or []
     if unsupported:
         lines.append(
-            "- Security rules cover Python, Java, C#, JavaScript/TypeScript, PHP and Go; no checks were run for: "
+            "- Security rules cover Python, Java, C#, JavaScript/TypeScript, PHP, Go and Rust; no checks were run for: "
             + ", ".join(f"`{_esc(name)}`" for name in unsupported)
             + "."
         )

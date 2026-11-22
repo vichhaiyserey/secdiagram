@@ -21,7 +21,7 @@ from secdiagram_core.polyglot_index import (
     parse_polyglot_file,
 )
 from secdiagram_core.polyglot_security import analyze_polyglot_security
-from secdiagram_core.workspace import _detect_role_from_cargo
+from secdiagram_core.workspace import _detect_role_from_cargo, discover_workspace
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "polyglot"
 RUST_FIXTURE = FIXTURES / "rust_api"
@@ -432,6 +432,12 @@ version = "mock"
         role, _conf, signals = _detect_role_from_cargo(RUST_FIXTURE)
         self.assertEqual(role, "backend")
         self.assertTrue(any("axum" in s for s in signals))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "source-only").mkdir()
+            (root / "source-only" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+            (root / "empty").mkdir()
+            self.assertEqual([r.name for r in discover_workspace(root).repos], ["source-only"])
 
 
 class RustDeterminismTests(unittest.TestCase):
