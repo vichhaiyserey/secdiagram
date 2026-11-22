@@ -7,7 +7,7 @@ RUN npm ci --omit=dev --ignore-scripts \
     && npm cache clean --force
 
 # Stage 2: Final runtime image
-FROM python:3.15-alpine@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd AS runtime
+FROM python:3.15.2-alpine3.24@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd AS runtime
 
 # Labels following OCI specifications
 LABEL org.opencontainers.image.title="secdiagram" \
@@ -53,8 +53,13 @@ WORKDIR /app
 # Copy application source code
 COPY . /app
 
-# Install secdiagram package
-RUN pip install --no-cache-dir .
+# pip is a build tool; neither analysis nor Studio needs it at runtime.
+# Remove both the live copy and ensurepip's archived wheel so a runtime or
+# newly created Studio environment cannot restore vulnerable vendored packages.
+RUN python -m pip install --no-cache-dir --upgrade pip==26.3 \
+    && python -m pip install --no-cache-dir . \
+    && python -m pip uninstall --yes pip \
+    && python -c "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent)"
 
 # Switch to non-root user and target volume
 USER secdiagram

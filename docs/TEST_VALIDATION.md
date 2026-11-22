@@ -63,6 +63,12 @@ overrides, literal tautologies or duplicate discovered test definitions were fou
 
 ## Verification
 
+Python 3.15 joins the Windows/Ubuntu matrix for the container runtime upgrade.
+Studio tests create a real private environment, assert pip/setuptools are absent,
+execute the CLI using that interpreter and verify error propagation. The container
+gate also checks UID 10001, absence of pip/ensurepip/setuptools, a real package-mode
+Studio install and its generated launcher under `--network none`.
+
 Rust release-readiness regressions in issue #87 cover lifetime and character
 tokenization, deeply nested comments, raw-string exclusions, multiline routes,
 module-qualified ownership, exact SAST evidence, trusted application state,

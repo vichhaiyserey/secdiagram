@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,37 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 class StudioInstallerTests(unittest.TestCase):
+    def test_real_private_venv_runs_without_bootstrap_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "studio-home"
+            result = studio.install(studio.InstallOptions(home=home, project_root=REPO))
+            self.assertTrue(result.venv_created)
+            python = home / studio.VENV_DIRNAME / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            completed = subprocess.run(
+                [str(python), "-c", "import importlib.util, json; print(json.dumps({name: importlib.util.find_spec(name) is not None for name in ('pip', 'setuptools', 'secdiagram_core')}))"],
+                capture_output=True, text=True, check=True, timeout=30, cwd=home,
+                env={**os.environ, "PYTHONPATH": str(REPO)},
+            )
+            self.assertEqual(json.loads(completed.stdout), {"pip": False, "setuptools": False, "secdiagram_core": True})
+            help_result = subprocess.run(
+                [str(python), "-m", "secdiagram_core.cli", "--help"],
+                capture_output=True, text=True, check=True, timeout=30, cwd=home,
+                env={**os.environ, "PYTHONPATH": str(REPO)},
+            )
+            self.assertIn("secdiagram", help_result.stdout)
+            self.assertTrue(studio.status(home)["healthy"])
+
+    def test_venv_bootstrap_flag_and_failure_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "venv"
+            with mock.patch.object(studio.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                studio._create_venv(target)
+            self.assertEqual(run.call_args.args[0], [sys.executable, "-m", "venv", "--without-pip", str(target)])
+            self.assertEqual(run.call_args.kwargs["timeout"], 300)
+            with mock.patch.object(studio.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, stderr="creation failed")):
+                with self.assertRaisesRegex(studio.StudioInstallError, "creation failed"):
+                    studio._create_venv(target)
+
     def test_install_writes_skill_and_launchers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "studio-home"
