@@ -2,6 +2,11 @@
 
 `secdiagram` automatically discovers repository structure and compiles both grounded component graphs and executive-ready C4 system overview diagrams.
 
+Rust/Cargo projects contribute subsystem names, runtime dependency markers and
+detected Axum/Actix route counts. Cargo framework names label technology; only
+recognized source patterns establish endpoint observations. See
+[Rust support](RUST_SUPPORT.md) for syntax and workspace limitations.
+
 ---
 
 ## 1. High-Level C4 System Diagrams (`secdiagram.com` style)

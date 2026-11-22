@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .cargo_manifest import cargo_inventory
 from .discover import RepoInfo, discover
 from .model import Graph, Loc, Node, stable_id
 
@@ -401,20 +402,16 @@ def _detect_role_from_go(repo_path: Path) -> tuple[str, float, list[str]]:
 def _detect_role_from_cargo(repo_path: Path) -> tuple[str, float, list[str]]:
     """Detect role from Cargo.toml."""
     cargo = repo_path / "Cargo.toml"
-    if not cargo.is_file():
-        return "unknown", 0.0, []
-
-    try:
-        text = cargo.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    text = _safe_read_text(repo_path, cargo)
+    if text is None:
         return "unknown", 0.0, []
 
     evidence: list[str] = []
-    text_lower = text.lower()
+    _, dependencies, _ = cargo_inventory(text)
 
     web_markers = ("axum", "actix-web", "rocket", "warp", "poem")
     for marker in web_markers:
-        if marker in text_lower:
+        if marker in dependencies:
             evidence.append(f"Rust web framework: {marker}")
             return "backend", 0.85, evidence
 
@@ -974,7 +971,7 @@ def discover_workspace(
         "Chart.yaml",  # Helm
     }
     _source_suffixes = {
-        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb",
+        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb", ".rs",
         ".tf",  # Terraform
     }
 

@@ -71,7 +71,6 @@ RECOMMEND = {
     "file-inclusion": "Never include files based on user input; map identifiers to a fixed allowlist of files.",
     "prototype-pollution": "Do not deep-merge request objects; copy allowlisted keys, use Object.create(null) or "
     "Map, and reject __proto__/constructor/prototype keys.",
-    "memory": "Audit unsafe blocks for memory safety, pointer bounds, and data races; encapsulate unsafe code behind a safe API.",
 }
 
 
@@ -263,8 +262,6 @@ RULES: tuple[Rule, ...] = (
     Rule("PG-RS-TLS", RS, "tls", "CWE-295", "TLS certificate validation disabled",
          _r(r"\bdanger_accept_invalid_certs\s*\(\s*true\s*\)|\bdanger_accept_invalid_hostnames\s*\(\s*true\s*\)"),
          "always", "high"),
-    Rule("PG-RS-UNSAFE", RS, "memory", "CWE-119", "Unsafe memory block",
-         _r(r"\bunsafe\s*\{"), "always", "medium"),
 )
 
 SOURCES: dict[str, re.Pattern[str]] = {
@@ -290,7 +287,6 @@ SOURCES: dict[str, re.Pattern[str]] = {
         r"FormValue|Cookie|QueryArray|GetQuery|Params\.ByName)\s*\(|\br\.(?:Body|Header)\b|\bos\.Args\b"
     ),
     "rust": _r(
-        r"\b(?:Path|Query|Json|Form|HeaderMap)\s*\(|"
         r"\bstd::env::args\s*\(|\bstd::io::stdin\s*\("
     ),
 }
@@ -312,7 +308,7 @@ DYNAMIC_RES: dict[str, re.Pattern[str]] = {
     "js": _r(r"`[^`]*\$\{|['\"`]\s*\+|\+\s*['\"`]|\.concat\s*\(|\butil\.format\s*\("),
     "php": _r(r"\"[^\"]*\$\w|\"[^\"]*\{\$|['\"]\s*\.\s*\$|\$\w+(?:\[[^\]]*\])?\s*\.\s*['\"]|\bsprintf\s*\(|\bimplode\s*\("),
     "go": _r(r"\bfmt\.Sprintf\s*\(|\"\s*\+|\+\s*\"|\bstrings\.Join\s*\("),
-    "rust": _r(r"\bformat!\s*\(|\"\s*\+|\+\s*\"|\.to_string\(\)|\.to_owned\(\)"),
+    "rust": _r(r"\bformat!\s*\(|\"\s*\+|\+\s*\""),
 }
 
 
@@ -978,12 +974,64 @@ def _is_literal_only(arg: str) -> bool:
     return bool(re.fullmatch(r"(?:@|\$)?(['\"`])(?:(?!\1).)*\1\s*(?:,.*)?", stripped, re.S)) and "${" not in stripped
 
 
+def _rust_command_sink(fn: _Fn, sink: _Sink) -> bool:
+    """Arguments are literal OS arguments unless the detected program interprets them.
+
+    Keep a tainted executable itself as a sink. For arg/args, require a nearby
+    Command builder chain or an explicit local builder assignment to a shell.
+    Unknown receivers are not evidence of shell injection.
+    """
+    pf = fn.pf
+    if not pf.code.startswith(".", sink.pos):
+        return True
+    statement_start = max(fn.start, pf.masked.rfind(";", fn.start, sink.pos) + 1)
+    prefix = pf.masked[statement_start:sink.pos]
+    constructors = list(re.finditer(r"\bCommand::new\s*\(", prefix))
+    chained = bool(constructors)
+    constructor_pos: int | None = None
+    if constructors:
+        constructor_pos = statement_start + constructors[-1].end() - 1
+    else:
+        receiver = re.search(r"\b([A-Za-z_]\w*)\s*$", prefix)
+        if receiver is not None:
+            name = re.escape(receiver.group(1))
+            assignments = list(re.compile(rf"\b{name}\s*=\s*").finditer(pf.masked, fn.start, sink.pos))
+            if assignments:
+                constructor = re.match(r"Command::new\s*\(", pf.masked[assignments[-1].end():])
+                if constructor is not None:
+                    constructor_pos = assignments[-1].end() + constructor.end() - 1
+    if constructor_pos is None:
+        return False
+    close = _match_paren(pf, constructor_pos)
+    if close == -1:
+        return False
+    if chained:
+        cursor = close + 1
+        while cursor < sink.pos:
+            if pf.masked[cursor].isspace():
+                cursor += 1
+                continue
+            method = re.match(r"\.\s*[A-Za-z_]\w*\s*\(", pf.masked[cursor:sink.pos])
+            if method is None:
+                return False
+            method_end = _match_paren(pf, cursor + method.end() - 1)
+            if method_end == -1 or method_end >= sink.pos:
+                return False
+            cursor = method_end + 1
+    program = pf.code[constructor_pos + 1:close].strip()
+    literal = re.fullmatch(r'"([^"\\]*)"', program)
+    if literal is None:
+        return False  # the executable expression is checked at Command::new
+    executable = literal.group(1).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return executable in {"sh", "bash", "dash", "zsh", "ksh", "fish", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"} or executable.endswith((".bat", ".cmd"))
+
+
 def _flow_metadata(trace: Trace) -> list[dict[str, Any]]:
     return [{"loc": f"{hop.path}:{hop.line}", "node": hop.node_id, "role": hop.role} for hop in trace]
 
 
 def analyze_polyglot_security(graph: Graph, index: PolyglotIndex) -> list[Finding]:
-    """Interprocedural taint SAST over every indexed C#, JS/TS, PHP and Go file."""
+    """Interprocedural taint SAST over indexed C#, JS/TS, PHP, Go and Rust files."""
     fns = _collect_facts(graph, index)
     resolver = _Resolver(index, fns)
     for fn in fns:
@@ -1049,6 +1097,8 @@ def analyze_polyglot_security(graph: Graph, index: PolyglotIndex) -> list[Findin
         dynamic_re = DYNAMIC_RES[family]
         for sink in sorted(fn.sinks, key=lambda s: (s.pos, s.order)):
             rule = sink.rule
+            if rule.rule_id == "PG-RS-CMD" and not _rust_command_sink(fn, sink):
+                continue
             arg = pf.code[sink.arg_start : sink.arg_end]
             if rule.sanitizer is not None and rule.sanitizer.search(arg):
                 continue

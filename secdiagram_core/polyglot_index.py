@@ -1,4 +1,4 @@
-"""Stdlib-only lexical analyzer for C#/.NET, JavaScript/TypeScript, PHP and Go.
+"""Stdlib-only lexical analyzer for C#/.NET, JavaScript/TypeScript, PHP, Go and Rust.
 
 Analyzed code is untrusted data: it is read as text and never imported,
 compiled or executed (AGENTS.md Rule 3). Each file is tokenized once into two
@@ -149,8 +149,10 @@ _STARTERS = {
     "typescript": re.compile(r"//|/\*|\"|'|`"),
     "php": re.compile(r"//|/\*|#(?!\[)|\"|'|`|\?>"),
     "go": re.compile(r"//|/\*|\"|'|`"),
-    "rust": re.compile(r'//|/\*|b?r#*"|b?"|b?\''),
+    # A lifetime/label (e.g. 'static or 'outer:) is not a character literal.
+    "rust": re.compile(r"""//|/\*|b?r#*"|b?"|b?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|[^\r\n])|[^\\'\r\n])'"""),
 }
+_RUST_COMMENT_DELIMITER = re.compile(r"/\*|\*/")
 _PHP_OPEN_RE = re.compile(r"<\?(?:php|=)?")
 
 
@@ -204,17 +206,15 @@ def _views(text: str, language: str) -> tuple[str, str]:
                 depth = 1
                 curr = start + 2
                 while curr < n and depth > 0:
-                    next_open = text.find("/*", curr)
-                    next_close = text.find("*/", curr)
-                    if next_close == -1:
+                    delimiter = _RUST_COMMENT_DELIMITER.search(text, curr)
+                    if delimiter is None:
                         curr = n
                         break
-                    if next_open != -1 and next_open < next_close:
+                    if delimiter.group() == "/*":
                         depth += 1
-                        curr = next_open + 2
                     else:
                         depth -= 1
-                        curr = next_close + 2
+                    curr = delimiter.end()
                 end = curr
             else:
                 end = text.find("*/", start + 2)
@@ -237,21 +237,13 @@ def _views(text: str, language: str) -> tuple[str, str]:
             closer = '"' + ("#" * hashes)
             end_idx = text.find(closer, match.end())
             end = n if end_idx == -1 else end_idx + len(closer)
-            inner_end = end - len(closer) if end <= n and end > match.end() else end
+            inner_end = end_idx if end_idx != -1 else n
             _blank(masked, match.end(), inner_end)
             pos = max(end, start + 1)
             continue
         if language == "rust" and token.endswith("'"):
-            j = match.end()
-            if j < n and text[j] == "\\":
-                j += 2
-            while j < n and text[j] != "'":
-                if text[j] == "\n":
-                    break
-                j += 1
-            end = min(n, j + 1)
-            _blank(masked, match.end(), max(match.end(), end - 1))
-            pos = max(end, start + 1)
+            _blank(masked, start + (2 if token.startswith("b") else 1), match.end() - 1)
+            pos = match.end()
             continue
         quote = token[-1]
         verbatim = language == "csharp" and "@" in token
@@ -1397,11 +1389,11 @@ RUST_IMPL_RE = re.compile(
     r"^\s*impl(?:<[^>]*>)?\s+(?:([\w:]+)(?:<[^>]*>)?\s+for\s+)?([\w:]+)(?:<[^>{]*>)?\s*\{"
 )
 RUST_FN_RE = re.compile(
-    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern(?:\s+\"[^\"]+\")?\s+)?fn\s+([A-Za-z_]\w*)\s*\("
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern(?:\s+\"[^\"]*\")?\s+)?fn\s+([A-Za-z_]\w*)\s*(?:<[^(){};]*>)?\s*\("
 )
-RUST_ACTIX_ROUTE_RE = re.compile(r"^\s*#\[(get|post|put|delete|patch|head)\s*\(\s*\"([^\"]+)\"")
-RUST_AXUM_ROUTE_RE = re.compile(r'\.route\s*\(\s*"([^"]+)"\s*,\s*([^)]+(?:\)\s*\.[a-z]+\([^)]+)*)\)')
-RUST_AXUM_METHOD_RE = re.compile(r"\b(get|post|put|delete|patch|head|any)\s*\(\s*([A-Za-z_][\w:]*)")
+RUST_ACTIX_ROUTE_RE = re.compile(r"^\s*#\[(?:actix_web::)?(get|post|put|delete|patch|head|options)\s*\(\s*\"([^\"]+)\"")
+RUST_AXUM_ROUTE_RE = re.compile(r'\.route\s*\(')
+RUST_AXUM_METHOD_RE = re.compile(r"\b(get|post|put|delete|patch|head|options|any)\s*\(\s*([A-Za-z_][\w:]*)")
 
 
 def _rust_stereotype(name: str) -> str:
@@ -1434,11 +1426,10 @@ def _rust_tainted_params(params: list[str]) -> list[str]:
         name, _, typ = p.partition(":")
         name = re.sub(r"^(?:mut|ref)\s+", "", name).strip()
         typ = typ.strip()
-        if any(src in typ for src in ("Query", "Json", "Path", "Form", "Bytes", "String")):
+        if re.match(r"(?:[A-Za-z_]\w*::)*(?:State|Extension|Data)\s*<", typ):
+            continue  # application state is not request-controlled input
+        if re.search(r"\b(?:Query|Json|Path|Form|HeaderMap|Bytes|String|HttpRequest)\b", typ):
             tainted.append(name)
-        elif not any(safe in typ for safe in ("State", "Extension", "Connection", "Arc")):
-            if re.match(r"^[A-Za-z_]\w*$", name):
-                tainted.append(name)
     return tainted
 
 
@@ -1450,10 +1441,10 @@ def _parse_rust(pf: PgFile) -> None:
 
     # 1. Imports / Modules
     for idx, line in enumerate(code_lines):
-        use_match = RUST_USE_RE.match(line)
+        use_match = RUST_USE_RE.match(line) if RUST_USE_RE.match(masked_lines[idx]) else None
         if use_match:
             pf.imports.append((use_match.group(1).strip(), idx + 1))
-        mod_match = RUST_MOD_RE.match(line)
+        mod_match = RUST_MOD_RE.match(masked_lines[idx])
         if mod_match:
             pf.imports.append((mod_match.group(1).strip(), idx + 1))
 
@@ -1546,26 +1537,32 @@ def _parse_rust(pf: PgFile) -> None:
         _add_symbol(pf, sym)
 
     # 5. Axum Router declarations: Router::new().route("/path", get(handler).post(handler))
-    for idx, line in enumerate(code_lines):
-        for route_match in RUST_AXUM_ROUTE_RE.finditer(line):
-            route_path = route_match.group(1)
-            handlers_blob = route_match.group(2)
-            for m_match in RUST_AXUM_METHOD_RE.finditer(handlers_blob):
-                verb = m_match.group(1).upper()
-                handler_ref = m_match.group(2).rsplit("::", 1)[-1]
-                call_line = idx + 1
-                route_sym = PgSymbol(
-                    kind="endpoint",
-                    name=f"{verb} {route_path}",
-                    qualname=f"{pf.path}:{call_line}:{verb} {route_path}",
-                    line=call_line,
-                    end_line=call_line,
-                    routes=[{"method": verb, "path": route_path}],
-                    framework="axum",
-                    handler_ref=handler_ref,
-                    decl_kind="route",
-                )
-                _add_symbol(pf, route_sym)
+    for route_match in RUST_AXUM_ROUTE_RE.finditer(pf.masked):
+        open_pos = route_match.end() - 1
+        close = _match_paren(pf, open_pos)
+        if close == -1:
+            continue
+        path_match = re.match(r'\s*"([^"\\]*)"\s*,', pf.code[open_pos + 1 : close])
+        if path_match is None:
+            continue
+        route_path = path_match.group(1)
+        handlers_start = open_pos + 1 + path_match.end()
+        for m_match in RUST_AXUM_METHOD_RE.finditer(pf.masked, handlers_start, close):
+            verb = m_match.group(1).upper()
+            handler_ref = m_match.group(2)
+            call_line = pf.line_of(route_match.start())
+            route_sym = PgSymbol(
+                kind="endpoint",
+                name=f"{verb} {route_path}",
+                qualname=f"{pf.path}:{call_line}:{verb} {route_path}",
+                line=call_line,
+                end_line=pf.line_of(close),
+                routes=[{"method": verb, "path": route_path}],
+                framework="axum",
+                handler_ref=handler_ref,
+                decl_kind="route",
+            )
+            _add_symbol(pf, route_sym)
 
     for cls in pf.symbols:
         if cls.kind == "class":
@@ -1745,7 +1742,7 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
             if sym.kind in ("function", "method", "endpoint") and sym.has_body and not sym.handler_ref:
                 by_lang_name.setdefault((family, sym.name), []).append((pf, sym))
                 if sym.container:
-                    owner = _simple(sym.container)
+                    owner = sym.container.rsplit(":", 1)[-1] if family == "rust" else _simple(sym.container)
                     by_lang_name.setdefault((family, f"{owner}::{sym.name}"), []).append((pf, sym))
     for path in sorted(index.files):
         pf = index.files[path]
@@ -1756,12 +1753,32 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
                 remaining.append(sym)
                 continue
             ref = sym.handler_ref
-            if "::" in ref:
+            if family == "rust":
+                key = ref.rsplit("::", 1)[-1]
+            elif "::" in ref:
                 cls, _, method = ref.rpartition("::")
                 key = f"{_simple(cls)}::{method}"
             else:
                 key = ref.rsplit(".", 1)[-1]
             candidates = by_lang_name.get((family, key), [])
+            if family == "rust" and "::" in ref:
+                modules = ref.split("::")[:-1]
+                associated = by_lang_name.get((family, f"{modules[-1]}::{key}"), [])
+                if associated:
+                    candidates = associated
+                    modules = modules[:-1]
+                parent = pf.path.rsplit("/", 1)[0] if "/" in pf.path else ""
+                if modules and modules[0] == "crate":
+                    parent = pf.path.rsplit("/src/", 1)[0] + "/src" if "/src/" in pf.path else "src"
+                    modules = modules[1:]
+                elif modules and modules[0] == "self":
+                    modules = modules[1:]
+                while modules and modules[0] == "super":
+                    parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
+                    modules = modules[1:]
+                module_path = "/".join(p for p in [parent, *modules] if p)
+                paths = {module_path + ".rs", module_path + "/mod.rs"} if modules else {pf.path}
+                candidates = [c for c in candidates if c[0].path in paths]
             same_file = [c for c in candidates if c[0].path == pf.path]
             chosen = same_file if len(same_file) == 1 else (candidates if len(candidates) == 1 else [])
             if not chosen:

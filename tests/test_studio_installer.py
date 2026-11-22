@@ -107,7 +107,9 @@ class StudioInstallerTests(unittest.TestCase):
             self.assertFalse(result.manifest["source_checkout"])
             self.assertEqual(
                 (home / "project-root.txt").read_text(encoding="utf-8").strip(),
-                target.as_posix(),
+                # Windows runners may expose TEMP through an 8.3 short name;
+                # install records the resolved long path on every platform.
+                target.resolve().as_posix(),
             )
             launcher = (home / "bin" / "secdiagram-studio").read_text(encoding="utf-8")
             self.assertIn('--dir "$ROOT"', launcher)
