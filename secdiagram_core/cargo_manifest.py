@@ -38,7 +38,10 @@ def cargo_inventory(text: str) -> tuple[str | None, set[str], bool]:
             section = line[1:-1].strip()
             package |= section == "package"
             # Development/build dependencies are intentionally excluded.
-            match = re.search(r"(?:^|\.)dependencies(?:\.(.+))?$", section)
+            match = re.fullmatch(
+                r'''(?:workspace\.|target\.(?:"(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_-]+)\.)?dependencies(?:\.(.+))?''',
+                section,
+            )
             dependency_table = match is not None and match.group(1) is None
             dependency = match.group(1).strip("\"'") if match and match.group(1) else ""
             if dependency:

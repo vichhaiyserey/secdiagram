@@ -1742,7 +1742,7 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
             if sym.kind in ("function", "method", "endpoint") and sym.has_body and not sym.handler_ref:
                 by_lang_name.setdefault((family, sym.name), []).append((pf, sym))
                 if sym.container:
-                    owner = _simple(sym.container)
+                    owner = sym.container.rsplit(":", 1)[-1] if family == "rust" else _simple(sym.container)
                     by_lang_name.setdefault((family, f"{owner}::{sym.name}"), []).append((pf, sym))
     for path in sorted(index.files):
         pf = index.files[path]
@@ -1763,11 +1763,15 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
             candidates = by_lang_name.get((family, key), [])
             if family == "rust" and "::" in ref:
                 modules = ref.split("::")[:-1]
+                associated = by_lang_name.get((family, f"{modules[-1]}::{key}"), [])
+                if associated:
+                    candidates = associated
+                    modules = modules[:-1]
                 parent = pf.path.rsplit("/", 1)[0] if "/" in pf.path else ""
-                if modules[0] == "crate":
+                if modules and modules[0] == "crate":
                     parent = pf.path.rsplit("/src/", 1)[0] + "/src" if "/src/" in pf.path else "src"
                     modules = modules[1:]
-                elif modules[0] == "self":
+                elif modules and modules[0] == "self":
                     modules = modules[1:]
                 while modules and modules[0] == "super":
                     parent = parent.rsplit("/", 1)[0] if "/" in parent else ""

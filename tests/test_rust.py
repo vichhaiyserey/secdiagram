@@ -156,6 +156,12 @@ class RustIndexTests(unittest.TestCase):
             unresolved = index_polyglot(root, ["src/main.rs", "src/unrelated.rs"])
             self.assertEqual(unresolved.files["src/unrelated.rs"].symbols[0].kind, "function")
             self.assertEqual(unresolved.files["src/main.rs"].symbols[-1].handler_ref, "missing::only")
+            (root / "src/main.rs").write_text('struct Api;\nimpl Api {\n pub fn items() {}\n}\nfn app() {\n Router::new().route("/associated", get(Api::items));\n}\n', encoding="utf-8")
+            associated = index_polyglot(root, ["src/main.rs"])
+            endpoints = [s for s in associated.files["src/main.rs"].symbols if s.kind == "endpoint"]
+            self.assertEqual([(s.qualname, s.routes) for s in endpoints], [
+                ("src/main.rs:Api.items", [{"method": "GET", "path": "/associated"}]),
+            ])
 
     def test_struct_enum_trait_and_impl_parsing(self) -> None:
         text = """
@@ -387,6 +393,8 @@ rocket = "mock"
 # actix-web = "mock"
 [dev-dependencies]
 axum = "mock"
+[package.metadata.dependencies]
+rocket = "mock"
 [dependencies]
 http = { package = "reqwest", version = "mock" }
 sqlx = { version = "mock", features = [
