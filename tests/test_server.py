@@ -4,16 +4,20 @@ import base64
 import json
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 from secdiagram_core.config import SecdiagramConfig
+from secdiagram_core.model import Graph
 from secdiagram_core.server import (
     AuditLogger,
     BasicAuthenticator,
     NoOpAuthenticator,
+    PlatformState,
     RateLimiter,
     ScanManager,
     create_server,
@@ -115,6 +119,38 @@ class LimitPrimitiveTests(unittest.TestCase):
         manager.release()
         self.assertTrue(manager.try_acquire())
         manager.release()
+
+
+class PlatformStateTests(unittest.TestCase):
+    def test_concurrent_bootstrap_analyzes_once(self) -> None:
+        cfg = SecdiagramConfig()
+        state = PlatformState(FIXTURE, cfg, [FIXTURE])
+        barrier = threading.Barrier(3)
+        calls = 0
+        calls_lock = threading.Lock()
+        results = []
+
+        def fake_run_analysis(_config) -> mock.Mock:
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.05)
+            return mock.Mock(graph=Graph())
+
+        def worker() -> None:
+            barrier.wait()
+            results.append(state.get_analysis())
+
+        with mock.patch("secdiagram_core.server.run_analysis", side_effect=fake_run_analysis):
+            threads = [threading.Thread(target=worker) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(result is results[0] for result in results))
 
 
 class ServerConstructionTests(unittest.TestCase):
