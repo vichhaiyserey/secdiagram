@@ -9,6 +9,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest import mock
+from urllib.parse import quote
 
 from secdiagram_core.config import SecdiagramConfig
 from secdiagram_core.render_image import ImageRenderError
@@ -121,6 +122,40 @@ class StudioServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertGreater(nodes["total"], 0)
 
+    def test_studio_csp_allows_blob_preview(self) -> None:
+        with urllib.request.urlopen(self.studio.base_url + "/studio", timeout=60) as response:
+            csp = response.headers.get("Content-Security-Policy", "")
+        self.assertIn("img-src 'self' data: blob:", csp)
+        self.assertIn("script-src 'self';", csp)
+        self.assertNotIn("cdn.jsdelivr.net", csp)
+
+        with urllib.request.urlopen(self.studio.base_url + "/studio/app.js", timeout=60) as response:
+            asset_csp = response.headers.get("Content-Security-Policy", "")
+        self.assertEqual(asset_csp, csp)
+
+    def test_nodes_are_bounded_and_filterable(self) -> None:
+        _, body = self.studio.get("/api/v1/studio/nodes?limit=1000")
+        all_nodes = json.loads(body)
+        self.assertGreater(all_nodes["total"], 2)
+        target = all_nodes["nodes"][0]["id"]
+
+        status, body = self.studio.get("/api/v1/studio/nodes?limit=2&offset=1")
+        page = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(page["limit"], 2)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["total"], all_nodes["total"])
+        self.assertEqual(page["returned"], min(2, page["total"] - 1))
+        self.assertEqual(len(page["nodes"]), page["returned"])
+
+        status, body = self.studio.get(
+            f"/api/v1/studio/nodes?q={quote(target)}&limit=1"
+        )
+        filtered = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(filtered["returned"], 1)
+        self.assertEqual(filtered["nodes"][0]["id"], target)
+
     def test_sdlc_phase_flow_and_gate(self) -> None:
         status, body = self.studio.post(
             "/api/v1/studio/sdlc", {"action": "start", "phase": "discover"}
@@ -185,6 +220,28 @@ class StudioServerTests(unittest.TestCase):
         status, body = self.studio.post("/api/v1/studio/overrides", {"action": "reset"})
         self.assertEqual(status, 200)
         self.assertFalse(json.loads(body)["summary"]["has_changes"])
+
+    def test_hidden_nodes_remain_editable(self) -> None:
+        _, body = self.studio.get("/api/v1/studio/nodes")
+        before = json.loads(body)
+        hidden_id = before["nodes"][0]["id"]
+
+        status, _ = self.studio.post(
+            "/api/v1/studio/overrides",
+            {"renames": {}, "hidden": [hidden_id]},
+        )
+        self.assertEqual(status, 200)
+
+        _, body = self.studio.get("/api/v1/studio/nodes")
+        after = json.loads(body)
+        self.assertEqual(after["total"], before["total"])
+        self.assertIn(hidden_id, {node["id"] for node in after["nodes"]})
+
+        status, _ = self.studio.post(
+            "/api/v1/studio/overrides",
+            {"renames": {}, "hidden": []},
+        )
+        self.assertEqual(status, 200)
 
     def test_post_guards(self) -> None:
         status, body = self.studio.post("/api/v1/studio/installer", {})

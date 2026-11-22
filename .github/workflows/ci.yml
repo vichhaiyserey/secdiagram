@@ -80,6 +80,8 @@ jobs:
         run: ruff check .
       - name: Mypy type check
         run: mypy
+      - name: Studio JavaScript syntax check
+        run: node --check secdiagram_core/studio_ui/app.js
       - name: Task tooling tests
         run: python -m unittest tests.test_taskctl -v
       - name: Task cache validation
@@ -154,7 +156,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+      - uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
         with:
           fail-on-severity: high
           comment-summary-in-pr: always

@@ -59,7 +59,7 @@ LANGUAGE_BY_SUFFIX = {
     ".swift": "swift",
 }
 
-SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "typescript")
+SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "rust", "typescript")
 
 
 @dataclass(slots=True)
@@ -361,7 +361,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         if language and rel not in parsed_paths and rel not in parse_errors:
             diagnostics.append(diagnostic(
                 "not_parsed", rel, f"No architecture index produced for {language} source",
-                "Built-in indexers cover Python, Java, C#, JavaScript/TypeScript, PHP and Go; check file size and syntax or supply an indexer plugin.",
+                "Built-in indexers cover Python, Java, C#, JavaScript/TypeScript, PHP, Go and Rust; check file size and syntax or supply an indexer plugin.",
             ))
     if not parsed_paths:
         diagnostics.append(diagnostic("empty_project", ".", "No supported source files were parsed",

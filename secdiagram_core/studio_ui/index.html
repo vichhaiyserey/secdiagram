@@ -71,6 +71,8 @@
         <article class="card">
           <div class="card-head"><h2>Artifacts</h2><span class="muted">.secdiagram/</span></div>
           <div id="artifact-list" class="chips"></div>
+          <div class="card-head" style="margin-top:12px"><h2>Languages</h2></div>
+          <div id="lang-list" class="chips" aria-label="Detected languages"></div>
         </article>
         <article class="card">
           <div class="card-head"><h2>Quick actions</h2></div>
@@ -125,6 +127,7 @@
               <strong>Components</strong>
               <input id="node-filter" type="search" placeholder="Filter nodes" aria-label="Filter nodes">
             </div>
+            <p class="muted" id="node-count" role="status" aria-live="polite">Components load with the diagram.</p>
             <div id="node-list" class="node-list" role="region" aria-label="Diagram components" tabindex="0"></div>
           </aside>
         </div>

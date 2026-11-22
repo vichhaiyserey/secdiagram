@@ -47,11 +47,12 @@ from .polyglot_index import (
 )
 from .redaction import redact_secrets
 
-ALL = frozenset({"csharp", "javascript", "typescript", "php", "go"})
+ALL = frozenset({"csharp", "javascript", "typescript", "php", "go", "rust"})
 CS = frozenset({"csharp"})
 JS = JS_LANGS
 PHP = frozenset({"php"})
 GO = frozenset({"go"})
+RS = frozenset({"rust"})
 
 RECOMMEND = {
     "sql": "Use parameterized queries / bound parameters (SqlParameter, FromSqlInterpolated, prepared statements, "
@@ -245,6 +246,22 @@ RULES: tuple[Rule, ...] = (
     Rule("PG-GO-CRYPTO", GO, "crypto", "CWE-327", "Weak cryptographic algorithm",
          _r(r"\b(?:md5|sha1)\.(?:New|Sum)\b|\b(?:des\.NewCipher|des\.NewTripleDESCipher|rc4\.NewCipher)\b"),
          "always", "medium"),
+    # ------------------------------------------------------------------ Rust
+    Rule("PG-RS-SQL", RS, "sql", "CWE-89", "SQL injection",
+         _r(r"\b(?:sqlx::query(?:_as)?)\s*\("),
+         "dynamic", "critical", "medium"),
+    Rule("PG-RS-CMD", RS, "command", "CWE-78", "Command injection",
+         _r(r"\bCommand::new\s*\(|\.(?:arg|args)\s*\("), "taint", "critical",
+         requires=_r(r"\bCommand\b"), sanitizer=COMMAND_SANITIZER),
+    Rule("PG-RS-PATH", RS, "path", "CWE-22", "Path traversal",
+         _r(r"\b(?:fs::(?:read|read_to_string|write|remove_file|remove_dir|remove_dir_all)|File::(?:open|create))\s*\("),
+         "taint", "high", sanitizer=PATH_SANITIZER),
+    Rule("PG-RS-SSRF", RS, "ssrf", "CWE-918", "Server-side request forgery",
+         _r(r"\b(?:reqwest::(?:get|Client::new|blocking::get)|client\.(?:get|post|put|delete))\s*\("),
+         "taint", "high"),
+    Rule("PG-RS-TLS", RS, "tls", "CWE-295", "TLS certificate validation disabled",
+         _r(r"\bdanger_accept_invalid_certs\s*\(\s*true\s*\)|\bdanger_accept_invalid_hostnames\s*\(\s*true\s*\)"),
+         "always", "high"),
 )
 
 SOURCES: dict[str, re.Pattern[str]] = {
@@ -269,6 +286,9 @@ SOURCES: dict[str, re.Pattern[str]] = {
         r"\bchi\.URLParam\s*\(|\bc\.(?:Query|DefaultQuery|Param|PostForm|DefaultPostForm|GetHeader|QueryParam|"
         r"FormValue|Cookie|QueryArray|GetQuery|Params\.ByName)\s*\(|\br\.(?:Body|Header)\b|\bos\.Args\b"
     ),
+    "rust": _r(
+        r"\bstd::env::args\s*\(|\bstd::io::stdin\s*\("
+    ),
 }
 NUMERIC_CAST_RE = _r(
     r"^\s*(?:\(\s*int\s*\)|parseInt\s*\(|parseFloat\s*\(|Number\s*\(|Math\.\w+\s*\(|int\.Parse\s*\(|int\.TryParse|"
@@ -280,6 +300,7 @@ ASSIGN_RES: dict[str, re.Pattern[str]] = {
     "js": _r(r"(?:\b(?:const|let|var)\s+)?(\{[^}]*\}|\[[^\]]*\]|[A-Za-z_$][\w$]*)\s*(?::\s*[\w<>\[\]|. ]+)?\s*(?:\+=|=)(?![=>])\s*(.+)"),
     "php": _r(r"(\$\w+)\s*(?:\.=|=)(?![=>])\s*(.+)"),
     "go": _r(r"^\s*(?:var\s+)?([\w\s,]+?)\s*(?::=|=)(?!=)\s*(.+)"),
+    "rust": _r(r"^\s*(?:let\s+(?:mut\s+)?)?([A-Za-z_]\w*)\s*(?::\s*[^=]+)?\s*=\s*(.+)"),
 }
 GO_BIND_RE = _r(r"\.(?:ShouldBind\w*|Bind\w*|Decode|Unmarshal)\s*\((?:[^,()]*,\s*)?&(\w+)")
 DYNAMIC_RES: dict[str, re.Pattern[str]] = {
@@ -287,6 +308,7 @@ DYNAMIC_RES: dict[str, re.Pattern[str]] = {
     "js": _r(r"`[^`]*\$\{|['\"`]\s*\+|\+\s*['\"`]|\.concat\s*\(|\butil\.format\s*\("),
     "php": _r(r"\"[^\"]*\$\w|\"[^\"]*\{\$|['\"]\s*\.\s*\$|\$\w+(?:\[[^\]]*\])?\s*\.\s*['\"]|\bsprintf\s*\(|\bimplode\s*\("),
     "go": _r(r"\bfmt\.Sprintf\s*\(|\"\s*\+|\+\s*\"|\bstrings\.Join\s*\("),
+    "rust": _r(r"\bformat!\s*\(|\"\s*\+|\+\s*\""),
 }
 
 
@@ -419,6 +441,7 @@ FIELD_RES: dict[str, tuple[re.Pattern[str], ...]] = {
         re.compile(r"(?:private|public|protected)\s+(?:readonly\s+)?\??([A-Za-z_\\][\w\\]*)\s+\$(\w+)"),
     ),
     "go": (re.compile(r"^\s*(\w+)\s+\*?\[?\]?\*?([A-Za-z_][\w.]*)\s*(?:`[^`]*`)?\s*$"),),
+    "rust": (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:\s*([A-Za-z_][\w:<>, ]*)"),),
 }
 
 
@@ -490,6 +513,16 @@ def _param_names(param: str, family: str) -> tuple[list[str], str]:
             return [], ""
         typ = parts[1] if len(parts) > 1 else ""
         return ([parts[0]] if re.match(r"^[A-Za-z_]\w*$", parts[0]) else []), typ.lstrip("*")
+    if family == "rust":
+        text = re.sub(r"^(?:mut|ref)\s+", "", text).strip()
+        if text in ("self", "&self", "&mut self", "mut self"):
+            return [], ""
+        ext_match = re.match(r"^(\w+)\s*\(\s*(?:mut\s+)?(\w+)\s*\)\s*:\s*(.+)$", text)
+        if ext_match:
+            return [ext_match.group(2)], ext_match.group(3).strip()
+        name, _, typ = text.partition(":")
+        name = re.sub(r"^(?:mut|ref)\s+", "", name).strip()
+        return ([name] if re.match(r"^[A-Za-z_]\w*$", name) else []), typ.strip()
     text = re.sub(r"^(?:this|params|ref|out|in|scoped)\s+", "", text)
     pieces = text.rsplit(None, 1)
     if len(pieces) == 2 and re.match(r"^[A-Za-z_]\w*$", pieces[1]):
@@ -690,7 +723,12 @@ def _field_types(pf: PgFile, cls: PgSymbol) -> dict[str, str]:
     elif family == "js":
         for match in pattern.finditer(body_code):
             types.setdefault(match.group(1), match.group(2))
-    else:
+    elif family == "rust":
+        for line in body_masked.split("\n"):
+            match = pattern.match(line)
+            if match:
+                types.setdefault(match.group(1), match.group(2).strip().rstrip(","))
+    elif family == "php":
         for match in pattern.finditer(body_code):
             types.setdefault("$" + match.group(2), match.group(1))
     for raw in cls.params:  # C# 12 primary constructors
@@ -792,6 +830,11 @@ def _names_from_lhs(lhs: str, family: str) -> list[str]:
         return [n for n in names if re.match(r"^[A-Za-z_$][\w$]*$", n)]
     if family == "go":
         return [n for n in (p.strip() for p in lhs.split(",")) if re.match(r"^[A-Za-z_]\w*$", n) and n != "_"]
+    if family == "rust":
+        lhs = re.sub(r"^(?:let\s+)?(?:mut\s+)?", "", lhs).strip()
+        if lhs.startswith("(") and lhs.endswith(")"):
+            return [n.strip() for n in lhs[1:-1].split(",") if re.match(r"^[A-Za-z_]\w*$", n.strip()) and n.strip() != "_"]
+        return [lhs] if re.match(r"^[A-Za-z_]\w*$", lhs) else []
     return [lhs.strip()] if re.match(r"^[A-Za-z_$][\w$]*$", lhs.strip()) else []
 
 
@@ -931,12 +974,64 @@ def _is_literal_only(arg: str) -> bool:
     return bool(re.fullmatch(r"(?:@|\$)?(['\"`])(?:(?!\1).)*\1\s*(?:,.*)?", stripped, re.S)) and "${" not in stripped
 
 
+def _rust_command_sink(fn: _Fn, sink: _Sink) -> bool:
+    """Arguments are literal OS arguments unless the detected program interprets them.
+
+    Keep a tainted executable itself as a sink. For arg/args, require a nearby
+    Command builder chain or an explicit local builder assignment to a shell.
+    Unknown receivers are not evidence of shell injection.
+    """
+    pf = fn.pf
+    if not pf.code.startswith(".", sink.pos):
+        return True
+    statement_start = max(fn.start, pf.masked.rfind(";", fn.start, sink.pos) + 1)
+    prefix = pf.masked[statement_start:sink.pos]
+    constructors = list(re.finditer(r"\bCommand::new\s*\(", prefix))
+    chained = bool(constructors)
+    constructor_pos: int | None = None
+    if constructors:
+        constructor_pos = statement_start + constructors[-1].end() - 1
+    else:
+        receiver = re.search(r"\b([A-Za-z_]\w*)\s*$", prefix)
+        if receiver is not None:
+            name = re.escape(receiver.group(1))
+            assignments = list(re.compile(rf"\b{name}\s*=\s*").finditer(pf.masked, fn.start, sink.pos))
+            if assignments:
+                constructor = re.match(r"Command::new\s*\(", pf.masked[assignments[-1].end():])
+                if constructor is not None:
+                    constructor_pos = assignments[-1].end() + constructor.end() - 1
+    if constructor_pos is None:
+        return False
+    close = _match_paren(pf, constructor_pos)
+    if close == -1:
+        return False
+    if chained:
+        cursor = close + 1
+        while cursor < sink.pos:
+            if pf.masked[cursor].isspace():
+                cursor += 1
+                continue
+            method = re.match(r"\.\s*[A-Za-z_]\w*\s*\(", pf.masked[cursor:sink.pos])
+            if method is None:
+                return False
+            method_end = _match_paren(pf, cursor + method.end() - 1)
+            if method_end == -1 or method_end >= sink.pos:
+                return False
+            cursor = method_end + 1
+    program = pf.code[constructor_pos + 1:close].strip()
+    literal = re.fullmatch(r'"([^"\\]*)"', program)
+    if literal is None:
+        return False  # the executable expression is checked at Command::new
+    executable = literal.group(1).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return executable in {"sh", "bash", "dash", "zsh", "ksh", "fish", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"} or executable.endswith((".bat", ".cmd"))
+
+
 def _flow_metadata(trace: Trace) -> list[dict[str, Any]]:
     return [{"loc": f"{hop.path}:{hop.line}", "node": hop.node_id, "role": hop.role} for hop in trace]
 
 
 def analyze_polyglot_security(graph: Graph, index: PolyglotIndex) -> list[Finding]:
-    """Interprocedural taint SAST over every indexed C#, JS/TS, PHP and Go file."""
+    """Interprocedural taint SAST over indexed C#, JS/TS, PHP, Go and Rust files."""
     fns = _collect_facts(graph, index)
     resolver = _Resolver(index, fns)
     for fn in fns:
@@ -1002,6 +1097,8 @@ def analyze_polyglot_security(graph: Graph, index: PolyglotIndex) -> list[Findin
         dynamic_re = DYNAMIC_RES[family]
         for sink in sorted(fn.sinks, key=lambda s: (s.pos, s.order)):
             rule = sink.rule
+            if rule.rule_id == "PG-RS-CMD" and not _rust_command_sink(fn, sink):
+                continue
             arg = pf.code[sink.arg_start : sink.arg_end]
             if rule.sanitizer is not None and rule.sanitizer.search(arg):
                 continue
