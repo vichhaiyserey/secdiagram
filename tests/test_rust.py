@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from secdiagram_core.analyzer import AnalysisConfig, AnalysisResult, run_analysis
+from secdiagram_core.cargo_manifest import cargo_inventory
 from secdiagram_core.high_level import build_high_level_architecture
 from secdiagram_core.misconfig import analyze_misconfig
 from secdiagram_core.model import Graph
@@ -16,6 +17,7 @@ from secdiagram_core.polyglot_index import (
     PolyglotIndex,
     _views,
     build_polyglot_graph,
+    index_polyglot,
     parse_polyglot_file,
 )
 from secdiagram_core.polyglot_security import analyze_polyglot_security
@@ -53,6 +55,41 @@ def _routes(result: AnalysisResult) -> dict[str, set[str]]:
 
 
 class RustTokenizerTests(unittest.TestCase):
+    def test_lifetimes_labels_and_escaped_chars_preserve_structure(self) -> None:
+        samples = {
+            "static": "pub fn read(value: &'static str) {\n    std::fs::read(value);\n}\n",
+            "generic": "pub fn read<'a, T: AsRef<str>>(value: &'a T) {\n    inspect(value);\n}\n",
+            "labels": "pub fn read() {\n    'outer: loop { break 'outer; }\n}\n",
+            "chars": r"pub fn read() { let chars = ('{', b'}', '\u{7b}', '\'', '\\'); }",
+        }
+        for name, text in samples.items():
+            with self.subTest(name=name):
+                pf = parse_polyglot_file("src/lib.rs", text)
+                assert pf is not None
+                self.assertEqual([(s.name, s.has_body) for s in pf.symbols], [("read", True)])
+                self.assertEqual(pf.masked.count("{"), pf.masked.count("}"))
+                self.assertEqual(len(pf.masked), len(text))
+                self.assertEqual(pf.masked.count("\n"), text.count("\n"))
+
+    def test_raw_string_contents_do_not_create_imports_or_routes(self) -> None:
+        text = 'const DOC: &str = br##"\nuse fake::Service;\nmod phantom;\nfn fake() {}\n.route("/fake", get(fake))\n"##;\nfn real() {}\n'
+        pf = parse_polyglot_file("src/lib.rs", text)
+        assert pf is not None
+        self.assertEqual([(s.name, s.kind) for s in pf.symbols], [("real", "function")])
+        self.assertEqual(pf.imports, [])
+        for suffix in ('r#"unterminated {', 'br##"unterminated {'):
+            with self.subTest(suffix=suffix):
+                _, masked = _views(suffix, "rust")
+                self.assertNotIn("{", masked)
+
+    def test_deep_nested_comments_keep_following_function(self) -> None:
+        text = "/*" * 30000 + "*/" * 30000 + "\nfn actual() {}\n"
+        start = time.perf_counter()
+        pf = parse_polyglot_file("src/lib.rs", text)
+        assert pf is not None
+        self.assertEqual([(s.name, s.line) for s in pf.symbols], [("actual", 2)])
+        self.assertLess(time.perf_counter() - start, 5.0)
+
     def test_views_handles_nested_comments_and_raw_strings(self) -> None:
         text = '/* outer /* nested */ comment */ let s = r#"raw " { string"#; // line comment\n'
         code, masked = _views(text, "rust")
@@ -92,6 +129,34 @@ class RustTokenizerTests(unittest.TestCase):
 
 
 class RustIndexTests(unittest.TestCase):
+    def test_multiline_routes_keep_all_methods_and_qualified_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "src").mkdir()
+            sources = {
+                "main.rs": 'fn app() {\n Router::new().route(\n "/items",\n get(crate::handlers::items)\n .post(crate::handlers::create)\n );\n}\n',
+                "handlers.rs": "pub fn items() {}\npub fn create() {}\n",
+                "unrelated.rs": "pub fn items() {}\npub fn create() {}\n",
+            }
+            for name, source in sources.items():
+                (root / "src" / name).write_text(source, encoding="utf-8")
+            index = index_polyglot(root, [f"src/{name}" for name in sources])
+            handlers = index.files["src/handlers.rs"].symbols
+            self.assertEqual(
+                [(s.name, s.kind, s.routes) for s in handlers],
+                [("items", "endpoint", [{"method": "GET", "path": "/items"}]),
+                 ("create", "endpoint", [{"method": "POST", "path": "/items"}])],
+            )
+            self.assertTrue(all(s.kind == "function" for s in index.files["src/unrelated.rs"].symbols))
+            self.assertFalse(any(s.handler_ref for s in index.files["src/main.rs"].symbols))
+            # A nonexistent explicit module must never bind to an unrelated
+            # unique function with the same final name.
+            (root / "src/main.rs").write_text('fn app() {\n Router::new().route("/missing", get(missing::only));\n}\n', encoding="utf-8")
+            (root / "src/unrelated.rs").write_text("pub fn only() {}\n", encoding="utf-8")
+            unresolved = index_polyglot(root, ["src/main.rs", "src/unrelated.rs"])
+            self.assertEqual(unresolved.files["src/unrelated.rs"].symbols[0].kind, "function")
+            self.assertEqual(unresolved.files["src/main.rs"].symbols[-1].handler_ref, "missing::only")
+
     def test_struct_enum_trait_and_impl_parsing(self) -> None:
         text = """
 pub trait Entity {
@@ -150,7 +215,7 @@ pub async fn list_items() -> impl Responder {
     "items"
 }
 
-#[post("/api/v1/items")]
+#[actix_web::post("/api/v1/items")]
 pub async fn create_item() -> impl Responder {
     "created"
 }
@@ -163,9 +228,10 @@ pub async fn create_item() -> impl Responder {
         build_polyglot_graph(graph, index)
         endpoints = [n for n in graph.nodes.values() if n.kind == "endpoint"]
         self.assertEqual(len(endpoints), 2)
-        endpoint_names = {e.name for e in endpoints}
-        self.assertIn("list_items", endpoint_names)
-        self.assertIn("create_item", endpoint_names)
+        self.assertEqual({e.name: e.attrs["routes"] for e in endpoints}, {
+            "list_items": [{"method": "GET", "path": "/api/v1/items"}],
+            "create_item": [{"method": "POST", "path": "/api/v1/items"}],
+        })
 
 
 class RustSecurityTests(unittest.TestCase):
@@ -173,11 +239,77 @@ class RustSecurityTests(unittest.TestCase):
         result = _analyze_rust()
         handlers = "src/handlers.rs"
         findings = _pg_findings(result)
-        self.assertIn(("PG-RS-SQL", handlers, 26), findings)
-        self.assertIn(("PG-RS-CMD", handlers, 33), findings)
-        self.assertIn(("PG-RS-UNSAFE", handlers, 35), findings)
-        self.assertIn(("PG-RS-PATH", handlers, 46), findings)
-        self.assertIn(("PG-RS-SSRF", handlers, 53), findings)
+        self.assertEqual(findings, {
+            ("PG-RS-SQL", handlers, 26), ("PG-RS-CMD", handlers, 33),
+            ("PG-RS-PATH", handlers, 46), ("PG-RS-SSRF", handlers, 53),
+        })
+        for finding in result.graph.findings:
+            if str(finding.metadata.get("rule_id", "")).startswith("PG-RS-"):
+                self.assertTrue(finding.metadata["tainted"])
+                self.assertIsNotNone(finding.node_id)
+                flow = finding.metadata["flow"]
+                self.assertEqual(flow[0]["role"], "source")
+                self.assertEqual(flow[-1]["loc"], f"{handlers}:{finding.evidence[0].line}")
+                self.assertEqual(flow[-1]["role"], "sink")
+
+    def test_shell_arguments_require_a_detected_shell_builder(self) -> None:
+        cases = {
+            "literal argument": ('Command::new("echo").arg(value).output();', False),
+            "unrelated arg": ('let c = Command::new("sh");\n    unrelated.arg(value);', False),
+            "unrelated same statement": ('let pair = (Command::new("sh"), unrelated.arg(value));', False),
+            "shell chain": ('Command::new("sh")\n        .arg("-c")\n        .arg(value).output();', True),
+            "shell variable": ('let mut c = Command::new("bash");\n    c.arg(value).output();', True),
+            "safe variable": ('let mut c = Command::new("echo");\n    c.arg(value).output();', False),
+            "windows shell": ('Command::new("cmd.exe").args(["/C", value]).output();', True),
+            "tainted program": ('Command::new(value).output();', True),
+            "reassigned builder": ('let mut c = Command::new("sh");\n    c = Command::new("echo");\n    c.arg(value).output();', False),
+        }
+        for name, (body, expected) in cases.items():
+            with self.subTest(name=name):
+                source = f'#[get("/run")]\npub fn run(Query(value): Query<String>) {{\n    {body}\n}}\n'
+                pf = parse_polyglot_file("src/lib.rs", source)
+                assert pf is not None
+                findings = analyze_polyglot_security(Graph(), PolyglotIndex(files={pf.path: pf}))
+                self.assertEqual([f.metadata["rule_id"] for f in findings], ["PG-RS-CMD"] if expected else [])
+                if expected:
+                    self.assertEqual(findings[0].cwe, "CWE-78")
+                    self.assertTrue(findings[0].metadata["tainted"])
+
+    def test_literal_owned_sql_and_unsafe_syntax_are_not_findings(self) -> None:
+        source = '''pub fn safe() {
+    let sql = "SELECT 1".to_string();
+    sqlx::query(&sql);
+    sqlx::query("SELECT 1".to_owned());
+    unsafe { let pointer = std::ptr::null::<u8>(); }
+}
+#[get("/query")]
+fn query(Query(value): Query<String>) {
+    sqlx::query("SELECT * FROM users WHERE name = $1").bind(value);
+}
+'''
+        pf = parse_polyglot_file("src/lib.rs", source)
+        assert pf is not None
+        self.assertEqual(analyze_polyglot_security(Graph(), PolyglotIndex(files={pf.path: pf})), [])
+
+    def test_request_extractors_are_sources_but_application_state_is_not(self) -> None:
+        cases = {
+            "query": ("Query(value): Query<String>", "value", True),
+            "qualified query": ("value: web::Query<String>", "value", True),
+            "state": ("value: State<String>", "value", False),
+            "data": ("value: web::Data<String>", "value", False),
+            "extension": ("value: Extension<String>", "value", False),
+            "custom type": ("value: TrustedSettings", "value", False),
+        }
+        for name, (param, value, expected) in cases.items():
+            with self.subTest(name=name):
+                source = f'#[get("/read")]\nfn read({param}) {{\n    fs::read({value});\n}}\n'
+                pf = parse_polyglot_file("src/lib.rs", source)
+                assert pf is not None
+                findings = analyze_polyglot_security(Graph(), PolyglotIndex(files={pf.path: pf}))
+                self.assertEqual([f.metadata["rule_id"] for f in findings], ["PG-RS-PATH"] if expected else [])
+        pf = parse_polyglot_file("src/lib.rs", 'fn local() {\n    let value = Query("fixed");\n    fs::read(value);\n}\n')
+        assert pf is not None
+        self.assertEqual(analyze_polyglot_security(Graph(), PolyglotIndex(files={pf.path: pf})), [])
 
     def test_rust_tls_verification_rule(self) -> None:
         text = """
@@ -210,7 +342,7 @@ pub fn cors() -> CorsLayer {
 }
 
 pub fn generate_token() -> u64 {
-    rand::thread_rng().gen()
+    fastrand::u64(..)
 }
 """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -221,11 +353,60 @@ pub fn generate_token() -> u64 {
             graph = Graph()
             findings = analyze_misconfig(graph, tmproot, ["src/cfg.rs"])
             rule_ids = {f.metadata["rule_id"] for f in findings}
-            self.assertIn("CFG-RS-CORS", rule_ids)
-            self.assertIn("CFG-RS-RANDOM", rule_ids)
+            self.assertEqual(rule_ids, {"CFG-RS-CORS", "CFG-RS-RANDOM"})
+
+    def test_crypto_rng_and_literal_examples_are_not_misconfigs(self) -> None:
+        source = '''pub fn generate_token() -> u64 {
+    rand::thread_rng().gen()
+}
+pub fn random_token() -> u64 { rand::random() }
+const DOC: &str = r#"CorsLayer::very_permissive() fastrand::u64(..) token"#;
+'''
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "safe.rs").write_text(source, encoding="utf-8")
+            self.assertEqual(analyze_misconfig(Graph(), root, ["safe.rs"]), [])
+
+    def test_small_rng_token_requires_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "rng.rs").write_text('fn token() {\n let rng = SmallRng::seed_from_u64(1);\n}\n\nfn simulation() {\n let rng = SmallRng::seed_from_u64(1);\n}\n', encoding="utf-8")
+            findings = analyze_misconfig(Graph(), root, ["rng.rs"])
+            self.assertEqual([(f.metadata["rule_id"], f.evidence[0].line) for f in findings], [("CFG-RS-RANDOM", 2)])
 
 
 class RustHighLevelArchitectureTests(unittest.TestCase):
+    def test_cargo_inventory_uses_runtime_sections_not_descriptions(self) -> None:
+        source = '''[package]
+name = "warped-redis-tool"
+description = "axum postgres"
+readme = """
+[dependencies]
+rocket = "mock"
+"""
+# actix-web = "mock"
+[dev-dependencies]
+axum = "mock"
+[dependencies]
+http = { package = "reqwest", version = "mock" }
+sqlx = { version = "mock", features = [
+ "postgres",
+] }
+[target.'cfg(unix)'.dependencies.actix-web]
+version = "mock"
+'''
+        self.assertEqual(cargo_inventory(source), ("warped-redis-tool", {"http", "reqwest", "sqlx", "postgres", "actix-web"}, True))
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "Cargo.toml").write_text('[package]\nname = "warped-redis-tool"\ndescription = "axum postgres"\n[dev-dependencies]\naxum = "mock"\n', encoding="utf-8")
+            self.assertEqual(_detect_role_from_cargo(root), ("unknown", 0.0, []))
+            arch = build_high_level_architecture(root)
+            rust = [s for s in arch.subsystems if s.id.startswith("rust_")]
+            self.assertEqual([(s.name, s.technology, s.tier) for s in rust], [("warped-redis-tool", "Rust", "services")])
+            self.assertEqual([(c.src, c.dst) for c in arch.connections], [("client_ingress", "rust_warped_redis_tool")])
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/*"]\n', encoding="utf-8")
+            self.assertFalse(any(s.id.startswith("rust_") for s in build_high_level_architecture(root).subsystems))
+
     def test_high_level_rust_subsystem(self) -> None:
         result = _analyze_rust()
         arch = build_high_level_architecture(RUST_FIXTURE, result.graph)

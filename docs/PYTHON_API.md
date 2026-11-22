@@ -137,30 +137,33 @@ c4_mermaid_text = render_mermaid_highlevel(high_level_arch)
 Extend `secdiagram` privately, commercially, or internally without forking or modifying the core open-source engine.
 
 ### A. Custom Language Indexers (`LanguageIndexer`)
-Index proprietary or new languages (e.g. Go, Rust, Kotlin, COBOL) and attach their definitions, endpoints, and calls to the unified graph:
+Index additional languages (e.g. Kotlin or COBOL) and attach their definitions,
+endpoints, and calls to the unified graph. Go and [Rust](RUST_SUPPORT.md) already
+have built-in lexical indexers.
 
 ```python
 from pathlib import Path
 from secdiagram_core import Graph, Node, register_indexer
 
-class GoLanguageIndexer:
+class KotlinLanguageIndexer:
     @property
     def name(self) -> str:
-        return "go"
+        return "kotlin"
 
     @property
     def supported_suffixes(self) -> tuple[str, ...]:
-        return (".go",)
+        return (".kt",)
 
     def index_repo(self, root: Path, rel_files: list[str], graph: Graph) -> None:
         for rel in rel_files:
-            if rel.endswith(".go"):
-                # Parse Go file and attach nodes/edges to graph
-                node = Node(id=f"go:{rel}", kind="module", name=rel, qualname=rel, path=rel)
+            if rel.endswith(".kt"):
+                # Add a module observation; a real indexer would parse definitions.
+                from secdiagram_core.model import stable_id
+                node = Node(id=stable_id("kotlin", rel), kind="module", name=rel, qualname=rel, path=rel)
                 graph.add_node(node)
 
 # Register before running analysis:
-register_indexer(GoLanguageIndexer())
+register_indexer(KotlinLanguageIndexer())
 ```
 
 ### B. Custom Security Rule Providers (`SecurityRuleProvider`)

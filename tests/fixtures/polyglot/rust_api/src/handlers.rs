@@ -27,7 +27,7 @@ pub async fn search_users(Query(params): Query<SearchParams>) -> impl IntoRespon
     "done"
 }
 
-// VULNERABLE: Command execution with tainted input and an unsafe memory block
+// VULNERABLE: Command execution with tainted shell input
 pub async fn export_data(Json(payload): Json<ExportRequest>) -> impl IntoResponse {
     let cmd = format!("tar -czf /tmp/backup.tar.gz {}", payload.target);
     let _ = Command::new("sh").arg("-c").arg(&cmd).output();
@@ -47,9 +47,9 @@ pub async fn read_profile(Query(params): Query<SearchParams>) -> impl IntoRespon
     content
 }
 
-// VULNERABLE: SSRF via reqwest
+// VULNERABLE: User controls the complete outbound URL
 pub async fn fetch_remote(Query(params): Query<SearchParams>) -> impl IntoResponse {
-    let url = format!("https://api.external.com/{}", params.q);
+    let url = params.q.clone();
     let resp = reqwest::get(&url).await;
     match resp {
         Ok(r) => r.text().await.unwrap_or_default(),

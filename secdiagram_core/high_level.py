@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .cargo_manifest import cargo_inventory
 from .model import SEVERITY_RANK, Graph, Node
 
 MODERN_HIGHLEVEL_INIT = """%%{init: {
@@ -1112,10 +1113,6 @@ def _scan_go(
     return subsystems, connections
 
 
-_CARGO_NAME_RE = re.compile(r"^\s*name\s*=\s*['\"]([^'\"]+)['\"]", re.M)
-_CARGO_DEP_RE = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=\s*", re.M)
-
-
 def _scan_rust(
     root: Path, existing_subsystems: list[Subsystem], graph: Graph | None
 ) -> tuple[list[Subsystem], list[SubsystemConnection]]:
@@ -1126,12 +1123,10 @@ def _scan_rust(
         text = _safe_read(root, manifest)
         if text is None:
             continue
-        pkg_match = _CARGO_NAME_RE.search(text)
-        name = pkg_match.group(1) if pkg_match else manifest.parent.name
-        deps = set(_CARGO_DEP_RE.findall(text))
-        for db_marker in ("postgres", "mysql", "sqlite", "mongo", "redis", "kafka", "rabbitmq"):
-            if db_marker in text.lower():
-                deps.add(db_marker)
+        package_name, deps, has_package = cargo_inventory(text)
+        if not has_package:
+            continue  # a virtual workspace is not an application subsystem
+        name = package_name or manifest.parent.name
         frameworks = [
             label
             for marker, label in (

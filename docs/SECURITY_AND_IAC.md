@@ -6,7 +6,7 @@
 
 ## 1. Application Security Rules (SAST)
 
-The static analysis engine inspects Python and Java/Spring sources (and, see 1.1, C#/.NET, JavaScript/TypeScript, PHP and Go) to detect security vulnerabilities, untrusted source-to-sink dataflows, and dangerous configurations:
+The static analysis engine inspects Python and Java/Spring sources (and, see 1.1, C#/.NET, JavaScript/TypeScript, PHP, Go and Rust) to identify potential vulnerabilities, untrusted source-to-sink dataflows, and dangerous configurations:
 
 | Category | CWE | Patterns Detected | Default Severity |
 | :--- | :--- | :--- | :--- |
@@ -21,10 +21,10 @@ The static analysis engine inspects Python and Java/Spring sources (and, see 1.1
 
 Findings carry full source-to-sink taint paths (`codeFlows`), exact `path:line` citations, and stable partial fingerprints.
 
-### 1.1 C#/.NET, JavaScript/TypeScript, PHP and Go
+### 1.1 C#/.NET, JavaScript/TypeScript, PHP, Go and Rust
 
 `polyglot_index.py` and `polyglot_security.py` add the same graph and SAST
-outputs for four more ecosystems. Like the Java indexer they are stdlib-only and
+outputs for these ecosystems. Like the Java indexer they are stdlib-only and
 lexical: source is read as text and never compiled or executed.
 
 **Architecture captured**
@@ -35,6 +35,14 @@ lexical: source is read as text and never compiled or executed.
 | JavaScript / TypeScript | Express/Koa/Fastify/Hono router calls and `.route()` chains, NestJS `@Controller` + `@Get`..., Next.js app router `route.ts` handlers and `pages/api` | modules, relative `import`/`require` edges, classes, functions, arrow handlers, NestJS constructor DI |
 | PHP | Laravel `Route::get/post/match/resource` (closures, `[Controller::class, 'method']`, `'Controller@method'`), Symfony `#[Route]` (class prefix + methods), Slim/Lumen receivers, legacy page scripts reading superglobals | namespaces, classes/traits/interfaces, `__construct` DI, inheritance, calls |
 | Go | `net/http` `HandleFunc` (incl. Go 1.22 `"GET /path"` patterns), gin/echo/chi/gorilla `.Methods()` | packages, structs/interfaces, methods by receiver, `NewX(...)` constructor injection, calls |
+| Rust | Axum literal `.route()` registrations (including multiline arguments) and Actix HTTP method attributes | structs/enums/traits/unions, functions and `impl` methods, source-path-qualified route handlers, Cargo runtime dependency inventory |
+
+Rust rules cover SQLx queries, detected shell/executable inputs, filesystem and
+HTTP sinks, disabled TLS verification, permissive CORS and selected insecure RNGs.
+Application state is not treated as request input; ordinary process arguments,
+owned literal SQL, `unsafe` syntax alone and cryptographic ThreadRng APIs are not
+vulnerability evidence. See [Rust support](RUST_SUPPORT.md) for exact patterns,
+positive/negative conditions and lexical coverage limits.
 
 Route registrations that name their handler (`app.get('/x', listUsers)`,
 `Route::get('/x', [UserController::class, 'show'])`, `r.GET("/x", h.Get)`)

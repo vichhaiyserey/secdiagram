@@ -13,7 +13,7 @@
 
 <p align="center">
   <b>Transform codebases into clear, human-friendly system architecture diagrams, publication-quality images, security threat models, and AI reviews.</b><br>
-  <i>100% offline-first. Zero external Python runtime dependencies. Polyglot architecture and security analysis across <b>.NET (C#)</b>, <b>Java / Spring Boot</b>, <b>Node.js / TypeScript</b>, <b>PHP</b>, <b>Go</b>, <b>Python</b>, and <b>Docker / Kubernetes / Terraform</b>.</i>
+  <i>100% offline-first. Zero external Python runtime dependencies. Polyglot architecture and security analysis across <b>.NET (C#)</b>, <b>Java / Spring Boot</b>, <b>Node.js / TypeScript</b>, <b>PHP</b>, <b>Go</b>, <b>Rust</b>, <b>Python</b>, and <b>Docker / Kubernetes / Terraform</b>.</i>
 </p>
 
 ---
@@ -22,7 +22,7 @@
 
 ## 🌟 Key Highlights
 
-- **Pure Python Standard Library (`zero dependencies`)**: Runs instantly without downloading hundreds of megabytes of third-party wheels. Zero supply chain attack surface.
+- **Pure Python Standard Library (`zero dependencies`)**: Core analysis requires no third-party Python packages. Optional renderers and developer tools have separate pinned dependencies.
 - **High-Level C4 System Diagrams**: Automatically compiles clean C4 tier diagrams (`diagram-highlevel.mmd` & `diagram-highlevel.png`) showing Ingress, Gateways, Core Services, Databases, Caches, Brokers, and External APIs.
 - **Multi-Format Image Rendering**: Export diagrams directly to **PNG**, **SVG**, or **PDF** offline via bundled Mermaid CLI (`mmdc`) or zero-dependency HTTP fallbacks (Kroki, mermaid.ink).
 - **Security & IaC SAST Overlay**: Discovers entrypoints, traces taint dataflows **across functions and files** (controller → service → repository) to dangerous sinks (CWE-78, CWE-89, CWE-502), draws them as an attack-path diagram, catches hardcoded secrets, and audits Dockerfile, Kubernetes, Terraform, and GitHub Actions configurations.
@@ -111,6 +111,7 @@ if result.has_taint_at("app/api.py", line=42):
 | **Node.js / TypeScript** | `package.json`, workspaces, `schema.prisma`, `*.js`/`*.ts` | Express, Fastify, Koa, Hono, NestJS, Next.js routes & auth middleware; Prisma, TypeORM, Mongoose; interprocedural taint to SQL/NoSQL, `child_process`, `eval`, XSS, path, SSRF sinks; prototype pollution; JWT/CORS/cookie checks |
 | **PHP** | `composer.json`, `*.php` | Laravel routes & middleware, Symfony `#[Route]`/`#[IsGranted]`, Slim, legacy page scripts; constructor DI; taint to SQL, `system`/`exec`, `include`, `unserialize`, XSS, path, SSRF; CSRF/CORS/cookie/XXE checks |
 | **Go** | `go.mod`, `*.go` | `net/http` (incl. Go 1.22 `"GET /path"`), Gin, Echo, Chi routes & auth middleware; structs, receiver methods, `NewX` injection; taint to SQL, `exec.Command`, path, SSRF, XSS; JWT/CORS/cookie/TLS checks |
+| **Rust** | `Cargo.toml`, `*.rs` | Structs/enums/traits, `impl` methods, Axum router and Actix attribute routes; request-to-SQLx, shell-command, filesystem and HTTP sink evidence; TLS/CORS and selected non-cryptographic RNG checks. Lexical coverage and limits: [Rust support](docs/RUST_SUPPORT.md). |
 | **Java / Spring Boot** | `pom.xml`, `build.gradle(.kts)` | Stereotypes (`@RestController`, `@Service`, `@Repository`), DI (`@Autowired`), injection/call edges, `@PreAuthorize`/`@PermitAll`; SQLi, command injection, deserialization, SSRF, XSS, XXE; JWT/CORS/CSRF/cookie checks |
 | **Python** | `pyproject.toml`, `requirements.txt`, `*.py` AST | FastAPI, Flask, Django, Celery; SQLAlchemy, Tortoise-ORM, asyncpg, pymongo; AST taint tracking from sources to dangerous execution sinks |
 | **Infrastructure & IaC** | `docker-compose.yml`, `Dockerfile`, K8s, Terraform | Compose service ports & links; Dockerfile unpinned tags & root user; Kubernetes capabilities & security contexts; Terraform public ACLs |
@@ -161,17 +162,20 @@ For comprehensive guides, references, and deployment patterns, see:
 | [**Architecture Diagrams & Image Rendering**](docs/ARCHITECTURE_DIAGRAMS.md) | C4 high-level diagrams, visual tiering, detail modes, PNG/SVG/PDF rendering, and providers. |
 | [**Container & Docker Compose Guide**](docs/CONTAINER_AND_COMPOSE.md) | Standalone Docker & Podman, Windows Git Bash tips, SELinux mode, and local Ollama Compose. |
 | [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
+| [**Rust / Axum / Actix Support**](docs/RUST_SUPPORT.md) | Supported syntax, Cargo inventory, evidence-backed rules, offline examples and coverage limits. |
+| [**Threat Modeling & Diffs**](docs/THREAT_MODELING.md) | Facts versus assessments, source-linked STRIDE observations and version comparison. |
 | [**Hardened Platform Server & REST API**](docs/SERVER_API.md) | Daemon mode (`secdiagram serve`), authentication, rate limits, request caps, and config schema. |
 | [**Agentic Studio & AI-Skill Installer**](docs/STUDIO.md) | User-level install, portable agent skill, Studio UI, diagram overrides, SDLC evidence gates, handoffs, and local AI reviews. |
 | [**CLI Reference Manual**](docs/CLI_REFERENCE.md) | Complete command-line syntax, options breakdown table, and exit codes. |
 | [**Python Public Facade & Developer API**](docs/PYTHON_API.md) | Stable facade (`secdiagram_core`), taint/reachability queries, SCA bridge, and cache serialization. |
 | [**Task Tracking Guide**](docs/TASK_TRACKING.md) | GitHub Issues & Projects v2 task lifecycle tracking with `taskctl.py`. |
+| [**Test Contracts & Validation**](docs/TEST_VALIDATION.md) | Meaningful test conditions, isolated fault checks, cross-platform verification and known gaps. |
 
 ---
 
 ## 🧪 Verification & Testing
 
-`secdiagram` maintains behavior-focused tests covering AST and lexical indexers for six application languages plus infrastructure-as-code, interprocedural taint, misconfiguration rules, risk scoring, the STRIDE threat model and MITRE ATT&CK audit gate, graph builders, image rendering, and deterministic CLI behaviors. Related conditions use named subtests; full-content checks and positive/negative controls take precedence over assertion counts. CI runs the suite on Ubuntu **and** Windows for every supported Python version. See [test contracts and validation](docs/TEST_VALIDATION.md) for the current inventory, fault checks and coverage limits.
+`secdiagram` maintains behavior-focused tests covering the supported application languages, including Rust, plus infrastructure-as-code, interprocedural taint, misconfiguration rules, risk scoring, the STRIDE threat model and MITRE ATT&CK audit gate, graph builders, image rendering, and deterministic CLI behaviors. Related conditions use named subtests; full-content checks and positive/negative controls take precedence over assertion counts. CI runs the suite on Ubuntu **and** Windows for every supported Python version. See [test contracts and validation](docs/TEST_VALIDATION.md) for the inventory, fault checks and coverage limits.
 
 ```bash
 # Run unit test suite:
