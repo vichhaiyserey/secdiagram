@@ -47,11 +47,12 @@ from .polyglot_index import (
 )
 from .redaction import redact_secrets
 
-ALL = frozenset({"csharp", "javascript", "typescript", "php", "go"})
+ALL = frozenset({"csharp", "javascript", "typescript", "php", "go", "rust"})
 CS = frozenset({"csharp"})
 JS = JS_LANGS
 PHP = frozenset({"php"})
 GO = frozenset({"go"})
+RS = frozenset({"rust"})
 
 RECOMMEND = {
     "sql": "Use parameterized queries / bound parameters (SqlParameter, FromSqlInterpolated, prepared statements, "
@@ -70,6 +71,7 @@ RECOMMEND = {
     "file-inclusion": "Never include files based on user input; map identifiers to a fixed allowlist of files.",
     "prototype-pollution": "Do not deep-merge request objects; copy allowlisted keys, use Object.create(null) or "
     "Map, and reject __proto__/constructor/prototype keys.",
+    "memory": "Audit unsafe blocks for memory safety, pointer bounds, and data races; encapsulate unsafe code behind a safe API.",
 }
 
 
@@ -245,6 +247,24 @@ RULES: tuple[Rule, ...] = (
     Rule("PG-GO-CRYPTO", GO, "crypto", "CWE-327", "Weak cryptographic algorithm",
          _r(r"\b(?:md5|sha1)\.(?:New|Sum)\b|\b(?:des\.NewCipher|des\.NewTripleDESCipher|rc4\.NewCipher)\b"),
          "always", "medium"),
+    # ------------------------------------------------------------------ Rust
+    Rule("PG-RS-SQL", RS, "sql", "CWE-89", "SQL injection",
+         _r(r"\b(?:sqlx::query(?:_as)?)\s*\("),
+         "dynamic", "critical", "medium"),
+    Rule("PG-RS-CMD", RS, "command", "CWE-78", "Command injection",
+         _r(r"\bCommand::new\s*\(|\.(?:arg|args)\s*\("), "taint", "critical",
+         requires=_r(r"\bCommand\b"), sanitizer=COMMAND_SANITIZER),
+    Rule("PG-RS-PATH", RS, "path", "CWE-22", "Path traversal",
+         _r(r"\b(?:fs::(?:read|read_to_string|write|remove_file|remove_dir|remove_dir_all)|File::(?:open|create))\s*\("),
+         "taint", "high", sanitizer=PATH_SANITIZER),
+    Rule("PG-RS-SSRF", RS, "ssrf", "CWE-918", "Server-side request forgery",
+         _r(r"\b(?:reqwest::(?:get|Client::new|blocking::get)|client\.(?:get|post|put|delete))\s*\("),
+         "taint", "high"),
+    Rule("PG-RS-TLS", RS, "tls", "CWE-295", "TLS certificate validation disabled",
+         _r(r"\bdanger_accept_invalid_certs\s*\(\s*true\s*\)|\bdanger_accept_invalid_hostnames\s*\(\s*true\s*\)"),
+         "always", "high"),
+    Rule("PG-RS-UNSAFE", RS, "memory", "CWE-119", "Unsafe memory block",
+         _r(r"\bunsafe\s*\{"), "always", "medium"),
 )
 
 SOURCES: dict[str, re.Pattern[str]] = {
@@ -269,6 +289,10 @@ SOURCES: dict[str, re.Pattern[str]] = {
         r"\bchi\.URLParam\s*\(|\bc\.(?:Query|DefaultQuery|Param|PostForm|DefaultPostForm|GetHeader|QueryParam|"
         r"FormValue|Cookie|QueryArray|GetQuery|Params\.ByName)\s*\(|\br\.(?:Body|Header)\b|\bos\.Args\b"
     ),
+    "rust": _r(
+        r"\b(?:Path|Query|Json|Form|HeaderMap)\s*\(|"
+        r"\bstd::env::args\s*\(|\bstd::io::stdin\s*\("
+    ),
 }
 NUMERIC_CAST_RE = _r(
     r"^\s*(?:\(\s*int\s*\)|parseInt\s*\(|parseFloat\s*\(|Number\s*\(|Math\.\w+\s*\(|int\.Parse\s*\(|int\.TryParse|"
@@ -280,6 +304,7 @@ ASSIGN_RES: dict[str, re.Pattern[str]] = {
     "js": _r(r"(?:\b(?:const|let|var)\s+)?(\{[^}]*\}|\[[^\]]*\]|[A-Za-z_$][\w$]*)\s*(?::\s*[\w<>\[\]|. ]+)?\s*(?:\+=|=)(?![=>])\s*(.+)"),
     "php": _r(r"(\$\w+)\s*(?:\.=|=)(?![=>])\s*(.+)"),
     "go": _r(r"^\s*(?:var\s+)?([\w\s,]+?)\s*(?::=|=)(?!=)\s*(.+)"),
+    "rust": _r(r"^\s*(?:let\s+(?:mut\s+)?)?([A-Za-z_]\w*)\s*(?::\s*[^=]+)?\s*=\s*(.+)"),
 }
 GO_BIND_RE = _r(r"\.(?:ShouldBind\w*|Bind\w*|Decode|Unmarshal)\s*\((?:[^,()]*,\s*)?&(\w+)")
 DYNAMIC_RES: dict[str, re.Pattern[str]] = {
@@ -287,6 +312,7 @@ DYNAMIC_RES: dict[str, re.Pattern[str]] = {
     "js": _r(r"`[^`]*\$\{|['\"`]\s*\+|\+\s*['\"`]|\.concat\s*\(|\butil\.format\s*\("),
     "php": _r(r"\"[^\"]*\$\w|\"[^\"]*\{\$|['\"]\s*\.\s*\$|\$\w+(?:\[[^\]]*\])?\s*\.\s*['\"]|\bsprintf\s*\(|\bimplode\s*\("),
     "go": _r(r"\bfmt\.Sprintf\s*\(|\"\s*\+|\+\s*\"|\bstrings\.Join\s*\("),
+    "rust": _r(r"\bformat!\s*\(|\"\s*\+|\+\s*\"|\.to_string\(\)|\.to_owned\(\)"),
 }
 
 
@@ -419,6 +445,7 @@ FIELD_RES: dict[str, tuple[re.Pattern[str], ...]] = {
         re.compile(r"(?:private|public|protected)\s+(?:readonly\s+)?\??([A-Za-z_\\][\w\\]*)\s+\$(\w+)"),
     ),
     "go": (re.compile(r"^\s*(\w+)\s+\*?\[?\]?\*?([A-Za-z_][\w.]*)\s*(?:`[^`]*`)?\s*$"),),
+    "rust": (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:\s*([A-Za-z_][\w:<>, ]*)"),),
 }
 
 
@@ -490,6 +517,16 @@ def _param_names(param: str, family: str) -> tuple[list[str], str]:
             return [], ""
         typ = parts[1] if len(parts) > 1 else ""
         return ([parts[0]] if re.match(r"^[A-Za-z_]\w*$", parts[0]) else []), typ.lstrip("*")
+    if family == "rust":
+        text = re.sub(r"^(?:mut|ref)\s+", "", text).strip()
+        if text in ("self", "&self", "&mut self", "mut self"):
+            return [], ""
+        ext_match = re.match(r"^(\w+)\s*\(\s*(?:mut\s+)?(\w+)\s*\)\s*:\s*(.+)$", text)
+        if ext_match:
+            return [ext_match.group(2)], ext_match.group(3).strip()
+        name, _, typ = text.partition(":")
+        name = re.sub(r"^(?:mut|ref)\s+", "", name).strip()
+        return ([name] if re.match(r"^[A-Za-z_]\w*$", name) else []), typ.strip()
     text = re.sub(r"^(?:this|params|ref|out|in|scoped)\s+", "", text)
     pieces = text.rsplit(None, 1)
     if len(pieces) == 2 and re.match(r"^[A-Za-z_]\w*$", pieces[1]):
@@ -690,7 +727,12 @@ def _field_types(pf: PgFile, cls: PgSymbol) -> dict[str, str]:
     elif family == "js":
         for match in pattern.finditer(body_code):
             types.setdefault(match.group(1), match.group(2))
-    else:
+    elif family == "rust":
+        for line in body_masked.split("\n"):
+            match = pattern.match(line)
+            if match:
+                types.setdefault(match.group(1), match.group(2).strip().rstrip(","))
+    elif family == "php":
         for match in pattern.finditer(body_code):
             types.setdefault("$" + match.group(2), match.group(1))
     for raw in cls.params:  # C# 12 primary constructors
@@ -792,6 +834,11 @@ def _names_from_lhs(lhs: str, family: str) -> list[str]:
         return [n for n in names if re.match(r"^[A-Za-z_$][\w$]*$", n)]
     if family == "go":
         return [n for n in (p.strip() for p in lhs.split(",")) if re.match(r"^[A-Za-z_]\w*$", n) and n != "_"]
+    if family == "rust":
+        lhs = re.sub(r"^(?:let\s+)?(?:mut\s+)?", "", lhs).strip()
+        if lhs.startswith("(") and lhs.endswith(")"):
+            return [n.strip() for n in lhs[1:-1].split(",") if re.match(r"^[A-Za-z_]\w*$", n.strip()) and n.strip() != "_"]
+        return [lhs] if re.match(r"^[A-Za-z_]\w*$", lhs) else []
     return [lhs.strip()] if re.match(r"^[A-Za-z_$][\w$]*$", lhs.strip()) else []
 
 

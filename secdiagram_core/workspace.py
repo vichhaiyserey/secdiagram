@@ -398,6 +398,29 @@ def _detect_role_from_go(repo_path: Path) -> tuple[str, float, list[str]]:
     return "unknown", 0.0, []
 
 
+def _detect_role_from_cargo(repo_path: Path) -> tuple[str, float, list[str]]:
+    """Detect role from Cargo.toml."""
+    cargo = repo_path / "Cargo.toml"
+    if not cargo.is_file():
+        return "unknown", 0.0, []
+
+    try:
+        text = cargo.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "unknown", 0.0, []
+
+    evidence: list[str] = []
+    text_lower = text.lower()
+
+    web_markers = ("axum", "actix-web", "rocket", "warp", "poem")
+    for marker in web_markers:
+        if marker in text_lower:
+            evidence.append(f"Rust web framework: {marker}")
+            return "backend", 0.85, evidence
+
+    return "unknown", 0.0, []
+
+
 def _detect_role_from_infra(repo_path: Path) -> tuple[str, float, list[str]]:
     """Detect infrastructure repos from Terraform, Helm, K8s manifests, Dockerfiles."""
     evidence: list[str] = []
@@ -497,6 +520,7 @@ def detect_repo_role(
         _detect_role_from_dotnet,
         _detect_role_from_java,
         _detect_role_from_go,
+        _detect_role_from_cargo,
         _detect_role_from_infra,
     ]
 
@@ -583,7 +607,7 @@ def _detect_inter_repo_edges(
         for rel_file in info.rel_files[:200]:  # Cap scanning to avoid huge repos
             suffix = rel_file.rsplit(".", 1)[-1].lower() if "." in rel_file else ""
             if suffix not in {
-                "py", "js", "ts", "jsx", "tsx", "java", "cs", "go",
+                "py", "js", "ts", "jsx", "tsx", "java", "cs", "go", "rs",
                 "yaml", "yml", "json", "toml", "env", "cfg", "conf",
                 "properties",
             }:

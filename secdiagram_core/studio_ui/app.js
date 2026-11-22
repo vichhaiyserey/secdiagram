@@ -314,6 +314,19 @@ function renderDashboard() {
   artifacts.replaceChildren();
   const names = ["diagram-highlevel.mmd", "diagram.mmd", "diagram-taint.mmd", "graph.json", "ARCHITECTURE.md", "THREAT_MODEL.md", "security.sarif", "vex.json", "report.html"];
   for (const name of names) artifacts.append(el("span", { class: "chip", text: name }));
+
+  const langList = $("#lang-list");
+  if (langList) {
+    langList.replaceChildren();
+    const langs = s && s.languages ? s.languages : {};
+    const entries = Object.entries(langs).sort((a, b) => b[1] - a[1]);
+    for (const [lang, count] of entries) {
+      langList.append(el("span", { class: "chip", text: `${lang} (${count})` }));
+    }
+    if (!entries.length) {
+      langList.append(el("span", { class: "muted", text: "No languages detected." }));
+    }
+  }
 }
 
 async function loadPipeline() {
