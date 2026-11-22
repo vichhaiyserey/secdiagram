@@ -30,9 +30,19 @@ const state = {
   overrides: { renames: {}, hidden: [], direction: null, theme: null },
   edits: { renames: {}, hidden: new Set() },
   nodes: [],
+  nodesLoaded: false,
+  nodeTotal: 0,
+  nodeLimit: 400,
+  nodeOffset: 0,
+  nodeQuery: "",
+  nodeAbort: null,
+  nodeTimer: null,
   filter: "",
   installer: null,
   renderUrl: null,
+  renderAbort: null,
+  diagramAbort: null,
+  sdlcDrafts: {},
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -150,7 +160,7 @@ function setView(name, options = {}) {
   if (name === "pipeline") loadPipeline();
 }
 
-async function loadCore() {
+async function loadCore(options = {}) {
   setBusy("#view-dashboard", true);
   setPanelStatus("dashboard-status", "Loading repository summary…");
   const results = await Promise.allSettled([
@@ -158,9 +168,8 @@ async function loadCore() {
     api("/api/v1/summary"),
     api("/api/v1/studio/sdlc"),
     api("/api/v1/studio/overrides"),
-    api("/api/v1/studio/nodes"),
   ]);
-  const [health, summary, sdlc, overrides, nodes] = results;
+  const [health, summary, sdlc, overrides] = results;
   const pill = $("#health");
   if (health.status === "fulfilled") {
     pill.textContent = `online · v${health.value.version}`;
@@ -192,19 +201,59 @@ async function loadCore() {
   }
   if (overrides.status === "fulfilled") {
     state.overrides = overrides.value.overrides || state.overrides;
-    syncEditsFromOverrides();
+    if (!options.preserveDrafts || !hasUnsavedDiagram()) syncEditsFromOverrides();
   } else {
     setPanelStatus("diagram-status", `Overrides unavailable: ${failureMessage(overrides)}`, true);
-  }
-  if (nodes.status === "fulfilled") {
-    state.nodes = nodes.value.nodes || [];
-  } else {
-    setPanelStatus("diagram-status", `Components unavailable: ${failureMessage(nodes)}`, true);
   }
   renderDashboard();
   renderPipeline();
   if (state.view === "diagram") loadDiagram();
   setBusy("#view-dashboard", false);
+}
+
+function canonicalRenames(renames) {
+  return JSON.stringify(Object.keys(renames || {}).sort().map((key) => [key, renames[key]]));
+}
+
+function hasUnsavedDiagram() {
+  const saved = state.overrides || {};
+  const savedHidden = JSON.stringify([...(saved.hidden || [])].sort());
+  const currentHidden = JSON.stringify([...state.edits.hidden].sort());
+  const direction = $("#direction") ? $("#direction").value || null : (saved.direction || null);
+  const theme = $("#theme") ? $("#theme").value || null : (saved.theme || null);
+  return canonicalRenames(state.edits.renames) !== canonicalRenames(saved.renames)
+    || currentHidden !== savedHidden
+    || direction !== (saved.direction || null)
+    || theme !== (saved.theme || null);
+}
+
+function hasUnsavedPhaseDrafts() {
+  return Object.values(state.sdlcDrafts).some((draft) =>
+    Boolean((draft && draft.evidence || "").trim() || (draft && draft.note || "").trim())
+  );
+}
+
+function confirmDiscardDiagram() {
+  return !hasUnsavedDiagram() || window.confirm("Discard the unsaved diagram edits?");
+}
+
+function invalidatePreview(message = "Diagram options changed. Render again to refresh the preview.") {
+  if (state.renderAbort) {
+    state.renderAbort.abort();
+    state.renderAbort = null;
+  }
+  if (state.renderUrl) {
+    URL.revokeObjectURL(state.renderUrl);
+    state.renderUrl = null;
+  }
+  const preview = $("#diagram-preview");
+  if (preview) preview.replaceChildren(el("div", { class: "placeholder", text: message }));
+  const button = $("#render-svg");
+  if (button) {
+    button.disabled = false;
+    button.textContent = "Render SVG";
+  }
+  setPanelStatus("diagram-status", message);
 }
 
 function syncEditsFromOverrides() {
@@ -308,19 +357,37 @@ function renderPipeline(focusPhase = null) {
   }
 
   for (const phase of state.sdlc.phases) {
+    const draft = state.sdlcDrafts[phase.phase] || {};
     const evidence = el("textarea", {
       class: "phase-evidence",
       "aria-label": `Evidence for ${phase.title}`,
       placeholder: "Evidence, e.g. graph.json or security.sarif",
       id: `evidence-${phase.phase}`,
+      oninput: (event) => {
+        const next = state.sdlcDrafts[phase.phase] || (state.sdlcDrafts[phase.phase] = {});
+        next.evidence = event.target.value;
+      },
     });
-    if (phase.note) evidence.value = phase.note;
+    evidence.value = draft.evidence || "";
+    const note = el("textarea", {
+      class: "phase-note",
+      "aria-label": `Note for ${phase.title}`,
+      placeholder: "Note or block reason",
+      id: `note-${phase.phase}`,
+      oninput: (event) => {
+        const next = state.sdlcDrafts[phase.phase] || (state.sdlcDrafts[phase.phase] = {});
+        next.note = event.target.value;
+      },
+    });
+    note.value = draft.note !== undefined ? draft.note : (phase.note || "");
     const actions = el("div", { class: "phase-actions" });
     const defs = [
       ["start", "Start", phase.status === "pending"],
       ["complete", "Complete", phase.status === "in_progress"],
       ["unblock", "Unblock", phase.status === "blocked"],
       ["block", "Block", phase.status !== "done" && phase.status !== "blocked"],
+      ["evidence", "Attach evidence", true],
+      ["note", "Save note", true],
       ["reset", "Reset", phase.status !== "pending"],
     ];
     for (const [action, label, shown] of defs) {
@@ -351,7 +418,8 @@ function renderPipeline(focusPhase = null) {
         el("p", { text: phase.description }),
         el("div", { class: "evidence", text: expected || "No expected artifacts." }),
         el("div", { class: "evidence", text: (phase.evidence || []).join("\n") || "No evidence recorded." }),
-        evidence,
+        el("label", { class: "field" }, el("span", { text: "Evidence" }), evidence),
+        el("label", { class: "field" }, el("span", { text: "Note" }), note),
         actions
       )
     );
@@ -363,20 +431,51 @@ function renderPipeline(focusPhase = null) {
 }
 
 async function phaseAction(action, phase) {
+  const evidenceInput = document.getElementById(`evidence-${phase}`);
+  const noteInput = document.getElementById(`note-${phase}`);
+  const evidence = evidenceInput ? evidenceInput.value.trim() : "";
+  const note = noteInput ? noteInput.value.trim() : "";
+  if (action === "block" && !note) {
+    setPanelStatus("pipeline-status", "A block action requires a note/reason.", true);
+    toast("Enter a block reason in the note field", true);
+    if (noteInput) noteInput.focus();
+    return;
+  }
+  if (action === "note" && !note) {
+    setPanelStatus("pipeline-status", "A note cannot be empty.", true);
+    toast("Enter a note first", true);
+    if (noteInput) noteInput.focus();
+    return;
+  }
+  if (action === "evidence" && !evidence) {
+    setPanelStatus("pipeline-status", "Evidence cannot be empty.", true);
+    toast("Enter evidence first", true);
+    if (evidenceInput) evidenceInput.focus();
+    return;
+  }
   const card = document.getElementById(`phase-${phase}`);
   if (card) {
     setBusy(card, true);
     $$("button", card).forEach((button) => { button.disabled = true; });
   }
-  const input = document.getElementById(`evidence-${phase}`);
-  const note = input ? input.value.trim() : "";
   setPanelStatus("pipeline-status", `${PHASE_TITLES[phase] || phase}: ${action} in progress…`);
   try {
     const payload = { action, phase };
-    if (action === "block") payload.note = note || "Blocked from Studio";
-    else if (note) payload.evidence = note;
+    if (action === "block") {
+      payload.note = note;
+    } else if (action === "complete") {
+      if (evidence) payload.evidence = evidence;
+      if (note) payload.note = note;
+    } else if (action === "note") {
+      payload.note = note;
+    } else if (action === "evidence") {
+      payload.evidence = evidence;
+    }
     const result = await api("/api/v1/studio/sdlc", { method: "POST", body: payload });
     state.sdlc = result.state;
+    if (["block", "complete", "evidence", "note", "reset"].includes(action)) {
+      delete state.sdlcDrafts[phase];
+    }
     renderPipeline(phase);
     renderDashboard();
     setPanelStatus("pipeline-status", `${PHASE_TITLES[phase] || phase}: ${action} completed.`);
@@ -428,42 +527,82 @@ function diagramParams() {
   return params.toString();
 }
 
+async function loadNodes(options = {}) {
+  if (!options.force && state.nodesLoaded) return null;
+  if (state.nodeAbort) state.nodeAbort.abort();
+  const controller = new AbortController();
+  state.nodeAbort = controller;
+  const params = new URLSearchParams({
+    limit: String(state.nodeLimit),
+    offset: String(state.nodeOffset),
+  });
+  if (state.nodeQuery) params.set("q", state.nodeQuery);
+  try {
+    const result = await api(`/api/v1/studio/nodes?${params}`, { signal: controller.signal });
+    if (state.nodeAbort !== controller) return null;
+    state.nodes = result.nodes || [];
+    state.nodeTotal = Number.isFinite(result.total) ? result.total : state.nodes.length;
+    state.nodesLoaded = true;
+    renderNodeList();
+    return null;
+  } catch (error) {
+    if (state.nodeAbort !== controller || error.name === "AbortError") return null;
+    state.nodes = [];
+    state.nodeTotal = 0;
+    state.nodesLoaded = false;
+    renderNodeList();
+    return error;
+  } finally {
+    if (state.nodeAbort === controller) state.nodeAbort = null;
+  }
+}
+
 async function loadDiagram() {
   setBusy("#view-diagram", true);
   setPanelStatus("diagram-status", "Loading diagram…");
-  let nodeError = null;
-  if (!state.nodes.length || !state.summary) {
-    try {
-      const result = await api("/api/v1/studio/nodes");
-      state.nodes = result.nodes || [];
-    } catch (error) {
-      nodeError = error;
+  if (state.diagramAbort) state.diagramAbort.abort();
+  const controller = new AbortController();
+  state.diagramAbort = controller;
+  try {
+    const [nodeError, sourceResult] = await Promise.all([
+      loadNodes(),
+      api(`/api/v1/studio/diagram?${diagramParams()}`, { signal: controller.signal })
+        .then((source) => ({ source }))
+        .catch((error) => ({ error })),
+    ]);
+    if (state.diagramAbort !== controller) return;
+    if (sourceResult.error) {
+      const message = sourceResult.error.name === "AbortError" ? "request cancelled" : sourceResult.error.message;
+      $("#mermaid-source").textContent = `Could not load diagram: ${message}`;
+      setPanelStatus("diagram-status", `Could not load diagram: ${message}`, true);
+    } else {
+      $("#mermaid-source").textContent = sourceResult.source;
+      if (nodeError) setPanelStatus("diagram-status", `Components unavailable: ${nodeError.message}`, true);
+      else setPanelStatus("diagram-status", "Diagram source ready.");
+    }
+    renderOverridesMeta();
+  } finally {
+    if (state.diagramAbort === controller) {
+      state.diagramAbort = null;
+      setBusy("#view-diagram", false);
     }
   }
-  renderNodeList();
-  try {
-    const source = await api(`/api/v1/studio/diagram?${diagramParams()}`);
-    $("#mermaid-source").textContent = source;
-    if (nodeError) setPanelStatus("diagram-status", `Components unavailable: ${nodeError.message}`, true);
-    else setPanelStatus("diagram-status", "Diagram source ready.");
-  } catch (error) {
-    $("#mermaid-source").textContent = `Could not load diagram: ${error.message}`;
-    setPanelStatus("diagram-status", `Could not load diagram: ${error.message}`, true);
-  }
-  renderOverridesMeta();
-  setBusy("#view-diagram", false);
 }
 
 async function renderSvg() {
   const button = $("#render-svg");
   const preview = $("#diagram-preview");
   const label = DETAIL_LABELS[state.detail] || state.detail;
+  if (state.renderAbort) state.renderAbort.abort();
+  const controller = new AbortController();
+  state.renderAbort = controller;
   button.disabled = true;
   button.textContent = "Rendering…";
   setBusy(preview, true);
   setPanelStatus("diagram-status", `Rendering ${label} diagram…`);
   try {
-    const response = await fetch(`/api/v1/studio/render?${diagramParams()}`);
+    const response = await fetch(`/api/v1/studio/render?${diagramParams()}`, { signal: controller.signal });
+    if (state.renderAbort !== controller) return;
     if (!response.ok) {
       let message = `Render failed (${response.status})`;
       try {
@@ -473,6 +612,7 @@ async function renderSvg() {
       throw new Error(message);
     }
     const svg = await response.text();
+    if (state.renderAbort !== controller) return;
     const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
     if (state.renderUrl) URL.revokeObjectURL(state.renderUrl);
     state.renderUrl = url;
@@ -480,6 +620,7 @@ async function renderSvg() {
     setPanelStatus("diagram-status", `Rendered ${label} diagram locally.`);
     toast("Rendered locally with Mermaid CLI");
   } catch (error) {
+    if (state.renderAbort !== controller || error.name === "AbortError") return;
     preview.replaceChildren(
       el("div", { class: "placeholder" },
         el("div", { text: "Local SVG rendering is unavailable." }),
@@ -490,9 +631,12 @@ async function renderSvg() {
     setPanelStatus("diagram-status", error.message, true);
     toast(error.message, true);
   } finally {
-    setBusy(preview, false);
-    button.disabled = false;
-    button.textContent = "Render SVG";
+    if (state.renderAbort === controller) {
+      state.renderAbort = null;
+      setBusy(preview, false);
+      button.disabled = false;
+      button.textContent = "Render SVG";
+    }
   }
 }
 
@@ -500,10 +644,16 @@ function renderNodeList() {
   const list = $("#node-list");
   if (!list) return;
   list.replaceChildren();
+  const counter = $("#node-count");
+  if (counter) {
+    const loaded = state.nodes.length;
+    counter.textContent = state.nodeTotal > loaded
+      ? `Showing ${loaded} of ${state.nodeTotal} components. Refine the filter to narrow results.`
+      : `${state.nodeTotal} component${state.nodeTotal === 1 ? "" : "s"}.`;
+  }
   const filter = state.filter.toLowerCase();
   const nodes = state.nodes
-    .filter((node) => !filter || `${node.name} ${node.kind} ${node.path || ""}`.toLowerCase().includes(filter))
-    .slice(0, 400);
+    .filter((node) => !filter || `${node.name} ${node.kind} ${node.path || ""}`.toLowerCase().includes(filter));
   if (!nodes.length) {
     list.append(el("p", { class: "muted", text: state.nodes.length ? "No matching nodes." : "No components available." }));
     return;
@@ -554,7 +704,14 @@ function renderOverridesMeta() {
   const bits = [];
   if (countR) bits.push(`${countR} rename${countR === 1 ? "" : "s"}`);
   if (countH) bits.push(`${countH} hidden`);
-  $("#override-meta").textContent = bits.length ? `Unsaved: ${bits.join(", ")}` : "No unsaved edits";
+  const saved = state.overrides || {};
+  const direction = $("#direction") ? $("#direction").value || null : (saved.direction || null);
+  const theme = $("#theme") ? $("#theme").value || null : (saved.theme || null);
+  if (direction !== (saved.direction || null)) bits.push("direction");
+  if (theme !== (saved.theme || null)) bits.push("theme");
+  $("#override-meta").textContent = hasUnsavedDiagram()
+    ? `Unsaved: ${bits.length ? bits.join(", ") : "edits"}`
+    : "No unsaved edits";
 }
 
 async function saveOverrides() {
@@ -576,6 +733,7 @@ async function saveOverrides() {
     state.overrides = result.overrides;
     syncEditsFromOverrides();
     renderOverridesMeta();
+    invalidatePreview("Diagram overrides saved. Render again to refresh the preview.");
     await loadDiagram();
     toast("Diagram overrides saved");
   } catch (error) {
@@ -589,6 +747,7 @@ async function saveOverrides() {
 }
 
 async function resetOverrides() {
+  if (!confirmDiscardDiagram()) return;
   const card = $("#view-diagram .card");
   const saveButton = $("#save-overrides");
   const resetButton = $("#reset-overrides");
@@ -602,6 +761,7 @@ async function resetOverrides() {
     syncEditsFromOverrides();
     renderNodeList();
     renderOverridesMeta();
+    invalidatePreview("Diagram overrides reset. Render again to refresh the preview.");
     await loadDiagram();
     toast("Diagram overrides reset");
   } catch (error) {
@@ -657,21 +817,22 @@ async function loadInstaller() {
       api("/api/v1/studio/status"),
       api("/api/v1/studio/skill").catch(() => null),
     ]);
-    state.installer = status;
+    const installer = status.installer || {};
+    state.installer = installer;
     const pill = $("#installer-pill");
-    pill.textContent = status.installed ? (status.healthy ? "healthy" : "needs attention") : "not installed";
-    pill.className = `pill ${status.installed && status.healthy ? "ok" : status.installed ? "bad" : ""}`;
+    pill.textContent = installer.installed ? (installer.healthy ? "healthy" : "needs attention") : "not installed";
+    pill.className = `pill ${installer.installed && installer.healthy ? "ok" : installer.installed ? "bad" : ""}`;
     const kv = $("#installer-kv");
     kv.replaceChildren();
     const rows = [
-      ["Installed", status.installed ? "yes" : "no"],
-      ["Home", status.home],
-      ["Version", `${status.version} (current ${status.current_version})`],
-      ["Profile", status.profile || "-"],
-      ["Project root", status.project_root || "-"],
-      ["Virtualenv", status.venv_present ? "present" : "not created"],
-      ["Skill", status.skill_installed ? status.skill_path : "not installed"],
-      ["Launcher", status.launcher_present ? "present" : "not installed"],
+      ["Installed", installer.installed ? "yes" : "no"],
+      ["Home", installer.home],
+      ["Version", `${installer.version} (current ${installer.current_version})`],
+      ["Profile", installer.profile || "-"],
+      ["Project root", installer.project_root || "-"],
+      ["Virtualenv", installer.venv_present ? "present" : "not created"],
+      ["Skill", installer.skill_installed ? installer.skill_path : "not installed"],
+      ["Launcher", installer.launcher_present ? "present" : "not installed"],
     ];
     for (const [key, value] of rows) {
       kv.append(el("dt", { text: key }), el("dd", { text: String(value) }));
@@ -684,10 +845,10 @@ async function loadInstaller() {
     }
     setPanelStatus(
       "installer-status",
-      status.installed
-        ? (status.healthy ? "Studio install is healthy." : "Studio install needs attention.")
+      installer.installed
+        ? (installer.healthy ? "Studio install is healthy." : "Studio install needs attention.")
         : "Studio is not installed. Run the CLI install command below.",
-      status.installed && !status.healthy,
+      installer.installed && !installer.healthy,
     );
   } catch (error) {
     $("#installer-pill").textContent = "unavailable";
@@ -700,6 +861,10 @@ async function loadInstaller() {
 }
 
 async function rescan() {
+  if ((hasUnsavedDiagram() || hasUnsavedPhaseDrafts())
+      && !window.confirm("Rescan the repository? Unsaved diagram and phase drafts stay in this browser.")) {
+    return;
+  }
   const button = $("#rescan");
   button.disabled = true;
   button.textContent = "Scanning…";
@@ -707,7 +872,11 @@ async function rescan() {
   setPanelStatus("dashboard-status", "Scanning repository…");
   try {
     await api("/api/v1/scan", { method: "POST", body: {} });
-    await loadCore();
+    state.nodes = [];
+    state.nodesLoaded = false;
+    state.nodeTotal = 0;
+    invalidatePreview("Repository rescanned. Render again to refresh the preview.");
+    await loadCore({ preserveDrafts: true });
     toast("Repository rescanned");
   } catch (error) {
     setPanelStatus("dashboard-status", error.message, true);
@@ -749,6 +918,7 @@ function bindEvents() {
         item.classList.toggle("active", selected);
         item.setAttribute("aria-pressed", selected ? "true" : "false");
       });
+      invalidatePreview();
       loadDiagram();
     });
   });
@@ -765,10 +935,21 @@ function bindEvents() {
   $("#reset-overrides").addEventListener("click", resetOverrides);
   $("#node-filter").addEventListener("input", (event) => {
     state.filter = event.target.value;
+    state.nodeQuery = event.target.value.trim();
     renderNodeList();
+    window.clearTimeout(state.nodeTimer);
+    state.nodeTimer = window.setTimeout(() => loadNodes({ force: true }), 250);
   });
-  $("#direction").addEventListener("change", () => { renderOverridesMeta(); if (state.view === "diagram") loadDiagram(); });
-  $("#theme").addEventListener("change", () => { renderOverridesMeta(); if (state.view === "diagram") loadDiagram(); });
+  $("#direction").addEventListener("change", () => {
+    renderOverridesMeta();
+    invalidatePreview();
+    if (state.view === "diagram") loadDiagram();
+  });
+  $("#theme").addEventListener("change", () => {
+    renderOverridesMeta();
+    invalidatePreview();
+    if (state.view === "diagram") loadDiagram();
+  });
 
   $("#handoff-preview").addEventListener("click", () => previewHandoff(false));
   $("#handoff-write").addEventListener("click", () => previewHandoff(true));
@@ -788,8 +969,12 @@ function bindEvents() {
   }));
 }
 
-window.addEventListener("beforeunload", () => {
+window.addEventListener("beforeunload", (event) => {
   if (state.renderUrl) URL.revokeObjectURL(state.renderUrl);
+  if (hasUnsavedDiagram() || hasUnsavedPhaseDrafts()) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
 });
 
 document.addEventListener("DOMContentLoaded", async () => {

@@ -79,7 +79,8 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-# Standard security headers applied to all HTTP responses
+# Standard security headers applied to all HTTP responses.  The inline script
+# and Mermaid CDN allowances are required by the classic standalone HTML report.
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; "
@@ -93,6 +94,21 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "geolocation=(), camera=(), microphone=()",
     "Cache-Control": "no-store, no-cache, must-revalidate",
+}
+
+# The Studio has no inline scripts or CDN assets.  Its SVG preview uses a
+# same-origin blob URL, which must be explicitly allowed by CSP.
+STUDIO_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self'; "
+        "base-uri 'none'; "
+        "object-src 'none'; "
+        "frame-ancestors 'none';"
+    ),
 }
 
 
@@ -421,8 +437,10 @@ class PlatformState:
             theme=chosen_theme,
         )
 
-    def rescan(self) -> AnalysisResult:
+    def rescan(self, *, force: bool = True) -> AnalysisResult:
         with self.lock:
+            if not force and self.last_analysis is not None:
+                return self.last_analysis
             ana_cfg = self.config.analysis
             result = run_analysis(
                 AnalysisConfig(
@@ -445,9 +463,12 @@ class PlatformState:
             return result
 
     def get_analysis(self) -> AnalysisResult:
-        if self.last_analysis is None:
-            return self.rescan()
-        return self.last_analysis
+        with self.lock:
+            if self.last_analysis is not None:
+                return self.last_analysis
+        # Re-check under the lock inside rescan so concurrent first requests run
+        # the analysis exactly once.
+        return self.rescan(force=False)
 
     def get_html_report(self) -> str:
         with self.lock:
@@ -500,8 +521,9 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
     def platform_server(self) -> PlatformHTTPServer:
         return cast(PlatformHTTPServer, self.server)
 
-    def send_security_headers(self) -> None:
-        for header, value in SECURITY_HEADERS.items():
+    def send_security_headers(self, overrides: Mapping[str, str] | None = None) -> None:
+        headers = SECURITY_HEADERS if overrides is None else {**SECURITY_HEADERS, **overrides}
+        for header, value in headers.items():
             self.send_header(header, value)
 
     def _send_json(
@@ -521,12 +543,19 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _send_text(self, status_code: int, content: str, content_type: str = "text/plain; charset=utf-8") -> None:
+    def _send_text(
+        self,
+        status_code: int,
+        content: str,
+        content_type: str = "text/plain; charset=utf-8",
+        *,
+        security_headers: Mapping[str, str] | None = None,
+    ) -> None:
         payload = content.encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_security_headers()
+        self.send_security_headers(security_headers)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -687,7 +716,12 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         # 2. Studio single-page app and static assets
         if path in {"/studio", "/studio/index.html"}:
             try:
-                self._send_text(200, studio_ui.render_studio_html(), "text/html; charset=utf-8")
+                self._send_text(
+                    200,
+                    studio_ui.render_studio_html(),
+                    "text/html; charset=utf-8",
+                    security_headers=STUDIO_SECURITY_HEADERS,
+                )
             except studio_ui.StudioAssetError:
                 self._send_json(500, {"error": "InternalServerError", "message": "Studio UI assets are missing."})
             return
@@ -698,7 +732,12 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             except studio_ui.StudioAssetError:
                 self._send_json(404, {"error": "NotFound", "message": f"Studio asset '{name}' does not exist."})
                 return
-            self._send_text(200, content, content_type)
+            self._send_text(
+                200,
+                content,
+                content_type,
+                security_headers=STUDIO_SECURITY_HEADERS,
+            )
             return
 
         # 3. REST API v1
@@ -837,9 +876,37 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/v1/studio/nodes":
-            graph = state.get_edited_graph()
-            nodes = [
-                {
+            # Return the unedited graph so hidden nodes remain editable in the
+            # Studio; overrides are applied when rendering the diagram.
+            try:
+                limit = int(query.get("limit", ["400"])[0])
+            except ValueError:
+                limit = 400
+            try:
+                offset = int(query.get("offset", ["0"])[0])
+            except ValueError:
+                offset = 0
+            limit = max(1, min(limit, 1000))
+            offset = max(0, offset)
+            needle = (query.get("q", [""])[0] or "").strip().lower()[:200]
+            graph = state.get_analysis().graph
+            nodes: list[dict[str, Any]] = []
+            for node in sorted(
+                graph.nodes.values(),
+                key=lambda item: (
+                    item.feature or "",
+                    item.kind,
+                    item.qualname,
+                    item.path or "",
+                    item.id,
+                ),
+            ):
+                haystack = " ".join(
+                    part for part in (node.id, node.name, node.kind, node.qualname, node.path, node.feature) if part
+                ).lower()
+                if needle and needle not in haystack:
+                    continue
+                nodes.append({
                     "id": node.id,
                     "name": node.name,
                     "kind": node.kind,
@@ -847,19 +914,16 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                     "path": node.path,
                     "line": node.line,
                     "feature": node.feature,
-                }
-                for node in sorted(
-                    graph.nodes.values(),
-                    key=lambda item: (
-                        item.feature or "",
-                        item.kind,
-                        item.qualname,
-                        item.path or "",
-                        item.id,
-                    ),
-                )
-            ]
-            self._send_json(200, {"total": len(nodes), "nodes": nodes})
+                })
+            total = len(nodes)
+            page = nodes[offset: offset + limit]
+            self._send_json(200, {
+                "total": total,
+                "returned": len(page),
+                "limit": limit,
+                "offset": offset,
+                "nodes": page,
+            })
             return
 
         if path == "/api/v1/studio/diagram":

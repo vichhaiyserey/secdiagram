@@ -33,6 +33,7 @@ secdiagram serve --dir . --host 0.0.0.0 --user analyst --password 'change-me'
 - **Structured JSON Audit Logging**: Security events (auth failures, scan requests, rejected paths, rate limits, SARIF downloads, server lifecycle) are emitted to stderr or `--audit-log FILE` as structured JSON Lines (`audit.jsonl`).
 - **Same-Origin State Changes**: Studio POSTs reject cross-origin `Origin` values with `403 Forbidden`.
 - **Bounded Studio State**: Diagram overrides are schema-validated, capped at 1 MiB and 5,000 entries, and persisted atomically under `.secdiagram/studio/`.
+- **Strict Studio CSP**: `/studio` and its assets use `script-src 'self'` with no CDN or inline-script allowance, and `img-src 'self' data: blob:` for local SVG previews. The classic report retains its broader inline/CDN policy.
 - **Installer Isolation**: The HTTP API exposes installer status only; all installer writes remain CLI-only.
 - **LLM Endpoint Allowlist**: Studio AI requests accept loopback/private addresses and OpenAI hosts; link-local metadata endpoints such as `169.254.169.254` are rejected.
 
@@ -79,9 +80,9 @@ All endpoints require Basic Authentication unless the server was explicitly star
 | `GET` | `/api/v1/diagram` | Mermaid diagram. `?detail=architecture` (default, taint paths highlighted), `?detail=high-level` (C4 tiers) or `?detail=taint` (attack-path diagram) |
 | `POST` | `/api/v1/scan` | Trigger a new scan. Body accepts JSON options (`{"dir": "...", "security": true}`). Disabled when `read_only: true`. |
 | `GET` | `/studio` | Agentic Studio single-page app (offline assets only). |
-| `GET` | `/api/v1/studio/status` | Read-only installer, SDLC, overrides, and capability status. |
+| `GET` | `/api/v1/studio/status` | Read-only installer (`installer`, including `source_checkout`), SDLC, overrides, and capability status. |
 | `GET` | `/api/v1/studio/sdlc` | Deterministic SDLC phase state and progress. |
-| `GET` | `/api/v1/studio/nodes` | Bounded, sorted node list for the diagram editor. |
+| `GET` | `/api/v1/studio/nodes` | Sorted node page for the editor. Supports `limit` (default 400, max 1000), `offset`, and `q`; returns `total`, `returned`, `limit`, and `offset`. |
 | `GET` | `/api/v1/studio/diagram` | Mermaid from the edited graph (`detail`, `direction`, `theme`). |
 | `GET` | `/api/v1/studio/render` | Local `mmdc` SVG/PNG render; returns `503` when unavailable. |
 | `GET` | `/api/v1/studio/handoff` | Preview the stable Markdown handoff. |
