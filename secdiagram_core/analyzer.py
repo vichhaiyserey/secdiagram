@@ -59,7 +59,7 @@ LANGUAGE_BY_SUFFIX = {
     ".swift": "swift",
 }
 
-SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "typescript")
+SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "rust", "typescript")
 
 
 @dataclass(slots=True)

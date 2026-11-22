@@ -782,10 +782,10 @@ def _scan_java(
     return subsystems, connections
 
 
-_POLYGLOT_LANGUAGES = frozenset({"csharp", "javascript", "typescript", "php", "go"})
+_POLYGLOT_LANGUAGES = frozenset({"csharp", "javascript", "typescript", "php", "go", "rust"})
 _NON_PYTHON_SUFFIXES = (
     ".java", ".properties", ".xml", ".gradle", ".kts", ".cs", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx",
-    ".mts", ".cts", ".php", ".go",
+    ".mts", ".cts", ".php", ".go", ".rs",
 )
 
 
@@ -1112,6 +1112,58 @@ def _scan_go(
     return subsystems, connections
 
 
+_CARGO_NAME_RE = re.compile(r"^\s*name\s*=\s*['\"]([^'\"]+)['\"]", re.M)
+_CARGO_DEP_RE = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=\s*", re.M)
+
+
+def _scan_rust(
+    root: Path, existing_subsystems: list[Subsystem], graph: Graph | None
+) -> tuple[list[Subsystem], list[SubsystemConnection]]:
+    """Rust subsystems from Cargo.toml (axum, actix-web, rocket, warp, poem)."""
+    subsystems: list[Subsystem] = []
+    connections: list[SubsystemConnection] = []
+    for manifest in _walk_manifests(root, "Cargo.toml"):
+        text = _safe_read(root, manifest)
+        if text is None:
+            continue
+        pkg_match = _CARGO_NAME_RE.search(text)
+        name = pkg_match.group(1) if pkg_match else manifest.parent.name
+        deps = set(_CARGO_DEP_RE.findall(text))
+        for db_marker in ("postgres", "mysql", "sqlite", "mongo", "redis", "kafka", "rabbitmq"):
+            if db_marker in text.lower():
+                deps.add(db_marker)
+        frameworks = [
+            label
+            for marker, label in (
+                ("axum", "Axum"),
+                ("actix-web", "Actix-web"),
+                ("rocket", "Rocket"),
+                ("warp", "Warp"),
+                ("poem", "Poem"),
+                ("tokio", "Tokio"),
+                ("sqlx", "SQLx"),
+                ("diesel", "Diesel"),
+            )
+            if marker in deps
+        ]
+        rel_dir = str(manifest.parent.relative_to(root)).replace("\\", "/")
+        endpoints = _graph_endpoint_count(graph, "rust", rel_dir)
+        sub_id = _clean_id(f"rust_{name}")
+        subsystems.append(
+            Subsystem(
+                id=sub_id,
+                name=name,
+                tier="gateway" if endpoints or any(f in frameworks for f in ("Axum", "Actix-web", "Rocket", "Warp", "Poem")) else "services",
+                kind="api" if endpoints or any(f in frameworks for f in ("Axum", "Actix-web", "Rocket", "Warp", "Poem")) else "service",
+                technology=" • ".join([f"Rust {frameworks[0]}" if frameworks else "Rust"] + frameworks[1:]),
+                details=[f"{endpoints} Routes"] if endpoints else [],
+                path=str(manifest.relative_to(root)).replace("\\", "/"),
+            )
+        )
+        _wire_data_stores(sub_id, sorted(deps), existing_subsystems, connections)
+    return subsystems, connections
+
+
 def _annotate_risk(subsystems: list[Subsystem], graph: Graph) -> None:
     """Badge subsystems with the P0/P1 findings located under their project directory."""
     counted: list[tuple[str, dict[str, int]]] = []
@@ -1188,8 +1240,8 @@ def build_high_level_architecture(root: Path, graph: Graph | None = None) -> Hig
         for s in java_subs:
             frameworks.add(s.technology)
 
-    # 4b. Inspect PHP (composer.json) and Go (go.mod) projects
-    for label, scanner in (("PHP", _scan_php), ("Go", _scan_go)):
+    # 4b. Inspect PHP (composer.json), Go (go.mod), and Rust (Cargo.toml) projects
+    for label, scanner in (("PHP", _scan_php), ("Go", _scan_go), ("Rust", _scan_rust)):
         poly_subs, poly_conns = scanner(root, all_subsystems, graph)
         if poly_subs:
             languages.add(label)
