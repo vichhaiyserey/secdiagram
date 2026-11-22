@@ -53,7 +53,7 @@ We are committed to providing a friendly, safe, and welcoming environment for al
 
 ### Prerequisites
 
-- **Python**: Version **3.10** or higher (tested on 3.10, 3.11, 3.12, 3.13, and 3.14).
+- **Python**: Version **3.10** or higher (tested on 3.10, 3.11, 3.12, 3.13, 3.14, and 3.15).
 - **Git**: Installed and configured.
 - *(Optional)* **Docker**: For testing containerized execution and local Ollama reviews.
 - *(Optional)* **Node.js & Mermaid CLI (`@mermaid-js/mermaid-cli`)**: For testing local offline PNG/SVG/PDF image rendering.

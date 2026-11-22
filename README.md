@@ -4,7 +4,7 @@
 
 ### *Small but Gold* — Deterministic Architecture Diagrams, Polyglot System Mapping, and Security Intelligence.
 
-[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14%20%7C%203.15-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-success.svg?style=flat-square)](pyproject.toml)
 [![Tests](https://github.com/vichhaiyserey/secdiagram/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/vichhaiyserey/secdiagram/actions/workflows/ci.yml?query=branch%3Adevelop)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=flat-square&logo=docker&logoColor=white)](Dockerfile)

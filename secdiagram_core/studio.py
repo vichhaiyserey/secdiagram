@@ -373,7 +373,7 @@ def _create_venv(venv_dir: Path, python: str | None = None) -> None:
     executable = python or sys.executable
     try:
         completed = subprocess.run(
-            [executable, "-m", "venv", str(venv_dir)],
+            [executable, "-m", "venv", "--without-pip", str(venv_dir)],
             check=False,
             capture_output=True,
             text=True,

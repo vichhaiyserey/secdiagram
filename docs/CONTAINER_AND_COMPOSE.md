@@ -1,6 +1,13 @@
 # 🐳 Container & Docker Compose Guide
 
-`secdiagram` provides an enterprise-ready, hardened multi-stage container image built on digest-pinned Alpine base images (`python:3.12-alpine` and `node:24-alpine`), refreshed with `apk upgrade` at build time. It executes securely as an unprivileged non-root user (`secdiagram`, `uid=10001`, `gid=10001`) with dropped Linux capabilities and comes pre-bundled with `@mermaid-js/mermaid-cli` and Chromium for **100% offline diagram image rendering**.
+`secdiagram` provides a hardened multi-stage container image built on digest-pinned Alpine base images (`python:3.15.2-alpine3.24` and `node:24-alpine`), refreshed with `apk upgrade` at build time. It runs as an unprivileged non-root user (`secdiagram`, `uid=10001`, `gid=10001`) and includes `@mermaid-js/mermaid-cli` and Chromium for **offline diagram image rendering**. Operators can use `--cap-drop=ALL` to remove Docker's default capabilities.
+
+Pip is used only while building the image. The final runtime removes pip and
+ensurepip's archived bootstrap wheel, including their vendored packages. Studio
+still creates a private standard-library environment with `venv --without-pip`;
+its installer and generated launcher are exercised with networking disabled in
+both Docker verification and release gates. To install additional Python tools,
+use a separate developer environment or build stage.
 
 > [!NOTE]
 > The runtime is musl/Alpine based and ships a pure-Python application (zero runtime dependencies), so no glibc wheels are needed. A Trivy scan of the current image reports **0 CRITICAL/HIGH** findings; see [IMAGE_SECURITY_BASELINE.md](IMAGE_SECURITY_BASELINE.md).

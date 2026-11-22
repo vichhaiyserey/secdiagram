@@ -84,6 +84,6 @@ construct inside an indexed file.
 `tests/test_rust.py` checks exact route ownership, source locations, complete
 fixture findings, safe counterparts, tokenizer recovery, bounded hostile input,
 Cargo evidence and deterministic graphs. The full suite runs on Windows and
-Ubuntu with Python 3.10–3.14. Offline container verification exercises actual
+Ubuntu with Python 3.10–3.15. Offline container verification exercises actual
 Mermaid/PNG rendering as UID 10001 with networking disabled. See
 [test validation](TEST_VALIDATION.md) for broader contracts and coverage limits.

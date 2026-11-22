@@ -142,6 +142,8 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
       - name: Smoke test CLI
         run: docker run --rm ${{ env.IMAGE_NAME }}:${{ github.ref_name }} --help
+      - name: Verify minimal offline Studio runtime
+        run: docker run --rm --network none --entrypoint python ${{ env.IMAGE_NAME }}:${{ github.ref_name }} /app/scripts/verify_container_runtime.py
       - name: Verify containerized diagram generation
         run: |
           docker run --rm -v "${{ github.workspace }}:/repo" ${{ env.IMAGE_NAME }}:${{ github.ref_name }} --dir /repo/tests/fixtures/sample_app --out /tmp/verify-out --format mermaid --image png --no-security

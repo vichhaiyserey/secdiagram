@@ -1637,3 +1637,7 @@ def main(argv: list[str] | None = None) -> int:
     summary.update({"exit_code": code, "status": "ok" if code == 0 else "failed"})
     print(json.dumps(summary, sort_keys=True))
     return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

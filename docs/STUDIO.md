@@ -33,6 +33,12 @@ home and records every managed file with its size and SHA-256 in `manifest.json`
 edits the analyzed repository. Uninstall skips paths that escape the home directory or that
 were not recorded in the manifest.
 
+Private environments use `venv --without-pip`: Studio and the generated launchers
+need only Python's standard library and the existing secdiagram package. Creating
+the environment does not bootstrap package managers or download dependencies.
+This also works in the minimal container, which removes build-only pip and
+ensurepip after installation.
+
 Installed layout:
 
 ```text

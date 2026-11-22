@@ -4,23 +4,45 @@ This document records the contextual reachability and exploitability analysis
 required by Rule 7 of `AGENTS.md` for the `vserey/secdiagram` image. It is
 reviewed on every release and superseded whenever a newer scan is published.
 
-## Release under review
+## Integration candidate under review
 
 | Field | Value |
 | --- | --- |
-| Package version | `0.4.0` (Agentic Studio and accessibility release) |
-| Base images | `python:3.12-alpine@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89`, `node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5` |
+| Package version | `0.4.0` on `develop`; Python 3.15 integration, not a published release |
+| Base images | `python:3.15.2-alpine3.24@sha256:0f9552bb28711333da16915ec146f5e6bb44a7fdac9ced15dc17c2e0206346dd`, `node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5` |
 | Runtime user | `secdiagram` (`uid 10001`, `gid 10001`), non-root |
 | Default command | `secdiagram --dir .` (one-shot CLI) |
-| Scan command | `trivy image --severity CRITICAL,HIGH --scanners vuln,secret secdiagram:alpine` |
-| Scan date | 2026-11-20 (Trivy 0.76.0, DB 2026-11-19) |
+| Scan command | `trivy image --severity CRITICAL,HIGH --scanners vuln,secret --exit-code 1 secdiagram:verify-python90` |
+| Scan date | 2026-11-22 (Trivy 0.76.0; current database at verification) |
 
 ## Result summary
 
 - **CRITICAL/HIGH findings: 0** (fixable: 0, unfixed: 0).
 - `.trivyignore.yaml` therefore contains **no exceptions** (`vulnerabilities: []`).
   The image passes the blocking Trivy gate with an empty baseline.
-- Image size: 1.88 GB (`v0.3.3`: 2.01 GB; previous Debian base: 2.11 GB).
+- Runtime pip, ensurepip and setuptools: absent. Offline Studio private-environment
+  creation and the generated launcher are verified in the candidate image.
+
+### Python 3.15 bootstrap-tool remediation (#90 / PR #84)
+
+The original digest-pinned Python 3.15 image ships pip 26.2.2 with vendored
+msgpack 1.1.2, urllib3 2.7.0 and a setuptools 70.3.0 component. Its recorded
+Trivy scan reports CVE-2026-114613, GHSA-6v7p-g79w-8964, CVE-2026-97687,
+CVE-2026-97689 and CVE-2025-47273 as High. The same five findings were reproduced
+on the exact official base image before remediation.
+
+Pip 26.3 refreshes msgpack and urllib3 but retains the setuptools component.
+The runtime does not need a package manager: after using exact-pinned pip 26.3
+to install secdiagram, the Docker build uninstalls pip and removes ensurepip,
+including its archived pip wheel. Studio uses `venv --without-pip`, so it retains
+private-environment installation without restoring those components. No scanner
+ignore, disabled analyzer, altered vendor SBOM or reachability exception is used.
+
+Docker and release gates run `scripts/verify_container_runtime.py` with network
+access disabled. It requires UID 10001, absence of the bootstrap modules, an
+actual package-mode Studio install, a pip-free private interpreter and successful
+help output from the generated launcher. Windows/Ubuntu unit jobs cover Python
+3.10–3.15, including a real private environment and CLI execution.
 
 ### Why the findings disappeared
 
@@ -33,19 +55,18 @@ Those could only be tolerated through a Rule 7 baseline.
 Alpine Linux's stable release process publishes security fixes as package
 revision bumps instead of holding them back for a point release. The image now:
 
-1. Builds `FROM python:3.12-alpine` (digest-pinned) and
+1. Builds `FROM python:3.15.2-alpine3.24` (digest-pinned) and
    `FROM node:24-alpine` (digest-pinned) for the Mermaid CLI builder stage.
 2. Runs `apk upgrade --no-cache` **before** installing `git`,
    `ca-certificates`, `chromium`, `font-freefont`, and `libstdc++`, so the
    latest stable security revisions are applied.
-3. Verifies the result with the blocking Trivy gate. At scan time this pulls
-   `chromium 156.0.8078.79-r0` and `krb5-libs 1.22.3-r0`, both fully patched on
-   Alpine.
+3. Verifies the result with the blocking Trivy gate. Runtime layers are refreshed
+   in CI so cached layers cannot skip the OS package security updates.
 
 A bonus of the musl/Alpine base is that `secdiagram` has **zero Python runtime
-dependencies** (pure Python), so no glibc-specific wheels are required. Users
-who want to `pip install` C-extension packages into the image can still layer
-them on top of `vserey/secdiagram`.
+dependencies** (pure Python), so no glibc-specific wheels are required. Additional
+Python tooling belongs in a separate developer environment or build stage; the
+final secdiagram runtime does not ship pip.
 
 ## Triage policy
 
@@ -71,10 +92,10 @@ are ignored).
 
 1. **Execution path.** The image entrypoint is the `secdiagram` Python CLI. The
    analysis pipeline uses only Python's `ast` and static manifest parsing; it
-   never executes analyzed repository code (`AGENTS.md` Rule 3). Only
-   `xml.etree` (libexpat via CPython), `zlib`, and the OpenSSL module used by
-   `hashlib`/`ssl` are loaded into the CLI process; everything else in the
-   image is OS tooling that the analyzer does not invoke.
+   never executes analyzed repository code (`AGENTS.md` Rule 3). Standard-library
+   operations can load CPython's native libraries, including expat, zlib and
+   OpenSSL. Discovery may invoke git; local image rendering invokes Node/mmdc
+   and Chromium. Their security updates remain required.
 2. **Chromium scope.** Chromium is spawned only by `mmdc` for local Mermaid
    rendering, as unprivileged `uid 10001`. It renders Mermaid text produced by
    the deterministic analyzer and never navigates to external URLs. Diagram
@@ -90,8 +111,9 @@ are ignored).
    invocation. There is no unauthenticated network service exposed by default.
 4. **Privilege and sandboxing.** The container runs as non-root
    `uid 10001`/`gid 10001`, writes only to the mounted `/repo` volume and
-   ephemeral `/tmp`, and holds no elevated capabilities. Successful
-   exploitation would still be confined to the ephemeral container context.
+   ephemeral `/tmp`, and can be launched with `--cap-drop=ALL`. Non-root execution
+   does not prove a vulnerability unreachable: writable repository/output mounts
+   remain in scope for impact, and container isolation does not protect their contents.
 5. **Input trust.** Repositories analyzed by `secdiagram` are treated as
    untrusted data and are never imported, compiled, or evaluated. The analyzer
    is offline-first; remote rendering and LLM calls are opt-in.
