@@ -45,6 +45,7 @@ LANGUAGE_BY_SUFFIX = {
     ".php": "php",
     ".go": "go",
     ".java": "java",
+    ".rs": "rust",
 }
 TOKEN_WORDS = r"(?i:token|secret|password|passw|otp|nonce|salt|session|api_?key|apikey|reset|verification|csrf|auth_?code)"
 
@@ -53,6 +54,7 @@ JS = frozenset({"javascript", "typescript"})
 PHP = frozenset({"php"})
 GO = frozenset({"go"})
 JAVA = frozenset({"java"})
+RS = frozenset({"rust"})
 
 RECOMMEND = {
     "jwt": "Validate token signatures with a pinned algorithm and key, and enforce expiry, issuer and audience.",
@@ -173,6 +175,11 @@ RULES: tuple[ConfigRule, ...] = (
     ConfigRule("CFG-JAVA-RANDOM", JAVA, "randomness", "CWE-338", "medium", "Non-cryptographic RNG for a security value",
                _r(r"\bnew\s+Random\s*\(|\bMath\.random\s*\(|\bThreadLocalRandom\.current\s*\("), near=_r(TOKEN_WORDS),
                near_lines=1),
+    ConfigRule("CFG-RS-CORS", RS, "cors", "CWE-942", "high", "CORS trusts any origin or permissive preset",
+               _r(r"CorsLayer::very_permissive\s*\(|\.allow_any_origin\s*\(\)")),
+    ConfigRule("CFG-RS-RANDOM", RS, "randomness", "CWE-338", "medium", "Non-cryptographic RNG for a security value",
+               _r(r"\b(?:fastrand::(?:u\d+|i\d+|f32|f64|bool|fill)|SmallRng::(?:seed_from_u64|from_entropy|from_rng|from_os_rng))\s*\("),
+               near=_r(TOKEN_WORDS), near_lines=1),
     # ----------------------------------------------------------- debug pages
     ConfigRule("CFG-CS-DEVPAGE", CS, "misconfig", "CWE-209", "medium", "Developer exception page without environment guard",
                _r(r"\bUseDeveloperExceptionPage\s*\("), absent=_r(r"\bIsDevelopment\s*\(|\bIsEnvironment\s*\(")),
@@ -210,7 +217,7 @@ def _innermost_nodes(graph: Graph) -> dict[str, list[tuple[int, str]]]:
 
 
 def analyze_misconfig(graph: Graph, root: Path, rel_files: list[str]) -> list[Finding]:
-    """Scan C#, JS/TS, PHP, Go and Java sources for web/API misconfigurations."""
+    """Scan C#, JS/TS, PHP, Go, Java and Rust for web/API misconfigurations."""
     findings: list[Finding] = []
     seen: set[str] = set()
     nodes = _innermost_nodes(graph)

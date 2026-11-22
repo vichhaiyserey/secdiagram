@@ -628,7 +628,12 @@ def studio_main(argv: list[str] | None = None) -> int:
 
     install_parser = sub.add_parser("install", help="create the Studio home, venv, launchers, and agent skill")
     install_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
-    install_parser.add_argument("--project-root", type=Path, default=None, help="secdiagram source checkout")
+    install_parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="source checkout or default repository to serve (default: detected checkout or cwd)",
+    )
     install_parser.add_argument("--no-venv", action="store_true", help="skip virtual environment creation")
     install_parser.add_argument("--force", action="store_true", help="update or repair an existing install")
     install_parser.add_argument("--profile", default="default", help="skill profile name (default: default)")
@@ -676,10 +681,13 @@ def studio_main(argv: list[str] | None = None) -> int:
         else:
             print(f"secdiagram Studio installed at {result.home}")
             print(f"  project root: {result.project_root}")
-            print(f"  virtualenv: {'created' if result.venv_created else 'present'}")
+            venv_state = "created" if result.venv_created else (
+                "present" if result.manifest.get("venv") else "not created"
+            )
+            print(f"  virtualenv: {venv_state}")
             print(f"  skill: {(result.home / studio_install.SKILL_DIRNAME / 'SKILL.md').as_posix()}")
             print(f"  launcher: {(result.home / 'bin' / 'secdiagram-studio').as_posix()}")
-            print("  next: secdiagram studio serve --dir .")
+            print(f"  next: secdiagram studio serve --dir {result.project_root}")
         return 0
     if args.command == "status":
         payload = studio_install.status(args.home)

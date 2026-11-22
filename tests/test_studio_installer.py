@@ -40,6 +40,9 @@ class StudioInstallerTests(unittest.TestCase):
 
             manifest = result.manifest
             self.assertEqual(manifest["project_root"], REPO.as_posix())
+            self.assertTrue(manifest["source_checkout"])
+            launcher_text = (home / "bin" / "secdiagram-studio").read_text(encoding="utf-8")
+            self.assertIn('--dir "$ROOT"', launcher_text)
             recorded = {entry["path"]: entry for entry in manifest["files"]}
             self.assertTrue(recorded, "an empty manifest must not appear verified")
             self.assertEqual(set(result.files), set(recorded))
@@ -92,6 +95,28 @@ class StudioInstallerTests(unittest.TestCase):
                 )
             )
             self.assertEqual(forced.manifest["version"], __version__)
+
+    def test_package_install_defaults_launchers_to_target_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target-repo"
+            target.mkdir()
+            home = Path(tmp) / "studio-home"
+            result = studio.install(
+                studio.InstallOptions(home=home, project_root=target, create_venv=False)
+            )
+            self.assertFalse(result.manifest["source_checkout"])
+            self.assertEqual(
+                (home / "project-root.txt").read_text(encoding="utf-8").strip(),
+                # Windows runners may expose TEMP through an 8.3 short name;
+                # install records the resolved long path on every platform.
+                target.resolve().as_posix(),
+            )
+            launcher = (home / "bin" / "secdiagram-studio").read_text(encoding="utf-8")
+            self.assertIn('--dir "$ROOT"', launcher)
+            status = studio.status(home)
+            self.assertTrue(status["installed"])
+            self.assertTrue(status["healthy"])
+            self.assertFalse(status["source_checkout"])
 
     def test_missing_project_root_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

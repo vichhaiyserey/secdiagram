@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .cargo_manifest import cargo_inventory
 from .discover import RepoInfo, discover
 from .model import Graph, Loc, Node, stable_id
 
@@ -398,6 +399,25 @@ def _detect_role_from_go(repo_path: Path) -> tuple[str, float, list[str]]:
     return "unknown", 0.0, []
 
 
+def _detect_role_from_cargo(repo_path: Path) -> tuple[str, float, list[str]]:
+    """Detect role from Cargo.toml."""
+    cargo = repo_path / "Cargo.toml"
+    text = _safe_read_text(repo_path, cargo)
+    if text is None:
+        return "unknown", 0.0, []
+
+    evidence: list[str] = []
+    _, dependencies, _ = cargo_inventory(text)
+
+    web_markers = ("axum", "actix-web", "rocket", "warp", "poem")
+    for marker in web_markers:
+        if marker in dependencies:
+            evidence.append(f"Rust web framework: {marker}")
+            return "backend", 0.85, evidence
+
+    return "unknown", 0.0, []
+
+
 def _detect_role_from_infra(repo_path: Path) -> tuple[str, float, list[str]]:
     """Detect infrastructure repos from Terraform, Helm, K8s manifests, Dockerfiles."""
     evidence: list[str] = []
@@ -497,6 +517,7 @@ def detect_repo_role(
         _detect_role_from_dotnet,
         _detect_role_from_java,
         _detect_role_from_go,
+        _detect_role_from_cargo,
         _detect_role_from_infra,
     ]
 
@@ -583,7 +604,7 @@ def _detect_inter_repo_edges(
         for rel_file in info.rel_files[:200]:  # Cap scanning to avoid huge repos
             suffix = rel_file.rsplit(".", 1)[-1].lower() if "." in rel_file else ""
             if suffix not in {
-                "py", "js", "ts", "jsx", "tsx", "java", "cs", "go",
+                "py", "js", "ts", "jsx", "tsx", "java", "cs", "go", "rs",
                 "yaml", "yml", "json", "toml", "env", "cfg", "conf",
                 "properties",
             }:
@@ -950,7 +971,7 @@ def discover_workspace(
         "Chart.yaml",  # Helm
     }
     _source_suffixes = {
-        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb",
+        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb", ".rs",
         ".tf",  # Terraform
     }
 

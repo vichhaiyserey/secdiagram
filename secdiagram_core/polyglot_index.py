@@ -1,4 +1,4 @@
-"""Stdlib-only lexical analyzer for C#/.NET, JavaScript/TypeScript, PHP and Go.
+"""Stdlib-only lexical analyzer for C#/.NET, JavaScript/TypeScript, PHP, Go and Rust.
 
 Analyzed code is untrusted data: it is read as text and never imported,
 compiled or executed (AGENTS.md Rule 3). Each file is tokenized once into two
@@ -41,6 +41,7 @@ LANGUAGE_BY_SUFFIX: dict[str, str] = {
     ".cts": "typescript",
     ".php": "php",
     ".go": "go",
+    ".rs": "rust",
 }
 LANGUAGE_LABELS = {
     "csharp": "C# / .NET",
@@ -48,6 +49,7 @@ LANGUAGE_LABELS = {
     "typescript": "TypeScript",
     "php": "PHP",
     "go": "Go",
+    "rust": "Rust",
 }
 JS_LANGS: frozenset[str] = frozenset({"javascript", "typescript"})
 HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD")
@@ -147,7 +149,10 @@ _STARTERS = {
     "typescript": re.compile(r"//|/\*|\"|'|`"),
     "php": re.compile(r"//|/\*|#(?!\[)|\"|'|`|\?>"),
     "go": re.compile(r"//|/\*|\"|'|`"),
+    # A lifetime/label (e.g. 'static or 'outer:) is not a character literal.
+    "rust": re.compile(r"""//|/\*|b?r#*"|b?"|b?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|[^\r\n])|[^\\'\r\n])'"""),
 }
+_RUST_COMMENT_DELIMITER = re.compile(r"/\*|\*/")
 _PHP_OPEN_RE = re.compile(r"<\?(?:php|=)?")
 
 
@@ -197,8 +202,23 @@ def _views(text: str, language: str) -> tuple[str, str]:
             pos = end
             continue
         if token == "/*":
-            end = text.find("*/", start + 2)
-            end = n if end == -1 else end + 2
+            if language == "rust":
+                depth = 1
+                curr = start + 2
+                while curr < n and depth > 0:
+                    delimiter = _RUST_COMMENT_DELIMITER.search(text, curr)
+                    if delimiter is None:
+                        curr = n
+                        break
+                    if delimiter.group() == "/*":
+                        depth += 1
+                    else:
+                        depth -= 1
+                    curr = delimiter.end()
+                end = curr
+            else:
+                end = text.find("*/", start + 2)
+                end = n if end == -1 else end + 2
             _blank(code, start, end)
             _blank(masked, start, end)
             pos = end
@@ -212,10 +232,23 @@ def _views(text: str, language: str) -> tuple[str, str]:
                 _blank_php_open_tag(code, masked, reopen)
             pos = reopen.end() if reopen else n
             continue
+        if language == "rust" and "r" in token and '"' in token:
+            hashes = token.count("#")
+            closer = '"' + ("#" * hashes)
+            end_idx = text.find(closer, match.end())
+            end = n if end_idx == -1 else end_idx + len(closer)
+            inner_end = end_idx if end_idx != -1 else n
+            _blank(masked, match.end(), inner_end)
+            pos = max(end, start + 1)
+            continue
+        if language == "rust" and token.endswith("'"):
+            _blank(masked, start + (2 if token.startswith("b") else 1), match.end() - 1)
+            pos = match.end()
+            continue
         quote = token[-1]
         verbatim = language == "csharp" and "@" in token
         raw = language == "go" and quote == "`"
-        multiline = quote == "`" or verbatim or language == "php"
+        multiline = quote == "`" or verbatim or language in ("php", "rust")
         escapes = not verbatim and not raw
         j = match.end()
         end = n
@@ -1345,6 +1378,197 @@ def _go_stereotype(name: str) -> str:
     return ""
 
 
+# ----------------------------------------------------------------------- Rust
+
+RUST_USE_RE = re.compile(r"^\s*use\s+([^;]+);")
+RUST_MOD_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*;")
+RUST_TYPE_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(struct|enum|trait|union)\s+([A-Za-z_]\w*)(?:<[^>{;(]*>)?"
+)
+RUST_IMPL_RE = re.compile(
+    r"^\s*impl(?:<[^>]*>)?\s+(?:([\w:]+)(?:<[^>]*>)?\s+for\s+)?([\w:]+)(?:<[^>{]*>)?\s*\{"
+)
+RUST_FN_RE = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern(?:\s+\"[^\"]*\")?\s+)?fn\s+([A-Za-z_]\w*)\s*(?:<[^(){};]*>)?\s*\("
+)
+RUST_ACTIX_ROUTE_RE = re.compile(r"^\s*#\[(?:actix_web::)?(get|post|put|delete|patch|head|options)\s*\(\s*\"([^\"]+)\"")
+RUST_AXUM_ROUTE_RE = re.compile(r'\.route\s*\(')
+RUST_AXUM_METHOD_RE = re.compile(r"\b(get|post|put|delete|patch|head|options|any)\s*\(\s*([A-Za-z_][\w:]*)")
+
+
+def _rust_stereotype(name: str) -> str:
+    lower = name.lower()
+    for suffix, stereotype in (
+        ("handler", "controller"),
+        ("controller", "controller"),
+        ("repository", "repository"),
+        ("repo", "repository"),
+        ("store", "repository"),
+        ("service", "service"),
+    ):
+        if lower.endswith(suffix):
+            return stereotype
+    return ""
+
+
+def _rust_tainted_params(params: list[str]) -> list[str]:
+    tainted: list[str] = []
+    for p in params:
+        p = p.strip()
+        if p in ("self", "&self", "&mut self", "mut self"):
+            continue
+        ext_match = re.match(r"^(\w+)\s*\(\s*(?:mut\s+)?(\w+)\s*\)", p)
+        if ext_match:
+            wrapper = ext_match.group(1)
+            if wrapper in ("Query", "Json", "Path", "Form", "HeaderMap"):
+                tainted.append(ext_match.group(2))
+                continue
+        name, _, typ = p.partition(":")
+        name = re.sub(r"^(?:mut|ref)\s+", "", name).strip()
+        typ = typ.strip()
+        if re.match(r"(?:[A-Za-z_]\w*::)*(?:State|Extension|Data)\s*<", typ):
+            continue  # application state is not request-controlled input
+        if re.search(r"\b(?:Query|Json|Path|Form|HeaderMap|Bytes|String|HttpRequest)\b", typ):
+            tainted.append(name)
+    return tainted
+
+
+def _parse_rust(pf: PgFile) -> None:
+    masked_lines = pf.masked.split("\n")
+    code_lines = pf.code.split("\n")
+    pairs = _brace_pairs(pf.masked)
+    scopes = _line_scopes(pf.masked, pf._line_starts)
+
+    # 1. Imports / Modules
+    for idx, line in enumerate(code_lines):
+        use_match = RUST_USE_RE.match(line) if RUST_USE_RE.match(masked_lines[idx]) else None
+        if use_match:
+            pf.imports.append((use_match.group(1).strip(), idx + 1))
+        mod_match = RUST_MOD_RE.match(masked_lines[idx])
+        if mod_match:
+            pf.imports.append((mod_match.group(1).strip(), idx + 1))
+
+    # 2. Structs, Enums, Traits, Unions
+    for idx, line in enumerate(masked_lines):
+        match = RUST_TYPE_RE.match(line)
+        if not match:
+            continue
+        name = match.group(2)
+        decl_kind = match.group(1)
+        pos = pf.line_start(idx + 1) + match.end()
+        body = _body_after(pf.masked, pairs, pos)
+        decos = _decorators_before(code_lines, idx, "#[")
+        sym = PgSymbol(
+            kind="class",
+            name=name,
+            qualname=f"{pf.path}:{name}",
+            line=idx + 1,
+            end_line=pf.line_of(body[1]) if body[1] >= 0 else idx + 1,
+            body_start=body[0],
+            body_end=body[1],
+            decl_kind=decl_kind,
+            decorators=decos,
+            stereotype=_rust_stereotype(name),
+        )
+        _add_symbol(pf, sym)
+
+    # 3. Impl blocks to link methods to structs and record trait bases
+    types_by_name = {s.name: s for s in pf.symbols if s.kind == "class"}
+    impl_by_brace: dict[int, str] = {}
+    for idx, line in enumerate(masked_lines):
+        impl_match = RUST_IMPL_RE.match(line)
+        if not impl_match:
+            continue
+        trait_name = impl_match.group(1)
+        struct_name = impl_match.group(2).rsplit("::", 1)[-1]
+        brace = pf.line_start(idx + 1) + impl_match.end() - 1
+        impl_by_brace[brace] = struct_name
+        if trait_name and struct_name in types_by_name:
+            types_by_name[struct_name].bases.append(trait_name.rsplit("::", 1)[-1])
+
+    # 4. Functions & Methods
+    for idx, line in enumerate(masked_lines):
+        match = RUST_FN_RE.match(line)
+        if not match:
+            continue
+        open_pos = pf.line_start(idx + 1) + match.end() - 1
+        close = _match_paren(pf, open_pos)
+        if close == -1:
+            continue
+        body = _body_after(pf.masked, pairs, close + 1)
+        name = match.group(1)
+        decos = _decorators_before(code_lines, idx, "#[")
+        raw_params = _split_params(pf.code[open_pos + 1 : close])
+        is_method = False
+        owner_name = ""
+        current_scope = scopes[idx] if idx < len(scopes) else -1
+        if current_scope in impl_by_brace:
+            owner_name = impl_by_brace[current_scope]
+            is_method = True
+        elif raw_params and any(p.strip().startswith(("self", "&self", "&mut self", "mut self")) for p in raw_params[:1]):
+            is_method = True
+
+        owner_qual = f"{pf.path}:{owner_name}" if owner_name else ""
+        sym = PgSymbol(
+            kind="method" if is_method else "function",
+            name=name,
+            qualname=f"{owner_qual}.{name}" if owner_qual else f"{pf.path}:{name}",
+            line=idx + 1,
+            end_line=pf.line_of(body[1]) if body[1] >= 0 else idx + 1,
+            body_start=body[0],
+            body_end=body[1],
+            container=owner_qual,
+            decl_kind="method" if is_method else "function",
+            params=raw_params,
+            decorators=decos,
+        )
+
+        # Check for Actix-web / Rocket attribute routing: #[get("/path")]
+        for deco in decos:
+            actix_match = RUST_ACTIX_ROUTE_RE.match(deco)
+            if actix_match:
+                verb = actix_match.group(1).upper()
+                route_path = actix_match.group(2)
+                sym.kind = "endpoint"
+                sym.framework = "actix-web"
+                sym.routes.append({"method": verb, "path": route_path})
+                sym.tainted_params = _rust_tainted_params(sym.params)
+
+        _add_symbol(pf, sym)
+
+    # 5. Axum Router declarations: Router::new().route("/path", get(handler).post(handler))
+    for route_match in RUST_AXUM_ROUTE_RE.finditer(pf.masked):
+        open_pos = route_match.end() - 1
+        close = _match_paren(pf, open_pos)
+        if close == -1:
+            continue
+        path_match = re.match(r'\s*"([^"\\]*)"\s*,', pf.code[open_pos + 1 : close])
+        if path_match is None:
+            continue
+        route_path = path_match.group(1)
+        handlers_start = open_pos + 1 + path_match.end()
+        for m_match in RUST_AXUM_METHOD_RE.finditer(pf.masked, handlers_start, close):
+            verb = m_match.group(1).upper()
+            handler_ref = m_match.group(2)
+            call_line = pf.line_of(route_match.start())
+            route_sym = PgSymbol(
+                kind="endpoint",
+                name=f"{verb} {route_path}",
+                qualname=f"{pf.path}:{call_line}:{verb} {route_path}",
+                line=call_line,
+                end_line=pf.line_of(close),
+                routes=[{"method": verb, "path": route_path}],
+                framework="axum",
+                handler_ref=handler_ref,
+                decl_kind="route",
+            )
+            _add_symbol(pf, route_sym)
+
+    for cls in pf.symbols:
+        if cls.kind == "class":
+            cls.bases = sorted(set(cls.bases))
+
+
 # ------------------------------------------------------------- auth markers
 
 AUTH_MW_RE = re.compile(
@@ -1462,6 +1686,7 @@ PARSERS = {
     "typescript": _parse_js,
     "php": _parse_php,
     "go": _parse_go,
+    "rust": _parse_rust,
 }
 
 
@@ -1517,7 +1742,7 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
             if sym.kind in ("function", "method", "endpoint") and sym.has_body and not sym.handler_ref:
                 by_lang_name.setdefault((family, sym.name), []).append((pf, sym))
                 if sym.container:
-                    owner = _simple(sym.container)
+                    owner = sym.container.rsplit(":", 1)[-1] if family == "rust" else _simple(sym.container)
                     by_lang_name.setdefault((family, f"{owner}::{sym.name}"), []).append((pf, sym))
     for path in sorted(index.files):
         pf = index.files[path]
@@ -1528,12 +1753,32 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
                 remaining.append(sym)
                 continue
             ref = sym.handler_ref
-            if "::" in ref:
+            if family == "rust":
+                key = ref.rsplit("::", 1)[-1]
+            elif "::" in ref:
                 cls, _, method = ref.rpartition("::")
                 key = f"{_simple(cls)}::{method}"
             else:
                 key = ref.rsplit(".", 1)[-1]
             candidates = by_lang_name.get((family, key), [])
+            if family == "rust" and "::" in ref:
+                modules = ref.split("::")[:-1]
+                associated = by_lang_name.get((family, f"{modules[-1]}::{key}"), [])
+                if associated:
+                    candidates = associated
+                    modules = modules[:-1]
+                parent = pf.path.rsplit("/", 1)[0] if "/" in pf.path else ""
+                if modules and modules[0] == "crate":
+                    parent = pf.path.rsplit("/src/", 1)[0] + "/src" if "/src/" in pf.path else "src"
+                    modules = modules[1:]
+                elif modules and modules[0] == "self":
+                    modules = modules[1:]
+                while modules and modules[0] == "super":
+                    parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
+                    modules = modules[1:]
+                module_path = "/".join(p for p in [parent, *modules] if p)
+                paths = {module_path + ".rs", module_path + "/mod.rs"} if modules else {pf.path}
+                candidates = [c for c in candidates if c[0].path in paths]
             same_file = [c for c in candidates if c[0].path == pf.path]
             chosen = same_file if len(same_file) == 1 else (candidates if len(candidates) == 1 else [])
             if not chosen:
@@ -1548,6 +1793,8 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
             if not target.tainted_params:
                 if pf.language == "php":
                     target.tainted_params = _php_tainted_params(target.params)
+                elif pf.language == "rust":
+                    target.tainted_params = _rust_tainted_params(target.params)
             target.decorators.append(f"route@{pf.path}:{sym.line}")
         pf.symbols = remaining
 

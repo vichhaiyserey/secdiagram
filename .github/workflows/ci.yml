@@ -80,6 +80,8 @@ jobs:
         run: ruff check .
       - name: Mypy type check
         run: mypy
+      - name: Studio JavaScript syntax check
+        run: node --check secdiagram_core/studio_ui/app.js
       - name: Task tooling tests
         run: python -m unittest tests.test_taskctl -v
       - name: Task cache validation

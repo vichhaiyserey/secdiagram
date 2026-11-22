@@ -79,6 +79,7 @@ def _flows(graph: Graph, endpoints: list[Node], node_by_id: dict[str, Node], lim
 
 _POLYGLOT_LABELS = (
     ("csharp", "C#"), ("javascript", "JavaScript"), ("typescript", "TypeScript"), ("php", "PHP"), ("go", "Go"),
+    ("rust", "Rust"),
 )
 
 
@@ -429,7 +430,7 @@ def render_markdown(
     unsupported = meta.get("unsupported_security_languages") or []
     if unsupported:
         lines.append(
-            "- Security rules cover Python, Java, C#, JavaScript/TypeScript, PHP and Go; no checks were run for: "
+            "- Security rules cover Python, Java, C#, JavaScript/TypeScript, PHP, Go and Rust; no checks were run for: "
             + ", ".join(f"`{_esc(name)}`" for name in unsupported)
             + "."
         )

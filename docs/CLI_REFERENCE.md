@@ -2,6 +2,10 @@
 
 `secdiagram` provides a deterministic command-line interface for architecture discovery, security analysis, and diagram rendering.
 
+Rust `.rs` files and Cargo projects use the same scan, output, filtering and
+offline options as other languages. See [Rust support](RUST_SUPPORT.md) for
+Axum/Actix route patterns, security rules and lexical coverage limits.
+
 ---
 
 ## 1. Synopsis

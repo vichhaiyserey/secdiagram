@@ -51,6 +51,7 @@ class StudioAccessibilityAssetTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.html = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
         cls.css = (ASSET_DIR / "app.css").read_text(encoding="utf-8")
+        cls.js = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
         cls.parser = _AssetParser()
         cls.parser.feed(cls.html)
 
@@ -155,6 +156,21 @@ class StudioAccessibilityAssetTests(unittest.TestCase):
         self.assertIn(".skip-link", self.css)
         self.assertIn("outline", self.css)
 
+    def test_installer_ui_consumes_nested_status_payload(self) -> None:
+        self.assertIn("const installer = status.installer || {};", self.js)
+
+    def test_js_preserves_drafts_and_bounds_node_loading(self) -> None:
+        for snippet in (
+            "hasUnsavedDiagram",
+            "hasUnsavedPhaseDrafts",
+            "state.sdlcDrafts",
+            "beforeunload",
+            "AbortController",
+            "loadNodes({ force: true })",
+            "id: `note-${phase.phase}`",
+            "node-count",
+        ):
+            self.assertIn(snippet, self.js)
 
 if __name__ == "__main__":
     unittest.main()

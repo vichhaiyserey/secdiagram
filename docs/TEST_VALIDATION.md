@@ -1,13 +1,15 @@
 # Test contracts and validation
 
-Issue #82 refactors the suite from 653 to **623 test methods in 45 files**.
+Issue #82 refactored the suite from 653 to **623 test methods in 45 files** at
+merge commit `58aa51c`. This is a historical baseline, not the current suite size:
+subsequent Studio and Rust changes add regression tests.
 Distinct conditions remain named `unittest.subTest` cases. Method count measures
 inventory, not correctness: tests are retained for observable behavior, meaningful
 failure conditions, source evidence or a documented regression.
 
 This builds on the assertion/isolation audit in issue #71 / PR #72 and the threat
-evidence tests in issue #73 / PR #74. The current review checks every test file
-structurally and reviews candidate consolidations, mocks, positive controls,
+evidence tests in issue #73 / PR #74. That review checked every test file
+structurally and reviewed candidate consolidations, mocks, positive controls,
 expected failures, environment isolation and cached fixtures.
 
 ## What remains covered
@@ -60,6 +62,20 @@ limitations remain explicit skips rather than hidden passes. No assertion
 overrides, literal tautologies or duplicate discovered test definitions were found.
 
 ## Verification
+
+Rust release-readiness regressions in issue #87 cover lifetime and character
+tokenization, deeply nested comments, raw-string exclusions, multiline routes,
+module-qualified ownership, exact SAST evidence, trusted application state,
+literal SQL/process arguments, cryptographic RNG exclusions and Cargo runtime
+dependency evidence. See [Rust support](RUST_SUPPORT.md) for supported patterns
+and gaps. Run `python -m unittest tests.test_rust -v` for the focused suite; the
+full discovery command below remains the release gate. The counts and coverage
+comparison later in this document describe the #82 refactor, not later commits.
+
+The same review corrected an existing Windows CI blocker in the Studio installer
+test: expected project-root paths are resolved before comparison, matching the
+installer's documented normalization. This handles Windows 8.3 TEMP paths while
+still requiring the exact target repository and launcher behavior.
 
 ```sh
 python -m unittest discover -s tests -v
