@@ -288,7 +288,37 @@ secdiagram --sonarqube-report sonar-issues.json \
 
 ---
 
-## 4. Standalone Security Review (`--security-report`)
+## 4. Runtime DAST Evidence (OWASP ZAP & Nuclei)
+
+`secdiagram` does not launch ZAP or Nuclei itself. Doing so would require network targets, external binaries, and non-deterministic execution, which conflicts with the offline-first, zero-dependency, and strict-determinism guarantees. Instead, import their reports as local evidence and correlate every observed request with the statically parsed endpoint graph:
+
+```bash
+secdiagram --dir . \
+  --zap-report zap-traditional.json \
+  --nuclei-report nuclei.jsonl \
+  --security-report both \
+  --format json,sarif
+```
+
+Supported inputs:
+
+- **OWASP ZAP Traditional JSON** (`{"site": [{"alerts": [{"instances": [...]}]}]}`), including the variant with request/response bodies. Alerts without captured instances are treated as scanner rules, not runtime evidence.
+- **Nuclei JSONL or JSON** (`nuclei -jsonl-export`, `-json-export`, a JSON array, or a single result object). Non-HTTP templates are imported as findings but do not create endpoint observations.
+
+What the runtime evidence changes:
+
+- **Endpoint correlation**: each observed request is matched to an endpoint node by HTTP method and templated path (`/users/{id}`, `/users/<int:id>`, `/users/:id`, `[id]`, wildcards). Applications mounted under a base path are matched by route suffix.
+- **`runtime_observed` node metadata**: matched endpoints record deterministic `requests`, `sources`, `methods`, `params`, and observed `paths` in `graph.json`.
+- **`graph.meta.runtime_analysis`**: reports total/matched requests, observed versus total endpoints, runtime-only endpoints (seen in the running app but absent from the static graph), and unobserved endpoints.
+- **Runtime-confirmed findings**: ZAP/Nuclei findings are marked `runtime_confirmed`, anchored to the matched `path:line`, and classified as externally verified. Runtime-only observations remain findings anchored to the report.
+- **Policy**: a runtime-confirmed critical/high finding can block CI because the runtime request itself proves reachability, even when static exposure markers are missing. Findings that could not be correlated still require review; confidence and reachability gates continue to apply.
+- **Reports**: SARIF results carry `properties.runtimeConfirmed` and the structured runtime observation; the standalone security review adds a runtime evidence summary and per-endpoint runtime column.
+
+> Runtime evidence reflects only the requests the scanner observed. It is not a proof of complete endpoint coverage, and the static-only limitation text is replaced with an explicit runtime-scope limitation when DAST reports are imported.
+
+---
+
+## 5. Standalone Security Review (`--security-report`)
 
 Generate a print-first security review artifact that is separate from the architectural diagram:
 
@@ -308,7 +338,7 @@ The risk label floors at **High** for any critical finding and **Moderate** for 
 
 ---
 
-## 5. CycloneDX 1.6 VEX Export (`--format vex`)
+## 6. CycloneDX 1.6 VEX Export (`--format vex`)
 
 Generate machine-readable Vulnerability Exploitability eXchange (VEX) documents under the **CycloneDX 1.6** specification:
 
@@ -332,7 +362,7 @@ This allows downstream triage tools and SBOM scanners to automatically justify n
 
 ---
 
-## 6. Pluggable Framework, Sanitizer & Sink Registry
+## 7. Pluggable Framework, Sanitizer & Sink Registry
 
 Extend `secdiagram`'s detection heuristics to recognize internal microservice frameworks, custom authentication decorators, or proprietary sanitization functions.
 
@@ -382,7 +412,7 @@ register_sink("my_custom_sink")
 
 ---
 
-## 7. Security Baseline (`security.baseline.json`)
+## 8. Security Baseline (`security.baseline.json`)
 
 Establish a baseline of known, accepted findings to prevent breaking CI on legacy issues:
 

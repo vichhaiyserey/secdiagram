@@ -138,7 +138,12 @@ def score_finding(graph: Graph, finding: Finding, flow: TaintFlow | None) -> Ris
     else:
         node = graph.nodes.get(finding.node_id or "")
         node_exposure = endpoint_exposure(node)
-        if finding.category == "secret":
+        if finding.metadata.get("runtime_confirmed") and node_exposure != "internal":
+            # A DAST scanner reached this endpoint at runtime, so risk ranking
+            # must not treat an unknown exposure as merely theoretical.
+            exposure = "public" if node_exposure == "unknown" else node_exposure
+            evidence, evidence_factor = "runtime-observed", 1.0
+        elif finding.category == "secret":
             # A credential in source is definitive: anyone with the repo or image has it.
             exposure = "unknown"
             evidence, evidence_factor = "credential-in-source", 0.95

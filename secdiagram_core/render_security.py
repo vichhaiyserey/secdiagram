@@ -17,11 +17,18 @@ _SOURCE_LABEL = {
     "secdiagram": "secdiagram SAST",
     "sonarqube": "SonarQube",
     "xray": "JFrog Xray",
+    "zap": "OWASP ZAP",
+    "nuclei": "Nuclei",
 }
 
 _EXTERNAL_WHY = (
     "An external scanner reports this component or issue as security-relevant. "
     "Treat the scanner evidence as the source of truth and verify the affected version."
+)
+
+_RUNTIME_WHY = (
+    "A dynamic scanner observed this issue against the running application. "
+    "The runtime request is direct evidence that the affected endpoint is reachable."
 )
 
 
@@ -51,6 +58,8 @@ def _confidence(finding: Finding) -> str:
 
 
 def _badges(finding: Finding) -> list[str]:
+    if finding.metadata.get("runtime_confirmed"):
+        return ["Runtime-confirmed"]
     if is_known_exploited(finding):
         return ["Known exploited", "Advisory validated"]
     if is_validated(finding):
@@ -63,6 +72,8 @@ def _badges(finding: Finding) -> list[str]:
 
 
 def _why(finding: Finding) -> str:
+    if finding.metadata.get("runtime_confirmed"):
+        return _RUNTIME_WHY
     if finding.source != "secdiagram" and finding.category == "external":
         return _EXTERNAL_WHY
     return CATEGORY_DESCRIPTIONS.get(
@@ -106,6 +117,20 @@ def _provenance(finding: Finding) -> list[tuple[str, str]]:
         else:
             text = str(value)
         items.append((label, text))
+    runtime = metadata.get("runtime")
+    if isinstance(runtime, dict):
+        runtime_route = str(runtime.get("matched_route") or "")
+        if runtime_route:
+            items.append(("Runtime route", runtime_route))
+        runtime_path = str(runtime.get("path") or "")
+        if runtime_path and runtime_path != runtime_route:
+            items.append(("Observed path", runtime_path))
+        runtime_param = str(runtime.get("param") or "")
+        if runtime_param:
+            items.append(("Observed parameter", runtime_param))
+        runtime_status = runtime.get("status_code")
+        if runtime_status is not None:
+            items.append(("HTTP status", str(runtime_status)))
     validation = metadata.get("validation") or {}
     if validation:
         sources = ", ".join(str(source) for source in validation.get("sources") or [])
@@ -237,6 +262,20 @@ def render_security_markdown(report: SecurityReport) -> str:
         f"- **{len(surface.external_dependencies)}** external dependency name(s) and "
         f"**{len(surface.infrastructure)}** infrastructure artifact(s) observed."
     )
+    runtime = report.runtime
+    if runtime:
+        runtime_sources = ", ".join(
+            _md(source) for source in runtime.get("sources") or []
+        ) or "DAST"
+        lines.append(
+            f"- Runtime evidence from {runtime_sources}: "
+            f"**{int(runtime.get('requests') or 0)}** request(s), "
+            f"**{int(runtime.get('matched_requests') or 0)}** matched to "
+            f"**{int(runtime.get('endpoints_observed') or 0)}** of "
+            f"**{int(runtime.get('endpoints_total') or 0)}** endpoint(s); "
+            f"**{int(runtime.get('confirmed_findings') or 0)}** runtime-confirmed finding(s), "
+            f"**{int(runtime.get('runtime_only_count') or 0)}** runtime-only endpoint(s)."
+        )
     if surface.risky_infrastructure:
         lines.append(
             "- Risky infrastructure markers: " + ", ".join(_md(item) for item in surface.risky_infrastructure) + "."
@@ -248,15 +287,26 @@ def render_security_markdown(report: SecurityReport) -> str:
     )
     lines.append("")
     if surface.endpoints:
-        lines.append("| Endpoint | Routes | Auth marker | Source |")
-        lines.append("|---|---|---|---|")
+        lines.append("| Endpoint | Routes | Auth marker | Runtime evidence | Source |")
+        lines.append("|---|---|---|---|---|")
         for endpoint in surface.endpoints[:40]:
             route_text = ", ".join(_md(route) for route in endpoint.routes) or "-"
             auth = "yes" if endpoint.authenticated else "not detected"
             ref = f"`{endpoint.path}:{endpoint.line}`" if endpoint.path and endpoint.line else "-"
-            lines.append(f"| `{_md(endpoint.qualname)}` | {route_text} | {auth} | {ref} |")
+            if endpoint.runtime_requests:
+                sources = ", ".join(_md(source) for source in endpoint.runtime_sources)
+                runtime_text = f"{endpoint.runtime_requests} request(s)" + (
+                    f" ({sources})" if sources else ""
+                )
+            else:
+                runtime_text = "-"
+            lines.append(
+                f"| `{_md(endpoint.qualname)}` | {route_text} | {auth} | {runtime_text} | {ref} |"
+            )
         if len(surface.endpoints) > 40:
-            lines.append(f"| ... | {len(surface.endpoints) - 40} more endpoint(s) | | |")
+            lines.append(
+                f"| ... | {len(surface.endpoints) - 40} more endpoint(s) | | | |"
+            )
         lines.append("")
     if surface.external_dependencies:
         shown = ", ".join(f"`{_md(name)}`" for name in surface.external_dependencies[:24])
@@ -728,6 +778,21 @@ def render_security_html(report: SecurityReport) -> str:
         f"<strong>{len(surface.external_dependencies)}</strong> external dependency name(s), "
         f"<strong>{len(surface.infrastructure)}</strong> infrastructure artifact(s).</p>"
     )
+    runtime = report.runtime
+    if runtime:
+        runtime_sources = ", ".join(
+            _h(source) for source in runtime.get("sources") or []
+        ) or "DAST"
+        parts.append(
+            f"<p><strong>Runtime evidence</strong> from {runtime_sources}: "
+            f"<strong>{int(runtime.get('requests') or 0)}</strong> request(s), "
+            f"<strong>{int(runtime.get('matched_requests') or 0)}</strong> matched to "
+            f"<strong>{int(runtime.get('endpoints_observed') or 0)}</strong> of "
+            f"<strong>{int(runtime.get('endpoints_total') or 0)}</strong> endpoint(s); "
+            f"<strong>{int(runtime.get('confirmed_findings') or 0)}</strong> runtime-confirmed "
+            f"finding(s), <strong>{int(runtime.get('runtime_only_count') or 0)}</strong> "
+            f"runtime-only endpoint(s).</p>"
+        )
     if surface.risky_infrastructure:
         parts.append(
             '<p class="callout"><strong>Risky infrastructure markers.</strong> '
@@ -746,17 +811,26 @@ def render_security_html(report: SecurityReport) -> str:
                 if endpoint.path and endpoint.line
                 else "-"
             )
+            if endpoint.runtime_requests:
+                runtime_text = f"{endpoint.runtime_requests} request(s)"
+                if endpoint.runtime_sources:
+                    runtime_text += f" ({', '.join(endpoint.runtime_sources)})"
+            else:
+                runtime_text = "-"
             rows.append(
                 [
                     f"<code>{_h(endpoint.qualname)}</code>",
                     _h(", ".join(endpoint.routes) or "-"),
                     "yes" if endpoint.authenticated else "not detected",
+                    _h(runtime_text),
                     ref,
                 ]
             )
         if len(surface.endpoints) > 40:
-            rows.append([f"... {len(surface.endpoints) - 40} more", "", "", ""])
-        parts.append(_html_table(["Endpoint", "Routes", "Auth marker", "Source"], rows))
+            rows.append([f"... {len(surface.endpoints) - 40} more", "", "", "", ""])
+        parts.append(
+            _html_table(["Endpoint", "Routes", "Auth marker", "Runtime evidence", "Source"], rows)
+        )
     if surface.external_dependencies:
         shown = ", ".join(f"<code>{_h(name)}</code>" for name in surface.external_dependencies[:24])
         suffix = (

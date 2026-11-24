@@ -106,6 +106,10 @@ def _security_reproduce_command(args: argparse.Namespace) -> str:
         parts.extend(["--sonarqube-report", quote(args.sonarqube_report)])
     if args.xray_report:
         parts.extend(["--xray-report", quote(args.xray_report)])
+    if args.zap_report:
+        parts.extend(["--zap-report", quote(args.zap_report)])
+    if args.nuclei_report:
+        parts.extend(["--nuclei-report", quote(args.nuclei_report)])
     for advisory in args.advisory_db:
         parts.extend(["--advisory-db", quote(advisory)])
     if args.baseline:
@@ -235,6 +239,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="import a JFrog Xray violations JSON export as dependency findings",
+    )
+    parser.add_argument(
+        "--zap-report",
+        default=None,
+        metavar="PATH",
+        help="import an OWASP ZAP Traditional JSON report as runtime findings and endpoint evidence",
+    )
+    parser.add_argument(
+        "--nuclei-report",
+        default=None,
+        metavar="PATH",
+        help="import Nuclei JSONL/JSON output as runtime findings and endpoint evidence",
     )
     parser.add_argument(
         "--advisory-db",
@@ -1136,7 +1152,13 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
 
     if args.offline and (args.llm or args.ollama):
         return fail("--offline disables narrative HTTP requests; omit --llm/--ollama for a fully offline scan")
-    for label, value in (("--sonarqube-report", args.sonarqube_report), ("--xray-report", args.xray_report), ("--mermaid-js", args.mermaid_js)):
+    for label, value in (
+        ("--sonarqube-report", args.sonarqube_report),
+        ("--xray-report", args.xray_report),
+        ("--zap-report", args.zap_report),
+        ("--nuclei-report", args.nuclei_report),
+        ("--mermaid-js", args.mermaid_js),
+    ):
         if value and not _normalize_cli_path(value).is_file():
             return fail(f"{label} file does not exist or is unreadable: {value}; provide a readable local file or omit {label}")
     for value in args.advisory_db:
@@ -1182,6 +1204,14 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
                 ),
                 xray_report=(
                     _normalize_cli_path(args.xray_report) if args.xray_report else None
+                ),
+                zap_report=(
+                    _normalize_cli_path(args.zap_report) if args.zap_report else None
+                ),
+                nuclei_report=(
+                    _normalize_cli_path(args.nuclei_report)
+                    if args.nuclei_report
+                    else None
                 ),
                 advisory_dbs=[
                     _normalize_cli_path(path) for path in args.advisory_db

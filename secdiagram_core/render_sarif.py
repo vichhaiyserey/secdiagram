@@ -40,6 +40,7 @@ CATEGORY_OWASP = {
     "redirect": ("A01:2025", "A01:2021"),
     "auth": ("A07:2025", "A07:2021"),
     "misconfig": ("A02:2025", "A05:2021"),
+    "runtime": ("A05:2025", "A03:2021"),
     "secret": ("A02:2025", "A07:2021"),
     "container": ("A02:2025", "A05:2021"),
     "cloud": ("A02:2025", "A05:2021"),
@@ -62,6 +63,7 @@ CATEGORY_DESCRIPTIONS = {
     "redirect": "Request-derived input controls a redirect target, enabling open redirects and credential theft.",
     "auth": "Authentication or authorization controls are disabled or weakened.",
     "misconfig": "A framework or runtime setting weakens the security posture of the application.",
+    "runtime": "A dynamic application security scanner observed this issue against a running endpoint.",
     "secret": "A credential-shaped value is committed to source or configuration and may be exposed to anyone with repository access.",
     "container": "Container configuration weakens isolation and increases the impact of a compromise.",
     "supply-chain": "A dependency or build artifact is not pinned, allowing unexpected upstream changes.",
@@ -194,6 +196,8 @@ def _rule_properties(finding: Finding, severity: str, confidence: float) -> dict
     }
     if finding.metadata.get("validation"):
         properties["validation"] = finding.metadata["validation"]
+    if finding.metadata.get("runtime_confirmed"):
+        properties["runtimeConfirmed"] = True
     return properties
 
 
@@ -306,6 +310,10 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
             result["properties"]["external_id"] = finding.external_id
         if finding.metadata.get("validation"):
             result["properties"]["validation"] = finding.metadata["validation"]
+        if finding.metadata.get("runtime_confirmed"):
+            result["properties"]["runtimeConfirmed"] = True
+        if finding.metadata.get("runtime"):
+            result["properties"]["runtime"] = finding.metadata["runtime"]
         locations = _dedupe_locations(finding.evidence)
         if not locations and finding.trace:
             locations = [finding.trace[-1]]

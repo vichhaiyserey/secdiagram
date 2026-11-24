@@ -95,6 +95,15 @@ def classify_exposure(graph: Graph, finding: Finding) -> str:
     node = _flow_entry_node(graph, finding) or graph.nodes.get(finding.node_id or "")
     if node is not None:
         exposure = node_exposure_class(node)
+        if (
+            exposure == "unknown"
+            and finding.metadata.get("runtime_confirmed")
+            and node.kind == "endpoint"
+        ):
+            # The DAST scanner reached the endpoint at runtime, which is direct
+            # evidence of an exposed surface even if static auth/ingress
+            # markers are absent.
+            return "public"
         if exposure in EXPOSURE_STATES:
             return exposure
         return "unknown"
