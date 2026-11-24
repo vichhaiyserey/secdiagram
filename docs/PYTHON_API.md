@@ -25,7 +25,19 @@ config = AnalysisConfig(
 
 # Run full analysis:
 result = analyze(config)
+
+# Import runtime DAST evidence without launching a scanner:
+runtime = analyze(
+    AnalysisConfig(
+        root=".",
+        zap_report="zap-traditional.json",
+        nuclei_report="nuclei.jsonl",
+    )
+)
+summary = runtime.graph.meta["runtime_analysis"]
 ```
+
+`AnalysisConfig` accepts `sonarqube_report`, `xray_report`, `zap_report`, and `nuclei_report` local paths. DAST observations are correlated to endpoint nodes; matched nodes gain `runtime_observed` attributes and `runtime.graph.meta["runtime_analysis"]` summarizes matched, runtime-only, and unobserved endpoints.
 
 > [!NOTE]
 > For backward compatibility, legacy imports from `secdiagram_core.analyzer` (`AnalysisConfig`, `run_analysis`) and `secdiagram_core.high_level` (`build_high_level_architecture`, `render_mermaid_highlevel`) remain fully supported via internal re-exports and module shims.

@@ -54,6 +54,8 @@ class SurfaceEndpoint:
     routes: list[str]
     authenticated: bool
     methods: list[str]
+    runtime_requests: int = 0
+    runtime_sources: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -98,6 +100,7 @@ class SecurityReport:
     surface: Surface
     remediation: list[RemediationGroup]
     coverage: dict[str, Any]
+    runtime: dict[str, Any]
     external_reports: list[dict[str, Any]]
     advisory_sources: list[dict[str, Any]]
     advisory_validated: int
@@ -263,6 +266,12 @@ def _surface(graph: Graph) -> Surface:
         tags = {str(tag) for tag in node.attrs.get("tags") or []}
         authenticated = bool(node.attrs.get("auth")) or "auth" in tags or "auth_dependency" in tags
         route_count += len(routes)
+        runtime = node.attrs.get("runtime_observed")
+        runtime_requests = 0
+        runtime_sources: list[str] = []
+        if isinstance(runtime, dict):
+            runtime_requests = int(runtime.get("requests") or 0)
+            runtime_sources = sorted(str(source) for source in runtime.get("sources") or [])
         endpoints.append(
             SurfaceEndpoint(
                 qualname=node.qualname,
@@ -271,6 +280,8 @@ def _surface(graph: Graph) -> Surface:
                 routes=routes,
                 authenticated=authenticated,
                 methods=sorted(set(methods)),
+                runtime_requests=runtime_requests,
+                runtime_sources=runtime_sources,
             )
         )
     endpoints.sort(key=lambda item: (item.path or "", item.line or 0, item.qualname))
@@ -440,11 +451,19 @@ def _coverage(meta: dict[str, Any], enabled: bool) -> dict[str, Any]:
     }
 
 
-def _limitations(coverage: dict[str, Any]) -> list[str]:
+def _limitations(coverage: dict[str, Any], runtime: dict[str, Any] | None = None) -> list[str]:
     unsupported = coverage["unsupported_security_languages"]
     limitations = [
-        "This report is based on static analysis. Analyzed code is never executed, "
-        "so runtime behavior, feature flags, and deployed configuration are not proven.",
+        (
+            "Runtime evidence was imported from a DAST report and correlated with the static "
+            "graph. It reflects only the endpoints and requests the scanner observed; it is not "
+            "proof of complete runtime coverage or of deployed configuration."
+        )
+        if runtime
+        else (
+            "This report is based on static analysis. Analyzed code is never executed, "
+            "so runtime behavior, feature flags, and deployed configuration are not proven."
+        ),
         "secdiagram findings are evidence-backed heuristics with confidence scores; "
         "they are review prompts, not proof of exploitability or a substitute for manual testing.",
         "Security rules cover Python and Java (AST/lexical data flow) plus C#/.NET, JavaScript/TypeScript, "
@@ -503,6 +522,7 @@ def build_security_report(
     secrets = [finding for finding in new_findings if _is_secret(finding)]
     surface = _surface(graph)
     coverage = _coverage(meta, enabled)
+    runtime = dict(meta.get("runtime_analysis") or {})
     external_reports = sorted(
         (dict(item) for item in (meta.get("external_reports") or []) if isinstance(item, dict)),
         key=lambda item: (str(item.get("source") or ""), str(item.get("file") or "")),
@@ -519,6 +539,7 @@ def build_security_report(
         str(meta.get("config_hash") or ""),
         str(fail_on or "none"),
         json.dumps(policy or {}, sort_keys=True, ensure_ascii=True, default=str),
+        json.dumps(runtime, sort_keys=True, ensure_ascii=True, default=str),
         *[
             json.dumps(finding.to_dict(), sort_keys=True, ensure_ascii=True, default=str)
             for finding in findings
@@ -555,11 +576,12 @@ def build_security_report(
         surface=surface,
         remediation=_remediation(new_findings, dependency),
         coverage=coverage,
+        runtime=runtime,
         external_reports=external_reports,
         advisory_sources=advisory_sources,
         advisory_validated=int(meta.get("advisory_validated_findings") or 0),
         baseline=baseline,
-        limitations=_limitations(coverage),
+        limitations=_limitations(coverage, runtime),
         reproduce=reproduce
         or "secdiagram --dir . --security-report both --format sarif",
         narrative=narrative,

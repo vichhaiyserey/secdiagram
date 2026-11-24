@@ -26,6 +26,7 @@
 - **High-Level C4 System Diagrams**: Automatically compiles clean C4 tier diagrams (`diagram-highlevel.mmd` & `diagram-highlevel.png`) showing Ingress, Gateways, Core Services, Databases, Caches, Brokers, and External APIs.
 - **Multi-Format Image Rendering**: Export diagrams directly to **PNG**, **SVG**, or **PDF** offline via bundled Mermaid CLI (`mmdc`) or zero-dependency HTTP fallbacks (Kroki, mermaid.ink).
 - **Security & IaC SAST Overlay**: Discovers entrypoints, traces taint dataflows **across functions and files** (controller → service → repository) to dangerous sinks (CWE-78, CWE-89, CWE-502), draws them as an attack-path diagram, catches hardcoded secrets, and audits Dockerfile, Kubernetes, Terraform, and GitHub Actions configurations.
+- **Runtime DAST Evidence Correlation**: Import OWASP ZAP Traditional JSON and Nuclei JSONL/JSON reports and deterministically match observed requests (HTTP method + templated path) to static endpoint nodes. Matched endpoints gain `runtime_observed` metadata, runtime-only endpoints are reported instead of invented, and runtime-confirmed critical/high findings can satisfy the strict policy reachability gate -- all without launching a scanner or making network calls.
 - **Web/API Misconfiguration Checks**: Flags broken JWT validation (`alg=none`, signature/expiry checks off), CORS that trusts any origin **with credentials**, disabled CSRF protection, cookies without `HttpOnly`/`Secure`, XXE-prone XML parsers, non-cryptographic RNGs used for tokens, and JS prototype pollution across C#, JS/TS, PHP, Go, and Java.
 - **Risk-Ranked "Fix First" List**: Scores every finding 0–10 by impact × exposure (anonymous, authenticated, or internal entry point, detected from framework auth markers) × evidence × confidence × CISA KEV, and groups them P0–P3 in reports, SARIF, and diagrams.
 - **STRIDE Threat Model**: Generates `THREAT_MODEL.md` and `threat-model.json` with affected components, assets, source evidence, static flows, severity/confidence, and verification steps. Facts and assessments are separated; `secdiagram threat-diff` compares saved versions offline. See [Threat modeling](docs/THREAT_MODELING.md).
@@ -99,6 +100,12 @@ print(f"Discovered {len(result.graph.nodes)} nodes and {len(result.graph.finding
 # Native taint and package reachability query:
 if result.has_taint_at("app/api.py", line=42):
     print("Tainted dataflow detected at line 42!")
+
+# Correlate runtime DAST evidence with the static endpoint graph:
+runtime = analyze(
+    AnalysisConfig(root=".", zap_report="zap.json", nuclei_report="nuclei.jsonl")
+)
+print(runtime.graph.meta["runtime_analysis"]["matched_requests"], "runtime requests matched")
 ```
 
 ---
@@ -161,7 +168,7 @@ For comprehensive guides, references, and deployment patterns, see:
 | :--- | :--- |
 | [**Architecture Diagrams & Image Rendering**](docs/ARCHITECTURE_DIAGRAMS.md) | C4 high-level diagrams, visual tiering, detail modes, PNG/SVG/PDF rendering, and providers. |
 | [**Container & Docker Compose Guide**](docs/CONTAINER_AND_COMPOSE.md) | Standalone Docker & Podman, Windows Git Bash tips, SELinux mode, and local Ollama Compose. |
-| [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
+| [**Security, IaC & Runtime Evidence**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, ZAP/Nuclei runtime DAST correlation, CycloneDX VEX. |
 | [**Rust / Axum / Actix Support**](docs/RUST_SUPPORT.md) | Supported syntax, Cargo inventory, evidence-backed rules, offline examples and coverage limits. |
 | [**Threat Modeling & Diffs**](docs/THREAT_MODELING.md) | Facts versus assessments, source-linked STRIDE observations and version comparison. |
 | [**Hardened Platform Server & REST API**](docs/SERVER_API.md) | Daemon mode (`secdiagram serve`), authentication, rate limits, request caps, and config schema. |

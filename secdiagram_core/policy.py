@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .confidence import BLOCK_CONFIDENCE_THRESHOLD, compute_confidence
+from .dast_reports import DAST_SOURCES
 from .exposure import BLOCK_ELIGIBLE_EXPOSURES, classify_exposure
 from .model import Finding, Graph
 from .reachability import (
@@ -89,6 +90,11 @@ DEPENDENCY_ACTIONS = (
     "Confirm the vulnerable code path is not reachable",
     "Pin and monitor the dependency for a fix",
 )
+RUNTIME_ACTIONS = (
+    "Reproduce the runtime finding against the affected endpoint",
+    "Fix or validate the affected endpoint and parameter",
+    "Add a regression test that covers the observed request",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +149,12 @@ def _is_dependency_finding(finding: Finding) -> bool:
     return bool(finding.metadata.get("package") or finding.metadata.get("cves"))
 
 
+def _is_runtime_confirmed(finding: Finding) -> bool:
+    return finding.source in DAST_SOURCES and bool(
+        finding.metadata.get("runtime_confirmed")
+    )
+
+
 def _package_in_use(graph: Graph, finding: Finding, dependency_usage: dict[str, Any] | None) -> bool:
     """True when the affected package is imported and reachable from an entry point.
 
@@ -176,6 +188,8 @@ def _package_in_use(graph: Graph, finding: Finding, dependency_usage: dict[str, 
 def _evidence_quality(graph: Graph, finding: Finding) -> str:
     if _is_llm_sourced(finding):
         return "llm_only"
+    if _is_runtime_confirmed(finding):
+        return "externally_verified"
     if finding.category == "secret" and _secret_kind(finding) == "provider_token":
         return "provider_verified"
     validation = finding.metadata.get("validation") or {}
@@ -191,6 +205,8 @@ def _evidence_quality(graph: Graph, finding: Finding) -> str:
 
 
 def _required_actions(finding: Finding) -> tuple[str, ...]:
+    if _is_runtime_confirmed(finding):
+        return RUNTIME_ACTIONS
     if finding.category == "secret":
         return SECRET_REMOVAL_ACTIONS
     if _is_dependency_finding(finding):
@@ -208,6 +224,11 @@ def _blocking_eligibility(
     dependency_usage: dict[str, Any] | None = None,
 ) -> str | None:
     """Return None when the category-specific conditions all hold, else the reason they do not."""
+    if _is_runtime_confirmed(finding):
+        # A DAST scanner observed the issue against the live endpoint; the
+        # remaining gates (severity, confidence, reachability, exposure) still
+        # apply.
+        return None
     if finding.category == "secret":
         if _secret_kind(finding) != "provider_token":
             return "secret is not a format-verified provider token"
@@ -277,12 +298,18 @@ def evaluate_finding(graph: Graph, finding: Finding, dependency_usage: dict[str,
             reason = f"mitigation status '{mitigation}' indicates a compensating control"
         elif exposure not in BLOCK_ELIGIBLE_EXPOSURES:
             reason = f"exposure '{exposure}' is not blocking-eligible"
-        elif finding.category not in HIGH_RISK_CATEGORIES and not _is_dependency_finding(finding):
+        elif (
+            finding.category not in HIGH_RISK_CATEGORIES
+            and not _is_dependency_finding(finding)
+            and not _is_runtime_confirmed(finding)
+        ):
             reason = "category is not in the approved high-risk scope"
 
     if reason is None:
         if finding.category == "secret":
             policy_reason = "Verified provider-specific secret exposed in source"
+        elif _is_runtime_confirmed(finding):
+            policy_reason = "Runtime-confirmed finding observed at a reachable endpoint"
         elif _is_dependency_finding(finding):
             policy_reason = "Known-exploited vulnerability in a used, reachable dependency"
         else:

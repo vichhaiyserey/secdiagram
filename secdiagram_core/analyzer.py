@@ -13,6 +13,7 @@ from typing import Any
 from .advisories import apply_advisories, load_advisories
 from .ast_index import index_repo
 from .cache import IndexCache
+from .dast_reports import RuntimeObservation, correlate_runtime, load_dast_reports
 from .discover import RepoInfo, discover
 from .external_reports import load_external_reports
 from .features import assign_features
@@ -72,6 +73,8 @@ class AnalysisConfig:
     security: bool = True
     sonarqube_report: Path | None = None
     xray_report: Path | None = None
+    zap_report: Path | None = None
+    nuclei_report: Path | None = None
     advisory_dbs: list[Path] = field(default_factory=list)
     jobs: int = 0
     cache_dir: Path | None = None
@@ -283,6 +286,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
 
     stage("threat analysis")
     findings: list[Finding] = []
+    runtime_observations: list[RuntimeObservation] = []
+    runtime_summaries: list[dict[str, Any]] = []
     if config.security:
         findings.extend(analyze_iac(graph, repo))
         findings.extend(analyze_security(graph, indexes, resolver, repo.root, repo.rel_files))
@@ -298,6 +303,13 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
                 plugin_errors.append(_plugin_error("security_provider", custom_provider.name, exc, repo.root))
                 continue
             findings.extend(_disambiguate_plugin_findings(custom_provider.name, provider_findings, findings))
+        runtime_findings, runtime_observations, runtime_summaries = load_dast_reports(
+            repo.root,
+            repo.rel_files,
+            config.zap_report,
+            config.nuclei_report,
+        )
+        findings.extend(runtime_findings)
         external, external_summaries = load_external_reports(
             repo.root,
             repo.rel_files,
@@ -305,8 +317,14 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             config.xray_report,
         )
         findings.extend(external)
-        if external_summaries:
-            graph.meta["external_reports"] = external_summaries
+        report_summaries = sorted(
+            list(external_summaries) + list(runtime_summaries),
+            key=lambda item: (str(item.get("source") or ""), str(item.get("file") or "")),
+        )
+        if report_summaries:
+            graph.meta["external_reports"] = report_summaries
+        if runtime_summaries:
+            graph.meta["runtime_reports"] = list(runtime_summaries)
     merged: dict[str, Finding] = {}
     for finding in findings:
         merged.setdefault(finding.id, finding)
@@ -314,6 +332,8 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if plugin_errors:
         graph.meta["plugin_errors"] = plugin_errors
     annotate_flows(graph)
+    if runtime_summaries:
+        graph.meta["runtime_analysis"] = correlate_runtime(graph, runtime_observations)
     if config.advisory_dbs:
         advisory_index, advisory_summaries = load_advisories(config.advisory_dbs)
         validated = apply_advisories(graph.findings, advisory_index)
@@ -443,6 +463,8 @@ def analyze(
     security: bool = True,
     sonarqube_report: Path | None = None,
     xray_report: Path | None = None,
+    zap_report: Path | None = None,
+    nuclei_report: Path | None = None,
     advisory_dbs: list[Path] | None = None,
     jobs: int = 0,
     cache_dir: Path | None = None,
@@ -462,6 +484,8 @@ def analyze(
         security=security,
         sonarqube_report=sonarqube_report,
         xray_report=xray_report,
+        zap_report=zap_report,
+        nuclei_report=nuclei_report,
         advisory_dbs=advisory_dbs or [],
         jobs=jobs,
         cache_dir=cache_dir,
