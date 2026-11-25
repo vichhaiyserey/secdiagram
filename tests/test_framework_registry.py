@@ -158,8 +158,10 @@ class FrameworkRegistryTests(unittest.TestCase):
             command = [finding for finding in findings if finding.category == "command"]
             self.assertEqual(len(command), 2)
             self.assertEqual(graph.nodes, {})
+            self.assertEqual(
+                sorted(finding.severity for finding in command), ["critical", "high"]
+            )
             for finding in command:
                 with self.subTest(title=finding.title):
                     self.assertIsNone(finding.node_id)
-                    self.assertEqual(finding.severity, "critical")
                     self.assertEqual([loc.ref for loc in finding.evidence], ["api.py:8"])
