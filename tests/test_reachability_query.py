@@ -32,13 +32,14 @@ class ReachabilityQueryTests(unittest.TestCase):
         # Query traces for a known tainted file in sample_app
         traces = self.result.get_taint_traces("app/service.py", 16)
         self.assertEqual(len(traces), 2)
+        self.assertEqual(sorted(trace.severity for trace in traces), ["critical", "high"])
         for trace in traces:
             with self.subTest(finding=trace.finding_id):
                 payload = trace.to_dict()
                 self.assertIn(payload["finding_id"], {f.id for f in self.result.graph.findings})
                 self.assertEqual(
-                    (payload["category"], payload["severity"], payload["cwe"]),
-                    ("command", "critical", "CWE-78"),
+                    (payload["category"], payload["cwe"]),
+                    ("command", "CWE-78"),
                 )
                 self.assertEqual(payload["source"], {"path": "app/main.py", "line": 12, "col": 0})
                 self.assertEqual(payload["sink"], {"path": "app/service.py", "line": 16, "col": 11})

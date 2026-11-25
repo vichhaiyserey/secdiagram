@@ -28,9 +28,12 @@ class CacheSerializationTests(unittest.TestCase):
         command = [finding for finding in data["graph"]["findings"]
                    if finding.get("category") == "command"]
         self.assertTrue(command)
+        self.assertEqual(
+            sorted(finding.get("severity") for finding in command),
+            ["critical", "high"],
+        )
         for finding in command:
             self.assertEqual(finding.get("cwe"), "CWE-78")
-            self.assertEqual(finding.get("severity"), "critical")
             self.assertEqual(finding.get("evidence"), [{"path": "app/service.py", "line": 16, "col": 11}])
         with tempfile.TemporaryDirectory() as tmp:
             json_path = Path(tmp) / "cache" / "analysis_result.json"

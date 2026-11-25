@@ -151,6 +151,15 @@ SANITIZERS: dict[str, tuple[re.Pattern[str], ...]] = {
 
 SQL_PLACEHOLDER_RE = re.compile(r"\?|%s|%\([^)]+\)s|:\w+|@\w+")
 
+_STRING_LITERAL_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
+_CODE_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _command_text_dynamic(text: str) -> bool:
+    """Return True when command text references names outside string literals."""
+    without_literals = _STRING_LITERAL_RE.sub(" ", text)
+    return bool(_CODE_IDENT_RE.search(without_literals))
+
 PLACEHOLDERS = {
     "changeme",
     "change_me",
@@ -665,6 +674,16 @@ class SecurityAnalyzer:
         first = call.arg_texts[0].lstrip()
         return first.startswith(("[", "list(", "tuple("))
 
+    @staticmethod
+    def _dynamic_command(call: CallRec) -> bool:
+        """Return True when a shell command is assembled rather than a static literal."""
+        names = call.arg_names_by_position[0] if call.arg_names_by_position else []
+        if names or call.has_fstring:
+            return True
+        if "args" in call.keywords:
+            return _command_text_dynamic(call.keywords["args"])
+        return False
+
     # ------------------------------------------------------------------ taint
     def _initial_taint(self) -> None:
         for definition in self.defs.values():
@@ -888,7 +907,19 @@ class SecurityAnalyzer:
 
         command_tainted = self._category_tainted(scope, call, local, "command")
         if "subprocess" in callee and call.keywords.get("shell", "").lower() == "true":
-            severity = "critical" if command_tainted else "high"
+            dynamic_command = self._dynamic_command(call)
+            if command_tainted:
+                severity = "high"
+                shell_risk = "tainted"
+                detail = "executes a command built from untrusted input with shell=True"
+            elif dynamic_command:
+                severity = "medium"
+                shell_risk = "dynamic"
+                detail = "executes a dynamically constructed command with shell=True"
+            else:
+                severity = "low"
+                shell_risk = "static"
+                detail = "executes a static command with shell=True"
             node = self.graph.nodes.get(node_id) if node_id else None
             if node:
                 _tag(node, "command")
@@ -896,13 +927,14 @@ class SecurityAnalyzer:
                 category="command",
                 severity=severity,
                 title="Shell execution enabled",
-                message=f"`{callee}` uses shell=True at {loc.ref}.",
+                message=f"`{callee}` {detail} at {loc.ref}.",
                 loc=loc,
                 cwe="CWE-78",
                 node_id=node_id,
                 confidence=0.95,
                 recommendation="Avoid shell=True; pass an argv list and validate inputs.",
                 trace=trace if command_tainted else None,
+                metadata={"shell_execution": shell_risk},
             )
 
         custom_sinks = get_registered_sinks()
