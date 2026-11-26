@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from . import SCHEMA_VERSION, __version__
+from .dependency_remediation import dependency_details
 from .high_level import HighLevelArchitecture
 from .model import Finding, Graph
 from .redaction import redact_snippet_line
@@ -165,6 +166,8 @@ def render_html(
     snippet_maps = _snippet_maps(root, graph.findings) if root is not None else {}
     for finding in graph.findings:
         entry = finding.to_dict()
+        if details := dependency_details(finding):
+            entry["dependency"] = details
         if finding.evidence:
             loc = finding.evidence[0]
             entry["loc"] = loc.to_dict()
@@ -913,6 +916,16 @@ __MERMAID_SCRIPT__
   function fillDetail(dt, f) {
     dt.appendChild(el("div", "mini muted", "Message"));
     dt.appendChild(document.createTextNode(f.message));
+    if (f.dependency) {
+      var dependency = document.createElement("p");
+      var d = f.dependency;
+      dependency.textContent = [d.advisory, d.package, d.reported_version,
+        "Resolved version: " + (d.resolved_version || "unknown"),
+        "Reported fix: " + (d.fixed_version || (d.fixed_versions || []).join(", ") || "unknown"),
+        d.target, d.report, d.reachability, d.disposition,
+        (d.dependency_path || []).join(" → "), (d.locations || []).join(", ")].filter(Boolean).join(" · ");
+      dt.appendChild(dependency);
+    }
     if (f.recommendation) {
       dt.appendChild(el("div", "mini muted", "Remediation"));
       dt.appendChild(document.createTextNode(f.recommendation));

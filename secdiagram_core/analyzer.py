@@ -14,6 +14,11 @@ from .advisories import apply_advisories, load_advisories
 from .ast_index import index_repo
 from .cache import IndexCache
 from .dast_reports import RuntimeObservation, correlate_runtime, load_dast_reports
+from .dependency_correlation import correlate
+from .dependency_graph import add_inventory
+from .dependency_inventory import pub_inventory
+from .dependency_reports import import_reports
+from .dependency_versions import apply_pub_ranges
 from .discover import RepoInfo, discover
 from .external_reports import load_external_reports
 from .features import assign_features
@@ -73,6 +78,9 @@ class AnalysisConfig:
     max_nodes: int = 2000
     security: bool = True
     sonarqube_report: Path | None = None
+    trivy_report: Path | None = None
+    sbom: Path | None = None
+    verified_dependency_reports: dict[str, dict[str, Any]] | None = None
     xray_report: Path | None = None
     zap_report: Path | None = None
     nuclei_report: Path | None = None
@@ -274,6 +282,11 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if polyglot_index.files:
         build_polyglot_graph(graph, polyglot_index)
 
+    packages, dependency_warnings = pub_inventory(repo.root, repo.rel_files)
+    add_inventory(graph, packages)
+    if dependency_warnings:
+        graph.meta["dependency_inventory_warnings"] = dependency_warnings
+
     plugin_errors: list[dict[str, str]] = []
     for custom_indexer in sorted(get_registered_indexers(), key=lambda item: str(item.name)):
         snapshot = (copy.deepcopy(graph.nodes), list(graph.edges), list(graph.features))
@@ -289,6 +302,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     findings: list[Finding] = []
     runtime_observations: list[RuntimeObservation] = []
     runtime_summaries: list[dict[str, Any]] = []
+    dependency_findings: list[Finding] = []
     if config.security:
         findings.extend(analyze_iac(graph, repo))
         findings.extend(analyze_security(graph, indexes, resolver, repo.root, repo.rel_files))
@@ -318,6 +332,11 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             config.xray_report,
         )
         findings.extend(external)
+        dependency_findings = import_reports(
+            graph, config.trivy_report, config.sbom, config.verified_dependency_reports,
+        )
+
+
         report_summaries = sorted(
             list(external_summaries) + list(runtime_summaries),
             key=lambda item: (str(item.get("source") or ""), str(item.get("file") or "")),
@@ -335,11 +354,18 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     annotate_flows(graph)
     if runtime_summaries:
         graph.meta["runtime_analysis"] = correlate_runtime(graph, runtime_observations)
-    if config.advisory_dbs:
-        advisory_index, advisory_summaries = load_advisories(config.advisory_dbs)
-        validated = apply_advisories(graph.findings, advisory_index)
+    verified_advisory = (config.verified_dependency_reports or {}).get("advisory")
+    if config.advisory_dbs or verified_advisory is not None:
+        osv_records: list[Any] = []
+        advisory_index, advisory_summaries = load_advisories(
+            config.advisory_dbs, osv_records=osv_records, verified_document=verified_advisory,
+        )
+        apply_pub_ranges(dependency_findings, osv_records)
+        validated = apply_advisories([*graph.findings, *dependency_findings], advisory_index)
         graph.meta["advisory_sources"] = advisory_summaries
         graph.meta["advisory_validated_findings"] = validated
+    graph.findings.extend(dependency_findings)
+    correlate(graph, polyglot_index, dependency_findings)
     # Rank by risk last, once flows and exploit intelligence (KEV) are known.
     score_findings(graph)
     summarize_threat_model(graph, build_threat_model(graph))
@@ -469,6 +495,8 @@ def analyze(
     max_nodes: int = 2000,
     security: bool = True,
     sonarqube_report: Path | None = None,
+    trivy_report: Path | None = None,
+    sbom: Path | None = None,
     xray_report: Path | None = None,
     zap_report: Path | None = None,
     nuclei_report: Path | None = None,
@@ -491,6 +519,8 @@ def analyze(
         security=security,
         sonarqube_report=sonarqube_report,
         xray_report=xray_report,
+        trivy_report=trivy_report,
+        sbom=sbom,
         zap_report=zap_report,
         nuclei_report=nuclei_report,
         advisory_dbs=advisory_dbs or [],

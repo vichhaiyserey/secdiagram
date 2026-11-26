@@ -6,14 +6,25 @@ from collections import defaultdict, deque
 from typing import Any
 
 from . import __version__
+from .dependency_remediation import dependency_details
 from .features import feature_for_path
-from .model import Edge, Graph, Node
+from .model import Edge, Finding, Graph, Node
 from .risk import risk_sort_key
 from .taint_flows import build_taint_flows, render_taint_mermaid
 
 
 def _esc(text: Any) -> str:
     return " ".join(str(text).split()).replace("|", "\\|")
+
+
+def _dependency_cell(value: Any) -> str:
+    # Treat imported scanner fields as literal text in Markdown renderers.
+    entities = str.maketrans({char: f"&#{ord(char)};" for char in "<>&[]`*!"})
+    return _esc(str(value or "-").translate(entities))
+
+
+def _finding_text(finding: Finding, value: str) -> str:
+    return _dependency_cell(value) if finding.source in {"trivy", "cyclonedx"} else _esc(value)
 
 
 def _ref(node: Node) -> str:
@@ -112,7 +123,7 @@ def _fix_first_section(graph: Graph, limit: int = 10) -> list[str]:
         risk = finding.metadata["risk"]
         ref = f"`{finding.evidence[0].ref}`" if finding.evidence else "-"
         row = (
-            f"| **{risk['priority']}** | {risk['score']} | {_esc(finding.title)} ({_esc(finding.cwe or finding.category)}) | "
+            f"| **{risk['priority']}** | {risk['score']} | {_finding_text(finding, finding.title)} ({_esc(finding.cwe or finding.category)}) | "
             f"{_esc(risk['exposure'])} | {_esc(risk['evidence'])} | {ref} |"
         )
         out.append(row.encode("ascii", "replace").decode("ascii"))
@@ -145,7 +156,7 @@ def _attack_paths_section(graph: Graph, limit: int = 10) -> list[str]:
             label = f"{routes[0].get('method', '').upper()} {routes[0].get('path', '')}" if routes else node.name
             hops.append(f"`{_esc(label)}`")
         sink = finding.evidence[0].ref if finding.evidence else flow.hops[-1].loc.ref
-        hops.append(f"**{_esc(finding.title)}** ({_esc(finding.cwe or finding.category)}) at `{_esc(sink)}`")
+        hops.append(f"**{_finding_text(finding, finding.title)}** ({_esc(finding.cwe or finding.category)}) at `{_esc(sink)}`")
         risk = finding.metadata.get("risk") or {}
         label = f"{risk['priority']} {risk['score']}" if "priority" in risk else finding.severity
         line = f"{number}. **{_esc(label)}** - " + " -> ".join(hops)
@@ -184,7 +195,7 @@ def _policy_section(graph: Graph, policy: dict[str, Any]) -> list[str]:
                 continue
             actions = "; ".join(finding.required_actions) if finding.required_actions else "-"
             out.append(
-                f"| {_esc(finding.title)} | {_esc(finding.policy_reason)} | {finding.confidence_score} | "
+                f"| {_finding_text(finding, finding.title)} | {_esc(finding.policy_reason)} | {finding.confidence_score} | "
                 f"{_esc(finding.reachability)} | {_esc(finding.exposure)} | {_esc(actions)} |"
             )
         out.append("")
@@ -388,6 +399,23 @@ def render_markdown(
                 "Tainted findings rise to critical; risky patterns without taint remain review items."
             )
             lines.append("")
+            dependency_rows = [details for finding in new_findings if (details := dependency_details(finding))]
+            if dependency_rows:
+                lines.extend([
+                    "### Dependency remediation", "",
+                    "| Advisory | Package | Reported | Resolved | Fix | Evidence | Reachability | Disposition | Action |",
+                    "|---|---|---|---|---|---|---|---|---|",
+                ])
+                for row in dependency_rows:
+                    evidence = ", ".join(filter(None, [
+                        row["target"], row["report"], *row["locations"], *row["dependency_path"],
+                    ]))
+                    values = [
+                        row["advisory"], row["package"], row["reported_version"], row["resolved_version"],
+                        row["fixed_version"] or ", ".join(row["fixed_versions"]), evidence, row["reachability"], row["disposition"], row["recommendation"],
+                    ]
+                    lines.append("| " + " | ".join(_dependency_cell(value) for value in values) + " |")
+                lines.append("")
             if policy_active:
                 lines.append("| Severity | Enforcement | Confidence | Exposure | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
                 lines.append("|---|---|---|---|---|---|---|---|---|---|")
@@ -398,7 +426,7 @@ def render_markdown(
                         f"| **{_esc(finding.severity)}** | {_esc(finding.enforcement)} | "
                         f"{finding.confidence_score or finding.confidence} | {_esc(finding.exposure or '-')} | "
                         f"{_esc(finding.category)} | {_esc(finding.cwe or '-')} | {ref} | {trace} | "
-                        f"{_esc(finding.title)} | {_esc(finding.recommendation)} |"
+                        f"{_finding_text(finding, finding.title)} | {_finding_text(finding, finding.recommendation)} |"
                     )
             else:
                 lines.append("| Severity | Category | CWE | Evidence | Taint path | Finding | Recommendation |")
@@ -408,8 +436,8 @@ def render_markdown(
                     trace = " -> ".join(f"`{_esc(loc.ref)}`" for loc in finding.trace) if finding.trace else "-"
                     lines.append(
                         f"| **{_esc(finding.severity)}** | {_esc(finding.category)} | "
-                        f"{_esc(finding.cwe or '-')} | {ref} | {trace} | {_esc(finding.title)} | "
-                        f"{_esc(finding.recommendation)} |"
+                        f"{_esc(finding.cwe or '-')} | {ref} | {trace} | {_finding_text(finding, finding.title)} | "
+                        f"{_finding_text(finding, finding.recommendation)} |"
                     )
             lines.append("")
         if policy_active:
