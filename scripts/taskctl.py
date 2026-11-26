@@ -515,11 +515,13 @@ def sync_tasks(config: dict[str, Any], *, offline: bool = False, prune: bool = F
         records = load_cache(config)
         if not records:
             print("No cached tasks to re-index.")
-            return 0
+        else:
+            written = write_cache(config, records, prune=prune)
+            print(f"Wrote {len(written)} file(s) under {cache_dir(config)}")
     else:
         records = fetch_tasks(config, state="all")
-    written = write_cache(config, records, prune=prune)
-    print(f"Wrote {len(written)} file(s) under {cache_dir(config)}")
+        written = write_cache(config, records, prune=prune)
+        print(f"Wrote {len(written)} file(s) under {cache_dir(config)}")
     return 0
 
 
@@ -631,11 +633,10 @@ def list_tasks(
         records = [record for record in records if login in record.assignees]
     if as_json:
         print(json.dumps([record.meta() for record in records], indent=2, sort_keys=True))
-        return 0
-    if not records:
+    elif not records:
         print("No matching tasks.")
-        return 0
-    print_table(records)
+    else:
+        print_table(records)
     return 0
 
 
@@ -946,31 +947,31 @@ def done_task(config: dict[str, Any], args: argparse.Namespace) -> int:
 def project_sync_task(config: dict[str, Any], args: argparse.Namespace) -> int:
     if not project_number(config):
         print("warning: no project configured; skipping project sync", file=sys.stderr)
-        return 0
-    issue = gh_json(
-        [
-            "issue",
-            "view",
-            str(args.number),
-            "--repo",
-            repo_slug(config),
-            "--json",
-            "number,title,state,labels,assignees,milestone,updatedAt,url,body",
-        ]
-    )
-    record = task_from_issue(issue)
-    item_id = ensure_project_item(config, args.number)
-    if args.status:
-        set_single_select(config, item_id, "Status", args.status)
-    labels = set(record.labels)
-    if any(label.startswith("priority:") for label in labels):
-        set_single_select(config, item_id, "Priority", record.priority)
-    if any(label.startswith("type:") for label in labels):
-        type_option = str(config.get("types", {}).get(record.type, {}).get("title", record.type))
-        set_single_select(config, item_id, "Type", type_option)
-    if record.area:
-        set_single_select(config, item_id, "Area", area_title(record.area))
-    print(f"Synced #{args.number} to the project board.")
+    else:
+        issue = gh_json(
+            [
+                "issue",
+                "view",
+                str(args.number),
+                "--repo",
+                repo_slug(config),
+                "--json",
+                "number,title,state,labels,assignees,milestone,updatedAt,url,body",
+            ]
+        )
+        record = task_from_issue(issue)
+        item_id = ensure_project_item(config, args.number)
+        if args.status:
+            set_single_select(config, item_id, "Status", args.status)
+        labels = set(record.labels)
+        if any(label.startswith("priority:") for label in labels):
+            set_single_select(config, item_id, "Priority", record.priority)
+        if any(label.startswith("type:") for label in labels):
+            type_option = str(config.get("types", {}).get(record.type, {}).get("title", record.type))
+            set_single_select(config, item_id, "Type", type_option)
+        if record.area:
+            set_single_select(config, item_id, "Area", area_title(record.area))
+        print(f"Synced #{args.number} to the project board.")
     return 0
 
 
@@ -1164,11 +1165,11 @@ def bootstrap(config: dict[str, Any], args: argparse.Namespace) -> int:
     ensure_milestones(config, dry_run=args.dry_run)
     if args.skip_project:
         print("Skipped project setup (--skip-project).")
-        return 0
-    project = ensure_project(config, dry_run=args.dry_run)
-    if project:
-        ensure_fields(config, project, dry_run=args.dry_run)
-    print("Bootstrap complete.")
+    else:
+        project = ensure_project(config, dry_run=args.dry_run)
+        if project:
+            ensure_fields(config, project, dry_run=args.dry_run)
+        print("Bootstrap complete.")
     return 0
 
 

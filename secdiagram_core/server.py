@@ -533,7 +533,13 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         data: Any,
         extra_headers: Mapping[str, str] | None = None,
     ) -> None:
-        payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+        raw_json = (
+            json.dumps(data, indent=2, sort_keys=True)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
+        payload = raw_json.encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
@@ -561,10 +567,15 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _send_bytes(self, status_code: int, payload: bytes, content_type: str) -> None:
+        overrides = (
+            {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox"}
+            if content_type == "image/svg+xml"
+            else None
+        )
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_security_headers()
+        self.send_security_headers(overrides)
         self.end_headers()
         self.wfile.write(payload)
 
