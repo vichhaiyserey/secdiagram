@@ -1,4 +1,4 @@
-"""Stdlib-only lexical analyzer for C#/.NET, JavaScript/TypeScript, PHP, Go and Rust.
+"""Stdlib-only lexical analyzer for C#/.NET, JS/TS, PHP, Go, Rust and Dart.
 
 Analyzed code is untrusted data: it is read as text and never imported,
 compiled or executed (AGENTS.md Rule 3). Each file is tokenized once into two
@@ -8,10 +8,10 @@ views of identical length:
 * ``masked`` - comments *and* string contents blanked (structure, braces)
 
 Because both views keep every character offset and newline, a position found in
-one view is valid in the other. Declarations are recognized with per-language
-line regexes on the masked view, bodies are delimited by bracket matching, and
+one view is valid in the other. Declarations use per-language lexical patterns
+or bounded token grammars, bodies are delimited by bracket matching, and
 framework conventions (ASP.NET Core, Express/NestJS/Next.js, Laravel/Symfony,
-net/http/gin/echo/chi) turn handlers into endpoint nodes with routes.
+net/http/gin/echo/chi, Flutter/GoRouter/Shelf) identify routes and entrypoints.
 
 Every output is deterministic: files, symbols and edges are emitted in sorted
 order and identifiers come from :func:`secdiagram_core.model.stable_id`.
@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import dart_declarations as dart_decl
 from .model import Graph, Loc, Node, stable_id
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
@@ -112,6 +113,7 @@ class PgFile:
     namespace: str = ""
     imports: list[tuple[str, int]] = field(default_factory=list)
     symbols: list[PgSymbol] = field(default_factory=list)
+    diagnostics: list[str] = field(default_factory=list)
     _line_starts: list[int] = field(default_factory=list)
     _brace_parent: dict[int, int] = field(default_factory=dict)
     _brace_close: dict[int, int] = field(default_factory=dict)
@@ -170,6 +172,70 @@ def _blank_php_open_tag(code: list[str], masked: list[str], tag: re.Match[str]) 
     if tag.group(0) != "<?=":
         _blank(code, tag.start(), tag.end())
         _blank(masked, tag.start(), tag.end())
+
+
+def _dart_string_end(text: str, pos: int, token: str) -> tuple[int, int]:
+    """Find a Dart string's real end, including nested interpolation strings.
+
+    Explicit frames avoid Python recursion on hostile `${...}` nesting. String
+    expressions remain data; their contents never become structural tokens.
+    """
+    delim = token[-3:] if token.endswith(('"""', "'''")) else token[-1]
+    # A nonempty delimiter is a string frame; an empty one is ${expression}.
+    frames = [(delim, token.startswith("r"), 0)]
+    n = len(text)
+    while pos < n:
+        quote, raw, depth = frames[-1]
+        if quote:
+            if not raw and text[pos] == "\\":
+                pos += 2
+                continue
+            if text.startswith(quote, pos):
+                end = pos + len(quote)
+                frames.pop()
+                if not frames:
+                    return end, pos
+                pos = end
+                continue
+            if not raw and text.startswith("${", pos):
+                frames.append(("", False, 1))
+                pos += 2
+                continue
+            if text[pos] == "\n" and len(quote) == 1:
+                return pos, pos  # malformed single-line string; recover at newline
+        elif text.startswith("//", pos):
+            end = text.find("\n", pos + 2)
+            pos = n if end < 0 else end
+            continue
+        elif text.startswith("/*", pos):
+            comment_depth = 1
+            pos += 2
+            while pos < n and comment_depth:
+                comment = _RUST_COMMENT_DELIMITER.search(text, pos)
+                if comment is None:
+                    pos = n
+                    break
+                comment_depth += 1 if comment.group() == "/*" else -1
+                pos = comment.end()
+            continue
+        elif text[pos] in "\"'" or (text[pos] == "r" and pos + 1 < n and text[pos + 1] in "\"'"):
+            raw_inner = text[pos] == "r"
+            quote_pos = pos + int(raw_inner)
+            quote = text[quote_pos]
+            if text.startswith(quote * 3, quote_pos):
+                quote *= 3
+            frames.append((quote, raw_inner, 0))
+            pos = quote_pos + len(quote)
+            continue
+        elif text[pos] == "{":
+            frames[-1] = ("", False, depth + 1)
+        elif text[pos] == "}":
+            if depth == 1:
+                frames.pop()
+            else:
+                frames[-1] = ("", False, depth - 1)
+        pos += 1
+    return n, n
 
 
 def _views(text: str, language: str) -> tuple[str, str]:
@@ -248,20 +314,8 @@ def _views(text: str, language: str) -> tuple[str, str]:
             _blank(masked, start + (2 if token.startswith("b") else 1), match.end() - 1)
             pos = match.end()
             continue
-        if language == "dart" and token.endswith(('"""', "'''")):
-            delim = token[-3:]
-            raw_dart = token.startswith("r")
-            j = match.end()
-            end = n
-            while j < n:
-                if not raw_dart and text[j] == "\\":
-                    j += 2
-                    continue
-                if text.startswith(delim, j):
-                    end = j + 3
-                    break
-                j += 1
-            inner_end = end - 3 if end <= n and text.startswith(delim, end - 3) else end
+        if language == "dart":
+            end, inner_end = _dart_string_end(text, match.end(), token)
             _blank(masked, match.end(), inner_end)
             pos = max(end, start + 1)
             continue
@@ -1592,21 +1646,10 @@ def _parse_rust(pf: PgFile) -> None:
 # ------------------------------------------------------------------ Dart / Flutter
 
 DART_IMPORT_RE = re.compile(r"^\s*(?:import|export|part)\s+['\"]([^'\"]+)['\"]")
-DART_TYPE_RE = re.compile(
-    r"^\s*(?:abstract\s+(?:interface\s+|base\s+|final\s+|sealed\s+)?)?"
-    r"(class|mixin|enum|extension)\s+([A-Za-z_]\w*)"
-)
 DART_BASES_RE = re.compile(r"\b(?:extends|with|implements|on)\s+([^{]+)")
-DART_FN_RE = re.compile(
-    r"^\s*(?:(?:static|external|factory|const|abstract|override)\s+)*"
-    r"(?:[\w.<>, ?]+\s+)?([A-Za-z_]\w*)\s*\("
-)
-DART_NOT_FN = frozenset(
-    {
-        "if", "for", "while", "switch", "catch", "return", "throw", "assert",
-        "else", "try", "finally", "new", "const", "super", "this", "await",
-    }
-)
+_DART_NONSPACE = re.compile(r"\S")
+_DART_ROUTE_FIELD = re.compile(r"[()[\]{}]|\bpath\s*:\s*['\"]")
+_DART_PATH_LITERAL = re.compile(r"path\s*:\s*['\"]([^'\"]+)['\"]")
 DART_GOROUTE_RE = re.compile(r"\bGoRoute\s*\(")
 DART_SHELF_ROUTE_RE = re.compile(
     r"\b(?:router|app)\s*\.\s*(get|post|put|delete|patch|all)\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*([A-Za-z_]\w*)"
@@ -1663,102 +1706,160 @@ def _parse_dart(pf: PgFile) -> None:
     masked_lines = pf.masked.split("\n")
     code_lines = pf.code.split("\n")
     pairs = _brace_pairs(pf.masked)
-    scopes = _line_scopes(pf.masked, pf._line_starts)
 
     for idx, line in enumerate(code_lines):
         imp = DART_IMPORT_RE.match(line) if DART_IMPORT_RE.match(masked_lines[idx]) else None
         if imp:
             pf.imports.append((imp.group(1).strip(), idx + 1))
 
-    for idx, line in enumerate(masked_lines):
-        match = DART_TYPE_RE.match(line)
-        if not match:
+    # Advance once through declaration boundaries. Bodies are skipped wholesale:
+    # calls, closures and deeply nested widget trees are not declarations.
+    cursor = 0
+    owners: list[PgSymbol] = []
+    decorator_cache: dict[int, list[str]] = {}
+    while cursor < len(pf.masked):
+        found = _DART_NONSPACE.search(pf.masked, cursor)
+        if found is None:
+            break
+        start = found.start()
+        while owners and start >= owners[-1].body_end:
+            owners.pop()
+        if pf.masked[start] == "}":
+            cursor = start + 1
             continue
-        decl_kind, name = match.group(1), match.group(2)
-        pos = pf.line_start(idx + 1) + match.end()
-        body = _body_after(pf.masked, pairs, pos)
-        header = pf.code[pf.line_start(idx + 1) : body[0] if body[0] >= 0 else pf.line_start(idx + 1) + len(line)]
-        bases: list[str] = []
-        bases_m = DART_BASES_RE.search(header)
-        if bases_m:
-            raw_bases = re.split(r"\b(?:extends|with|implements|on)\b", bases_m.group(1))
-            for chunk in raw_bases:
-                for b in chunk.split(","):
-                    b = b.strip()
-                    if b:
-                        bases.append(b)
-        decos = _decorators_before(code_lines, idx, "@")
-        sym = PgSymbol(
-            kind="class",
-            name=name,
-            qualname=f"{pf.path}:{name}",
-            line=idx + 1,
-            end_line=pf.line_of(body[1]) if body[1] >= 0 else idx + 1,
-            body_start=body[0],
-            body_end=body[1],
-            decl_kind=decl_kind,
-            bases=sorted(set(bases)),
-            decorators=decos,
-            stereotype=_dart_stereotype(name, bases),
-        )
-        _add_symbol(pf, sym)
+        header = dart_decl.strip_annotations(dart_decl.scan_header(pf.masked, start))
+        cursor = max(start + 1, header.end)
+        if header.limited:
+            pf.diagnostics.append(f"Dart declaration scan limit at line {pf.line_of(start)}")
+            newline = pf.masked.find("\n", cursor)
+            cursor = len(pf.masked) if newline < 0 else newline + 1
+            continue
+        if header.terminator is None:
+            continue
+        body = _body_after(pf.masked, pairs, header.terminator.start)
+        type_decl = dart_decl.type_declaration(header)
+        if type_decl is not None:
+            _add_dart_type(pf, header, type_decl, body, code_lines, owners, decorator_cache)
+            if body[0] >= 0:
+                cursor = body[0] + 1
+            continue
+        owner = owners[-1] if owners else None
+        declaration = dart_decl.function_declaration(header, owner.name if owner else "")
+        if header.limited:
+            pf.diagnostics.append(f"Dart declaration type-depth limit at line {pf.line_of(start)}")
+        if declaration is not None:
+            _add_dart_function(pf, header, declaration, body, code_lines, owner, decorator_cache)
+        # Unknown field/map initializers also get skipped, never entered as a
+        # class scope. A malformed header cannot borrow a later function's body.
+        if body[0] >= 0:
+            cursor = body[1] + 1
 
-    classes_by_brace = {s.body_start: s for s in pf.symbols if s.kind == "class" and s.body_start >= 0}
-    for idx, line in enumerate(masked_lines):
-        if DART_TYPE_RE.match(line):
-            continue
-        match = DART_FN_RE.match(line)
-        if not match:
-            continue
-        name = match.group(1)
-        if name in DART_NOT_FN:
-            continue
-        open_pos = pf.line_start(idx + 1) + match.end() - 1
-        close = _match_paren(pf, open_pos)
-        if close == -1:
-            continue
-        body = _body_after(pf.masked, pairs, close + 1)
-        if body[0] < 0 or body[1] <= body[0]:
-            continue
-        owner = classes_by_brace.get(scopes[idx]) if idx < len(scopes) else None
-        if owner is not None and name == owner.name:
-            continue  # constructor
-        raw_params = _split_params(pf.code[open_pos + 1 : close])
-        decos = _decorators_before(code_lines, idx, "@")
-        owner_qual = owner.qualname if owner is not None else ""
-        is_method = owner is not None
-        tainted_params = _dart_tainted_params(raw_params)
-        is_entrypoint = bool(tainted_params) or name in ("main", "onRequest", "onGenerateRoute")
-        sym = PgSymbol(
-            kind="endpoint" if (is_entrypoint and tainted_params) else ("method" if is_method else "function"),
-            name=name,
-            qualname=f"{owner_qual}.{name}" if owner_qual else f"{pf.path}:{name}",
-            line=idx + 1,
-            end_line=pf.line_of(body[1]) if body[1] >= 0 else idx + 1,
-            body_start=body[0],
-            body_end=body[1],
-            container=owner_qual,
-            decl_kind="method" if is_method else "function",
-            params=raw_params,
-            decorators=decos,
-            tainted_params=tainted_params,
-            routes=[{"method": "INGRESS", "path": f"/{name}"}] if (is_entrypoint and tainted_params) else [],
-            auth="anonymous" if (is_entrypoint and tainted_params) else "",
-            framework="flutter" if (is_entrypoint and tainted_params) else "",
-        )
-        _add_symbol(pf, sym)
+    _dart_routes(pf)
 
+
+def _dart_decorators(code_lines: list[str], line: int, cache: dict[int, list[str]]) -> list[str]:
+    # Same-line declarations share a preceding gap. Scan that gap only once,
+    # otherwise hostile blank lines followed by many members cost O(n squared).
+    if line not in cache:
+        cache[line] = _decorators_before(code_lines, line - 1, "@")
+    return list(cache[line])
+
+
+def _add_dart_type(
+    pf: PgFile, header: dart_decl.Header, declaration: dart_decl.Declaration,
+    body: tuple[int, int], code_lines: list[str], owners: list[PgSymbol],
+    decorator_cache: dict[int, list[str]],
+) -> None:
+    if not header.tokens:
+        return
+    line = pf.line_of(header.tokens[0].start)
+    name = declaration.name or f"extension@{line}"
+    header_text = pf.code[header.tokens[0].start : header.terminator.start] if header.terminator else ""
+    bases: list[str] = []
+    bases_m = DART_BASES_RE.search(header_text)
+    if bases_m:
+        raw_bases = re.split(r"\b(?:extends|with|implements|on)\b", bases_m.group(1))
+        for chunk in raw_bases:
+            bases.extend(b.strip() for b in _split_params(chunk) if b.strip())
+    sym = PgSymbol(
+        kind="class", name=name, qualname=f"{pf.path}:{name}", line=line,
+        end_line=pf.line_of(body[1]) if body[1] >= 0 else line,
+        body_start=body[0], body_end=body[1], decl_kind=declaration.kind,
+        bases=sorted(set(bases)), decorators=_dart_decorators(code_lines, line, decorator_cache),
+        stereotype=_dart_stereotype(name, bases),
+    )
+    _add_symbol(pf, sym)
+    if sym.has_body:
+        owners.append(sym)
+
+
+def _add_dart_function(
+    pf: PgFile, header: dart_decl.Header, declaration: dart_decl.Declaration,
+    body: tuple[int, int], code_lines: list[str], owner: PgSymbol | None,
+    decorator_cache: dict[int, list[str]],
+) -> None:
+    line = pf.line_of(header.tokens[0].start)
+    raw_params: list[str] = []
+    if declaration.params_start >= 0:
+        for part in _split_params(pf.code[declaration.params_start : declaration.params_end]):
+            if part.startswith(("{", "[")):
+                raw_params.extend(_split_params(part[1:-1]))
+            else:
+                raw_params.append(part)
+    owner_qual = owner.qualname if owner is not None else ""
+    tainted_params = _dart_tainted_params(raw_params)
+    ingress = bool(tainted_params) and declaration.kind != "constructor"
+    identity = declaration.name
+    if declaration.kind in ("getter", "setter"):
+        identity = ("get " if declaration.kind == "getter" else "set ") + identity
+    sym = PgSymbol(
+        kind="endpoint" if ingress else ("method" if owner else "function"),
+        name=declaration.name,
+        qualname=f"{owner_qual}.{identity}" if owner_qual else f"{pf.path}:{identity}",
+        line=line, end_line=pf.line_of(body[1]) if body[1] >= 0 else line,
+        body_start=body[0], body_end=body[1], container=owner_qual,
+        decl_kind=declaration.kind if declaration.kind != "function" else ("method" if owner else "function"),
+        params=raw_params, decorators=_dart_decorators(code_lines, line, decorator_cache),
+        tainted_params=tainted_params,
+        routes=[{"method": "INGRESS", "path": f"/{declaration.name}"}] if ingress else [],
+        auth="anonymous" if ingress else "", framework="flutter" if ingress else "",
+    )
+    _add_symbol(pf, sym)
+
+
+def _dart_route_path(pf: PgFile, start: int, end: int) -> str | None:
+    depth = 0
+    for match in _DART_ROUTE_FIELD.finditer(pf.masked, start, end):
+        value = match.group()
+        if value in ("(", "[", "{"):
+            depth += 1
+        elif value in (")", "]", "}"):
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            literal = _DART_PATH_LITERAL.match(pf.code, match.start(), end)
+            if literal:
+                return literal.group(1)
+    return None
+
+
+def _dart_routes(pf: PgFile) -> None:
     # GoRouter routes: GoRoute(path: '/...', ...)
+    remaining = 4 * len(pf.masked) + dart_decl.MAX_HEADER_CHARS
     for route_match in DART_GOROUTE_RE.finditer(pf.masked):
         open_pos = route_match.end() - 1
         close = _match_paren(pf, open_pos)
         if close == -1:
             continue
-        args_code = pf.code[open_pos + 1 : close]
-        path_m = re.search(r"\bpath\s*:\s*['\"]([^'\"]+)['\"]", args_code)
-        if not path_m:
+        window = min(close - open_pos - 1, dart_decl.MAX_HEADER_CHARS)
+        if window > remaining:
+            pf.diagnostics.append("Dart route scan work limit")
+            break
+        remaining -= window
+        route_path = _dart_route_path(pf, open_pos + 1, open_pos + 1 + window)
+        if route_path is None:
+            if close - open_pos - 1 > window:
+                pf.diagnostics.append(f"Dart route scan limit at line {pf.line_of(route_match.start())}")
             continue
-        route_path = path_m.group(1)
         call_line = pf.line_of(route_match.start())
         route_sym = PgSymbol(
             kind="endpoint",
@@ -1773,7 +1874,10 @@ def _parse_dart(pf: PgFile) -> None:
         _add_symbol(pf, route_sym)
 
     # Shelf / Dart backend routes: router.get('/path', handler)
-    for shelf_m in DART_SHELF_ROUTE_RE.finditer(pf.code):
+    for structural in DART_SHELF_ROUTE_RE.finditer(pf.masked):
+        shelf_m = DART_SHELF_ROUTE_RE.match(pf.code, structural.start())
+        if shelf_m is None:
+            continue
         verb, route_path, handler_ref = shelf_m.group(1).upper(), shelf_m.group(2), shelf_m.group(3)
         call_line = pf.line_of(shelf_m.start())
         _add_symbol(
@@ -1926,6 +2030,9 @@ def parse_polyglot_file(path: str, text: str) -> PgFile | None:
     language = language_for(path)
     if language is None:
         return None
+    # Check before allocating the two lexer views, including direct callers.
+    if len(text) > MAX_SOURCE_BYTES or len(text.encode("utf-8", errors="replace")) > MAX_SOURCE_BYTES:
+        return None
     pf = _new_file(path, language, text)
     PARSERS[language](pf)
     _detect_auth(pf)
@@ -1946,7 +2053,12 @@ def index_polyglot(root: Path, rel_files: list[str]) -> PolyglotIndex:
                 continue
             if resolved.stat().st_size > MAX_SOURCE_BYTES:
                 continue
-            text = resolved.read_text(encoding="utf-8", errors="replace")
+            # Bound the actual read too: the file may grow after stat().
+            with resolved.open("rb") as source:
+                raw = source.read(MAX_SOURCE_BYTES + 1)
+            if len(raw) > MAX_SOURCE_BYTES:
+                continue
+            text = raw.decode("utf-8", errors="replace")
         except (ValueError, OSError):
             continue
         pf = parse_polyglot_file(rel_path, text)
@@ -2342,3 +2454,6 @@ def build_polyglot_graph(graph: Graph, index: PolyglotIndex) -> None:
                             )
 
     graph.meta["polyglot_files"] = index.language_counts()
+    diagnostics = {path: list(pf.diagnostics) for path, pf in sorted(index.files.items()) if pf.diagnostics}
+    if diagnostics:
+        graph.meta["polyglot_diagnostics"] = diagnostics
