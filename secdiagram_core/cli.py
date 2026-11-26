@@ -505,6 +505,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="append structured audit events to FILE (default: stderr)",
     )
     parser.add_argument(
+        "--server-strict-port",
+        action="store_true",
+        default=False,
+        help="fail if the server port is already in use instead of choosing another port",
+    )
+    parser.add_argument(
         "--config",
         default=None,
         metavar="FILE",
@@ -605,6 +611,12 @@ def server_main(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help="append structured audit events to FILE (default: stderr)",
     )
+    parser.add_argument(
+        "--strict-port",
+        action="store_true",
+        default=False,
+        help="fail if the specified port is already in use instead of choosing another port",
+    )
     parser.add_argument("--config", default=None, help="configuration file path")
     args = parser.parse_args(argv)
     from .server import serve
@@ -624,6 +636,7 @@ def server_main(argv: list[str] | None = None) -> int:
         max_concurrent_scans=args.max_concurrent_scans,
         scan_roots=args.scan_root,
         audit_log=args.audit_log,
+        strict_port=args.strict_port,
     )
 
 
@@ -1133,6 +1146,7 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
             max_concurrent_scans=args.server_max_concurrent_scans,
             scan_roots=args.server_scan_root,
             audit_log=args.server_audit_log,
+            strict_port=args.server_strict_port,
         )
 
     out = _normalize_cli_path(args.out) if args.out else root / ".secdiagram"

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import socket
 import tempfile
 import threading
 import time
@@ -177,6 +179,112 @@ class ServerConstructionTests(unittest.TestCase):
         cfg.server.scan_roots = [str(FIXTURE.parent / "elsewhere")]
         with self.assertRaises(ValueError):
             create_server(FIXTURE, cfg)
+
+
+class ServerPortFallbackTests(unittest.TestCase):
+    def test_port_conflict_fallback_to_next_port(self) -> None:
+        dummy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dummy.bind(("127.0.0.1", 0))
+        dummy.listen(1)
+        occupied_port = dummy.getsockname()[1]
+
+        cfg = SecdiagramConfig()
+        cfg.server.host = "127.0.0.1"
+        cfg.server.port = occupied_port
+        cfg.server.insecure_no_auth = True
+
+        server = None
+        try:
+            server = create_server(FIXTURE, cfg)
+            actual_port = server.server_address[1]
+            self.assertNotEqual(actual_port, occupied_port)
+            self.assertEqual(cfg.server.port, actual_port)
+            self.assertEqual(server.platform_state.config.server.port, actual_port)
+        finally:
+            if server:
+                server.server_close()
+            dummy.close()
+
+    def test_consecutive_occupied_ports_fallback(self) -> None:
+        dummy1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dummy1.bind(("127.0.0.1", 0))
+        dummy1.listen(1)
+        p1 = dummy1.getsockname()[1]
+
+        dummy2 = None
+        try:
+            dummy2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            dummy2.bind(("127.0.0.1", p1 + 1))
+            dummy2.listen(1)
+        except OSError:
+            dummy1.close()
+            self.skipTest(f"Could not bind second socket to port {p1 + 1}")
+
+        cfg = SecdiagramConfig()
+        cfg.server.host = "127.0.0.1"
+        cfg.server.port = p1
+        cfg.server.insecure_no_auth = True
+
+        server = None
+        try:
+            server = create_server(FIXTURE, cfg)
+            actual_port = server.server_address[1]
+            self.assertNotIn(actual_port, {p1, p1 + 1})
+            self.assertEqual(cfg.server.port, actual_port)
+        finally:
+            if server:
+                server.server_close()
+            if dummy2:
+                dummy2.close()
+            dummy1.close()
+
+    def test_strict_port_raises_on_conflict(self) -> None:
+        dummy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dummy.bind(("127.0.0.1", 0))
+        dummy.listen(1)
+        occupied_port = dummy.getsockname()[1]
+
+        cfg = SecdiagramConfig()
+        cfg.server.host = "127.0.0.1"
+        cfg.server.port = occupied_port
+        cfg.server.insecure_no_auth = True
+        cfg.server.strict_port = True
+
+        try:
+            with self.assertRaises(OSError):
+                create_server(FIXTURE, cfg)
+
+            cfg.server.strict_port = False
+            with self.assertRaises(OSError):
+                create_server(FIXTURE, cfg, strict_port=True)
+        finally:
+            dummy.close()
+
+    def test_strict_port_config_loading_and_env(self) -> None:
+        from secdiagram_core.config import load_config
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg_file = tmp_path / "secdiagram.config.json"
+            cfg_file.write_text(json.dumps({"server": {"strict_port": True}}), encoding="utf-8")
+            loaded = load_config(tmp_path)
+            self.assertTrue(loaded.server.strict_port)
+
+        with mock.patch.dict(os.environ, {"SECDIAGRAM_SERVER_STRICT_PORT": "true"}):
+            loaded = load_config(FIXTURE)
+            self.assertTrue(loaded.server.strict_port)
+
+    def test_cli_strict_port_flags(self) -> None:
+        from secdiagram_core.cli import build_parser, server_main
+        parser = build_parser()
+        args = parser.parse_args(["--server-strict-port"])
+        self.assertTrue(args.server_strict_port)
+
+        # server_main parser accepts --strict-port
+        with mock.patch("secdiagram_core.server.serve") as mock_serve:
+            mock_serve.return_value = 0
+            server_main(["--strict-port", "--insecure-no-auth"])
+            mock_serve.assert_called_once()
+            self.assertTrue(mock_serve.call_args.kwargs.get("strict_port"))
 
 
 class ServerIntegrationTests(unittest.TestCase):
