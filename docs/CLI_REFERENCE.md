@@ -281,3 +281,5 @@ secdiagram studio serve   [--dir DIR] [server flags...]
 ```
 
 Installs a user-level Studio home with a private virtual environment, portable launchers, and the `secdiagram-diagramming` agent skill. `serve` forwards to `secdiagram serve` and exposes the Studio at `/studio`. The default home is `~/.secdiagram/studio`; set `SECDIAGRAM_STUDIO_HOME` to override it. Installer writes are CLI-only. See [Agentic Studio](STUDIO.md).
+
+See [Dependency risk correlation](DEPENDENCY_RISK_CORRELATION.md) for offline Pub inventory, --trivy-report and --sbom.

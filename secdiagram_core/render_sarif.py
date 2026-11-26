@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from . import __version__
+from .dependency_remediation import dependency_details
 from .model import SEVERITY_RANK, Finding, Graph, Loc
 
 LEVEL = {"critical": "error", "high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -333,6 +334,8 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
             result["properties"]["validation"] = finding.metadata["validation"]
         if finding.metadata.get("runtime_confirmed"):
             result["properties"]["runtimeConfirmed"] = True
+        if details := dependency_details(finding):
+            result["properties"]["dependency"] = details
         if finding.metadata.get("runtime"):
             result["properties"]["runtime"] = finding.metadata["runtime"]
         locations = _dedupe_locations(finding.evidence)

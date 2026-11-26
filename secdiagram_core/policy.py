@@ -233,6 +233,8 @@ def _blocking_eligibility(
         if _secret_kind(finding) != "provider_token":
             return "secret is not a format-verified provider token"
         return None
+    if finding.source in {"trivy", "cyclonedx"}:
+        return "package-level correlation does not prove the vulnerable code path"
     if _is_dependency_finding(finding):
         validation = finding.metadata.get("validation") or {}
         if not validation.get("known_exploited"):
@@ -254,7 +256,10 @@ def _blocking_eligibility(
 def evaluate_finding(graph: Graph, finding: Finding, dependency_usage: dict[str, Any] | None = None) -> PolicyResult:
     """Compute the enforcement decision for one finding. Deterministic."""
     exposure = classify_exposure(graph, finding)
-    if finding.category == "secret":
+    if finding.source in {"trivy", "cyclonedx"}:
+        exposure = finding.exposure
+        reachability = finding.reachability
+    elif finding.category == "secret":
         # A credential in source is exposed to anyone who can read the
         # repository or its built image; no code path is involved, so code
         # reachability does not apply.

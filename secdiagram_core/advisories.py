@@ -214,7 +214,8 @@ def _entry_from_dict(item: dict[str, Any]) -> tuple[list[str], Advisory] | None:
 
 
 def load_advisories(
-    paths: list[Path],
+    paths: list[Path], *, osv_records: list[Any] | None = None,
+    verified_document: dict[str, Any] | None = None,
 ) -> tuple[dict[str, list[Advisory]], list[dict[str, Any]]]:
     """Load advisory files or directories into a deterministic CVE index."""
     index: dict[str, list[Advisory]] = {}
@@ -225,6 +226,9 @@ def load_advisories(
         files = sorted(path.glob("*.json")) if path.is_dir() else [path]
         for file_path in files:
             data = _read_json(file_path)
+            if osv_records is not None:
+                candidates = data if isinstance(data, list) else [data]
+                osv_records.extend(item for item in candidates if isinstance(item, dict) and "affected" in item)
             count = 0
             for identifiers, advisory in _iter_entries(data):
                 identity = (advisory.source, advisory.name, advisory.summary)
@@ -237,6 +241,14 @@ def load_advisories(
             summaries.append(
                 {"file": file_path.name, "entries": count, "source": "advisory-db"}
             )
+    if verified_document is not None:
+        if osv_records is not None and "affected" in verified_document:
+            osv_records.append(verified_document)
+        entries = _iter_entries(verified_document)
+        for identifiers, advisory in entries:
+            for cve in identifiers:
+                index.setdefault(cve, []).append(advisory)
+        summaries.append({"file": "bundle/advisory", "entries": len(entries), "source": "advisory-db"})
     for cve in index:
         index[cve].sort(key=lambda item: (item.source, item.name))
     summaries.sort(key=lambda item: (item["file"], item["source"]))

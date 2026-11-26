@@ -131,7 +131,16 @@ def _known_exploited(finding: Finding) -> bool:
 def score_finding(graph: Graph, finding: Finding, flow: TaintFlow | None) -> RiskScore:
     impact = IMPACT.get(finding.category, SEVERITY_IMPACT.get(finding.severity, 5.0))
     entry: str | None = None
-    if flow is not None and flow.node_path:
+    if finding.source in {"trivy", "cyclonedx"}:
+        exposure = finding.exposure if finding.exposure in EXPOSURE else "internal"
+        evidence, evidence_factor = {
+            "reachable": ("package-call-path", 0.85),
+            "potentially_reachable": ("package-import", 0.55),
+        }.get(finding.reachability, ("inventory-only", 0.25))
+        impact = SEVERITY_IMPACT.get(finding.severity, 5.0)
+        if finding.metadata.get("fixed_in_inventory"):
+            evidence, evidence_factor = "resolved-fix", 0.0
+    elif flow is not None and flow.node_path:
         entry = flow.node_path[0]
         exposure = endpoint_exposure(graph.nodes.get(entry))
         evidence = "proven-flow"
@@ -168,7 +177,7 @@ def score_finding(graph: Graph, finding: Finding, flow: TaintFlow | None) -> Ris
     confidence = 0.7 + 0.3 * max(0.0, min(1.0, float(finding.confidence)))
     raw = impact * EXPOSURE[exposure] * evidence_factor * confidence * (1.2 if known_exploited else 1.0)
     score = round(min(10.0, raw), 1)
-    if known_exploited:
+    if known_exploited and finding.source not in {"trivy", "cyclonedx"}:
         score = max(score, 8.0)
     return RiskScore(
         score=score,
