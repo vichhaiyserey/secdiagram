@@ -1599,9 +1599,7 @@ DART_TYPE_RE = re.compile(
 DART_BASES_RE = re.compile(r"\b(?:extends|with|implements|on)\s+([^{]+)")
 DART_FN_RE = re.compile(
     r"^\s*(?:(?:static|external|factory|const|abstract|override)\s+)*"
-    r"(?:(?:Future|Stream|Widget|Response|void|bool|int|double|num|String|dynamic|Object|List|Map|Set|[A-Za-z_]\w*)"
-    r"(?:<[^>{}()]*?(?:<[^>{}()]*?(?:<[^>{}()]*?>[^>{}()]*?)*>[^>{}()]*?)*>)?\??\s+)?"
-    r"([A-Za-z_]\w*)\s*\("
+    r"(?:[\w.<>, ?]+\s+)?([A-Za-z_]\w*)\s*\("
 )
 DART_NOT_FN = frozenset(
     {
