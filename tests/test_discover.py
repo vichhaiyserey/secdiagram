@@ -102,7 +102,7 @@ class DiscoverTests(unittest.TestCase):
             try:
                 os.symlink(secret, symlink_py)
             except OSError as exc:
-                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP} or getattr(exc, "winerror", None) == 1314:
                     self.skipTest(f"symlink creation is unavailable: {exc}")
                 raise
 
@@ -124,7 +124,7 @@ class DiscoverTests(unittest.TestCase):
             try:
                 os.symlink(secret, symlink_py)
             except OSError as exc:
-                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP} or getattr(exc, "winerror", None) == 1314:
                     self.skipTest(f"symlink creation is unavailable: {exc}")
                 raise
 

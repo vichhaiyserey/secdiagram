@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import base64
+import errno
 import ipaddress
 import json
 import secrets
@@ -1379,10 +1380,62 @@ def _resolve_scan_roots(root: Path, configured: list[str]) -> list[Path]:
     return resolved
 
 
-def create_server(root: Path, config: SecdiagramConfig | None = None) -> PlatformHTTPServer:
+def _is_port_in_use_error(exc: OSError) -> bool:
+    addr_in_use_errnos = {
+        errno.EADDRINUSE,
+        getattr(errno, "WSAEADDRINUSE", 10048),
+    }
+    winerror = getattr(exc, "winerror", None)
+    return exc.errno in addr_in_use_errnos or winerror in {10048, 10013}
+
+
+def _bind_server(
+    host: str,
+    port: int,
+    strict_port: bool = False,
+    max_port_attempts: int = 100,
+) -> tuple[PlatformHTTPServer, int]:
+    """Bind PlatformHTTPServer, automatically trying subsequent ports if port is in use."""
+    if port == 0 or strict_port:
+        server = PlatformHTTPServer((host, port), SecdiagramRequestHandler)
+        bound_port = int(server.server_address[1])
+        return server, bound_port
+
+    last_error: OSError | None = None
+    for offset in range(max_port_attempts):
+        candidate_port = port + offset
+        if candidate_port > 65535:
+            break
+        try:
+            server = PlatformHTTPServer((host, candidate_port), SecdiagramRequestHandler)
+            bound_port = int(server.server_address[1])
+            if offset > 0:
+                print(
+                    f"Port {port} is in use; starting platform on port {bound_port}.",
+                    file=sys.stderr,
+                )
+            return server, bound_port
+        except OSError as exc:
+            if _is_port_in_use_error(exc):
+                last_error = exc
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"Could not bind to any port in range {port}..{min(65535, port + max_port_attempts - 1)}")
+
+
+def create_server(
+    root: Path,
+    config: SecdiagramConfig | None = None,
+    strict_port: bool | None = None,
+) -> PlatformHTTPServer:
     """Create and configure a PlatformHTTPServer instance."""
     resolved_root = root.resolve()
     cfg = config or load_config(resolved_root)
+    if strict_port is not None:
+        cfg.server.strict_port = strict_port
 
     if not cfg.server.is_auth_enabled():
         if not cfg.server.insecure_no_auth:
@@ -1398,6 +1451,13 @@ def create_server(root: Path, config: SecdiagramConfig | None = None) -> Platfor
             )
 
     allowed_scan_roots = _resolve_scan_roots(resolved_root, cfg.server.scan_roots)
+    server, bound_port = _bind_server(
+        cfg.server.host,
+        cfg.server.port,
+        strict_port=cfg.server.strict_port,
+    )
+    cfg.server.port = bound_port
+
     state = PlatformState(resolved_root, cfg, allowed_scan_roots)
     audit = AuditLogger(cfg.server.audit_log, resolved_root)
 
@@ -1412,8 +1472,6 @@ def create_server(root: Path, config: SecdiagramConfig | None = None) -> Platfor
     else:
         authenticator = NoOpAuthenticator()
 
-    server_address = (cfg.server.host, cfg.server.port)
-    server = PlatformHTTPServer(server_address, SecdiagramRequestHandler)
     server.platform_state = state
     server.authenticator = authenticator
     server.audit = audit
@@ -1436,6 +1494,7 @@ def serve(
     max_concurrent_scans: int | None = None,
     scan_roots: list[str] | None = None,
     audit_log: str | None = None,
+    strict_port: bool = False,
 ) -> int:
     """Run the platform server daemon."""
     cfg = load_config(root, config_path)
@@ -1443,6 +1502,8 @@ def serve(
         cfg.server.host = host
     if port:
         cfg.server.port = port
+    if strict_port:
+        cfg.server.strict_port = True
     if auth_username:
         cfg.server.auth_username = auth_username
     if auth_password:
