@@ -70,6 +70,7 @@ warn_unused_ignores = true
 
 [tool.coverage.run]
 source = ["secdiagram_core"]
+relative_files = true
 
 [tool.coverage.report]
 show_missing = true

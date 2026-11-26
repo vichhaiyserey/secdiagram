@@ -63,6 +63,46 @@ overrides, literal tautologies or duplicate discovered test definitions were fou
 
 ## Verification
 
+### Dart and Flutter regression coverage
+
+Run `python -m unittest tests.test_dart tests.test_flutter -v` for the focused
+suite. Golden cases check exact callable/type names, kinds, owners and locations:
+constructors/factories, getters/setters, operators, generic and nullable types,
+records, function return/parameter types, annotations, async/generator methods,
+mixins, extensions, aliases and common Flutter widget/state/repository classes.
+Calls, provider expressions and widget callbacks must not create callable nodes.
+
+Adversarial tests cover nested comments, raw/triple/unterminated strings,
+Unicode, malformed groups, long lines, nested widget trees and route nesting.
+The performance regression runs in a child process with a 20-second deadline so
+a regex regression cannot hang the test runner. Input tests exercise the 2 MiB
+UTF-8 cap before lexer allocation and file opening, a file growing after stat,
+relative/absolute/symlink escapes and a sibling sharing the root's name prefix.
+Execution and network functions are guarded during parsing, graph building and
+Dart SAST, including instruction-like comments and command strings as input.
+
+Dart declaration headers have a deterministic 4096-character / 512-token budget;
+type nesting is limited to 32 levels. Route argument inspection has both a
+4096-character window and a per-file aggregate work budget. Header/route scan
+limits appear in `graph.meta.polyglot_diagnostics`, the CLI diagnostics and
+`health.complete = false`; results with these diagnostics need review for omitted
+declarations/routes. This is lexical analysis: function
+bodies are skipped for declaration discovery, including nested local functions.
+Unsupported syntax and type-resolution limitations remain possible even without
+a scan-limit diagnostic; file-indexing health does not prove syntax completeness.
+
+CI discovers these tests in every Ubuntu/Windows Python matrix job and uploads
+branch-coverage XML from Python 3.12. The optional SonarQube Cloud job imports
+`coverage.xml` using `sonar.python.coverage.reportPaths` once the repository's
+`SONAR_TOKEN` Actions secret and `SONAR_CI_ANALYSIS_ENABLED=true` Actions variable
+are set. The CI scanner is off by default so existing Automatic Analysis remains
+enabled. Disable SonarCloud automatic analysis before opting into CI-based
+analysis; automatic analysis cannot import test coverage. Fork PRs
+without secrets retain test/coverage artifact checks and skip the Sonar upload.
+No token is stored in the repository.
+
+### Full verification
+
 Python 3.15 joins the Windows/Ubuntu matrix for the container runtime upgrade.
 Studio tests create a real private environment, assert pip/setuptools are absent,
 execute the CLI using that interpreter and verify error propagation. The container

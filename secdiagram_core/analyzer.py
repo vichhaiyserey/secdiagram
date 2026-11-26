@@ -356,6 +356,12 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
                    "Check syntax and the running Python version; use --exclude to omit this file.")
         for path in parse_errors
     ]
+    for path, pf in sorted(polyglot_index.files.items()):
+        for message in pf.diagnostics:
+            diagnostics.append(diagnostic(
+                "polyglot_scan_limit", path, message,
+                "Partial lexical analysis; simplify the declaration or review the omitted source manually.",
+            ))
     for module, paths in sorted(builder.stats.duplicate_modules.items()):
         diagnostics.append(diagnostic(
             "ambiguous_layout", ", ".join(sorted(paths)), f"Multiple files resolve to module {module}",
