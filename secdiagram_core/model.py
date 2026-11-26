@@ -182,6 +182,8 @@ class Finding:
     mitigation_status: str = "none"
     evidence_quality: str = ""
     required_actions: list[str] = field(default_factory=list)
+    exploitability: str = ""
+    exploitability_score: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -224,6 +226,10 @@ class Finding:
             out["evidence_quality"] = self.evidence_quality
         if self.required_actions:
             out["required_actions"] = list(self.required_actions)
+        if self.exploitability:
+            out["exploitability"] = self.exploitability
+        if self.exploitability_score > 0:
+            out["exploitability_score"] = round(float(self.exploitability_score), 2)
         return out
 
     @classmethod
@@ -253,6 +259,8 @@ class Finding:
             mitigation_status=str(data.get("mitigation_status", "none")),
             evidence_quality=str(data.get("evidence_quality", "")),
             required_actions=[str(action) for action in data.get("required_actions", [])],
+            exploitability=str(data.get("exploitability", "")),
+            exploitability_score=float(data.get("exploitability_score", 0.0)),
         )
 
 

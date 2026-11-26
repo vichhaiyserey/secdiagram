@@ -98,7 +98,7 @@ class ThreatRecordTests(unittest.TestCase):
         )
         self.assertEqual(
             (record["severity"], record["confidence"], record["exploitability"]),
-            ("high", 0.85, "static-flow"),
+            ("high", 0.85, "plausible"),
         )
         self.assertNotIn("May be exploitable", " ".join(record["facts"]))
         self.assertIn("Potential injection", record["assessment"])
@@ -502,7 +502,7 @@ class ThreatReviewCliTests(unittest.TestCase):
                 observed = [r for r in before["threats"] if r["status"] == "observed"]
                 self.assertEqual(len(observed), 1)
                 self.assertEqual(
-                    (observed[0]["stride"], observed[0]["exploitability"]), ("E", "static-flow")
+                    (observed[0]["stride"], observed[0]["exploitability"]), ("E", "likely")
                 )
                 self.assertIn({"path": "routes.py", "line": 6, "col": 0}, observed[0]["evidence"])
                 source.write_text(prefix + "    return 'safe fixed response'\n", encoding="utf-8")

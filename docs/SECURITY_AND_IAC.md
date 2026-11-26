@@ -158,6 +158,39 @@ report priorities, SARIF `rank` (score x 10) with `riskScore` / `riskPriority`
 priority, entry points badged with their exposure). High-level subsystems are
 badged with their P0/P1 counts.
 
+#### Exploitability triage
+
+Risk ranking answers "what should we fix first"; exploitability answers "how
+likely is this observation to become real impact, given the evidence we hold".
+Every finding also receives `metadata.exploitability` with a level
+(**likely**, **plausible**, **unlikely**, **informational**), a 0-10 score, an
+impact class (RCE, memory corruption, deserialization, injection, file access,
+SSRF, credential, misconfiguration, supply chain), the evidence provenance,
+reachability, mitigation, deployment context, the conditions that drove the
+decision, and a recommended action (`fix-now`, `investigate`, `monitor`,
+`accept-or-document`).
+
+`score = impact_class x provenance x reachability x mitigation x deployment_context x confidence`
+
+| Factor | Values |
+| :--- | :--- |
+| Impact class | CWE-driven (e.g. CWE-78/94/502 -> RCE, CWE-787/119/416 -> memory corruption, CWE-89/79/611 -> injection, CWE-918 -> SSRF, CWE-798 -> credential) with a category fallback. |
+| Provenance | runtime-confirmed / known-exploited 1.0, credential in source 1.0, proven source-to-sink flow 0.9, configuration or dependency in use 0.85, dynamic construction 0.5, pattern 0.35, static 0.15. |
+| Reachability / exposure | public 1.0, authenticated/privileged 0.8, local 0.55, internal 0.5, unknown 0.65, isolated 0.4 (the stronger of reachability and exposure is used). |
+| Mitigation | sanitizer neutralizes the flow 0.3, no sanitizer 1.0, no flow evidence 0.9. |
+| Deployment context | production 1.0, test/fixture/example 0.5. Test code is downgraded explicitly, not dropped. |
+| Confidence | `0.7 + 0.3 x rule confidence`. |
+
+Levels: **likely** >= 6.5, **plausible** >= 3.5, **unlikely** >= 1.5,
+**informational** below. Runtime-confirmed and CISA KEV findings floor at 7.0
+(likely). Memory-corruption findings with external reachability but no proven
+flow are *plausible* (confirm the concrete input path and binary hardening);
+they are not automatically *likely*. The level is shown as a badge in the
+security report, in the "Exploitability triage" table, in threat records, and
+as `exploitability` / `exploitabilityScore` / `impactClass` /
+`recommendedAction` SARIF properties. Risk scores are unchanged: exploitability
+is a separate triage signal, not a replacement for the risk model.
+
 ### 1.4 STRIDE threat model (`THREAT_MODEL.md`)
 
 Written with `--format md` (security enabled) and served at

@@ -47,8 +47,9 @@ from .polyglot_index import (
 )
 from .redaction import redact_secrets
 
-ALL = frozenset({"csharp", "javascript", "typescript", "php", "go", "rust"})
+ALL = frozenset({"csharp", "dart", "javascript", "typescript", "php", "go", "rust"})
 CS = frozenset({"csharp"})
+DART = frozenset({"dart"})
 JS = JS_LANGS
 PHP = frozenset({"php"})
 GO = frozenset({"go"})
@@ -262,6 +263,35 @@ RULES: tuple[Rule, ...] = (
     Rule("PG-RS-TLS", RS, "tls", "CWE-295", "TLS certificate validation disabled",
          _r(r"\bdanger_accept_invalid_certs\s*\(\s*true\s*\)|\bdanger_accept_invalid_hostnames\s*\(\s*true\s*\)"),
          "always", "high"),
+    # ----------------------------------------------------------------- Dart / Flutter
+    Rule("PG-DART-SQL", DART, "sql", "CWE-89", "SQLite injection (sqflite/drift)",
+         _r(r"\.\s*(?:rawQuery|rawInsert|rawUpdate|rawDelete|execute|customSelect|customStatement)\s*\("),
+         "dynamic", "critical", "medium"),
+    Rule("PG-DART-CMD", DART, "command", "CWE-78", "Command injection",
+         _r(r"\bProcess\.(?:run|runSync|start)\s*\("),
+         "taint", "critical", sanitizer=COMMAND_SANITIZER),
+    Rule("PG-DART-WEBVIEW-JS", DART, "code", "CWE-95", "WebView JavaScript injection",
+         _r(r"\.\s*(?:runJavaScript|runJavaScriptReturningResult|evaluateJavascript)\s*\("),
+         "dynamic", "critical", "high"),
+    Rule("PG-DART-XSS", DART, "xss", "CWE-79", "Untrusted HTML loaded into WebView",
+         _r(r"\.\s*loadHtmlString\s*\("),
+         "taint", "high", sanitizer=XSS_SANITIZER),
+    Rule("PG-DART-PATH", DART, "path", "CWE-22", "Path traversal",
+         _r(r"\b(?:File|Directory|File\.fromUri)\s*\(|\.\s*extractFileToDisk\s*\("),
+         "taint", "high", sanitizer=PATH_SANITIZER),
+    Rule("PG-DART-SSRF", DART, "ssrf", "CWE-918", "Server-side / outbound request or URL launch with untrusted target",
+         _r(r"\b(?:http\.(?:get|post|put|delete|patch|read)|dio\.(?:get|post|put|delete|download)|launchUrl)\s*\(|"
+            r"\.\s*(?:getUrl|openUrl)\s*\("),
+         "taint", "high"),
+    Rule("PG-DART-TLS", DART, "tls", "CWE-295", "TLS certificate validation disabled (badCertificateCallback)",
+         _r(r"\bbadCertificateCallback\s*=\s*\([^)]*\)\s*(?:=>\s*true|\{\s*return\s+true\s*;?\s*\})"),
+         "always", "high"),
+    Rule("PG-DART-CRYPTO", DART, "crypto", "CWE-327", "Weak cryptographic primitive",
+         _r(r"\b(?:md5|sha1)\.convert\s*\(|\bAESMode\.ecb\b"),
+         "always", "medium"),
+    Rule("PG-DART-CODE", DART, "code", "CWE-95", "Dynamic isolate code loading from untrusted URI",
+         _r(r"\bIsolate\.spawnUri\s*\("),
+         "taint", "critical"),
 )
 
 SOURCES: dict[str, re.Pattern[str]] = {
@@ -289,14 +319,21 @@ SOURCES: dict[str, re.Pattern[str]] = {
     "rust": _r(
         r"\bstd::env::args\s*\(|\bstd::io::stdin\s*\("
     ),
+    "dart": _r(
+        r"\bUri\.base\b|\bstate\.(?:uri|pathParameters|queryParameters)\b|\bsettings\.arguments\b|"
+        r"\bcall\.arguments\b|\bmessage\.message\b|\b(?:request|req)\.(?:url|headers|requestedUri)\b|"
+        r"\bcontext\.request\b|\bstdin\.readLineSync\s*\("
+    ),
 }
 NUMERIC_CAST_RE = _r(
     r"^\s*(?:\(\s*int\s*\)|parseInt\s*\(|parseFloat\s*\(|Number\s*\(|Math\.\w+\s*\(|int\.Parse\s*\(|int\.TryParse|"
     r"long\.Parse\s*\(|Guid\.Parse\s*\(|Convert\.ToInt\d*\s*\(|intval\s*\(|floatval\s*\(|(?:\(int\)|\(float\))|"
-    r"strconv\.(?:Atoi|ParseInt|ParseFloat|ParseBool)\s*\(|uuid\.Parse\s*\(|filter_var\s*\([^,]+,\s*FILTER_VALIDATE_INT)"
+    r"strconv\.(?:Atoi|ParseInt|ParseFloat|ParseBool)\s*\(|uuid\.Parse\s*\(|filter_var\s*\([^,]+,\s*FILTER_VALIDATE_INT|"
+    r"(?:int|double|num)\.(?:parse|tryParse)\s*\()"
 )
 ASSIGN_RES: dict[str, re.Pattern[str]] = {
     "csharp": _r(r"(?:\b(?:var|[\w<>\[\],.?]+)\s+)?\b([A-Za-z_]\w*)\s*(?:\+=|=)(?![=>])\s*(.+)"),
+    "dart": _r(r"(?:\b(?:var|final|const|late|[\w<>?]+)\s+)?\b([A-Za-z_]\w*)\s*(?:\+=|\?\?=|=)(?![=>])\s*(.+)"),
     "js": _r(r"(?:\b(?:const|let|var)\s+)?(\{[^}]*\}|\[[^\]]*\]|[A-Za-z_$][\w$]*)\s*(?::\s*[\w<>\[\]|. ]+)?\s*(?:\+=|=)(?![=>])\s*(.+)"),
     "php": _r(r"(\$\w+)\s*(?:\.=|=)(?![=>])\s*(.+)"),
     "go": _r(r"^\s*(?:var\s+)?([\w\s,]+?)\s*(?::=|=)(?!=)\s*(.+)"),
@@ -305,6 +342,7 @@ ASSIGN_RES: dict[str, re.Pattern[str]] = {
 GO_BIND_RE = _r(r"\.(?:ShouldBind\w*|Bind\w*|Decode|Unmarshal)\s*\((?:[^,()]*,\s*)?&(\w+)")
 DYNAMIC_RES: dict[str, re.Pattern[str]] = {
     "csharp": _r(r"\$@?\"[^\"]*\{|@\$\"[^\"]*\{|\"\s*\+|\+\s*\"|\b(?:string|String)\.(?:Format|Concat)\s*\("),
+    "dart": _r(r"['\"][^'\"]*\$(?:[A-Za-z_]\w*|\{[^}]+\})|['\"]\s*\+|\+\s*['\"]"),
     "js": _r(r"`[^`]*\$\{|['\"`]\s*\+|\+\s*['\"`]|\.concat\s*\(|\butil\.format\s*\("),
     "php": _r(r"\"[^\"]*\$\w|\"[^\"]*\{\$|['\"]\s*\.\s*\$|\$\w+(?:\[[^\]]*\])?\s*\.\s*['\"]|\bsprintf\s*\(|\bimplode\s*\("),
     "go": _r(r"\bfmt\.Sprintf\s*\(|\"\s*\+|\+\s*\"|\bstrings\.Join\s*\("),
@@ -410,7 +448,7 @@ class _Fn:
 # ------------------------------------------------------------------ fact extraction
 
 CALL_SITE_RE = re.compile(
-    r"((?:\$?[A-Za-z_][\w]*\s*(?:\?\.|->|::|\.)\s*)*)(?<![\w$])([A-Za-z_$][\w$]*)\s*\("
+    r"((?:\$?[A-Za-z_][\w]*(?:\s*\(\s*\))?\s*(?:\?\.|->|::|\.)\s*)*)(?<![\w$])([A-Za-z_$][\w$]*)\s*\("
 )
 NOT_CALLS = frozenset(
     {"if", "for", "foreach", "while", "switch", "catch", "function", "return", "typeof", "sizeof", "nameof",
@@ -442,6 +480,7 @@ FIELD_RES: dict[str, tuple[re.Pattern[str], ...]] = {
     ),
     "go": (re.compile(r"^\s*(\w+)\s+\*?\[?\]?\*?([A-Za-z_][\w.]*)\s*(?:`[^`]*`)?\s*$"),),
     "rust": (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:\s*([A-Za-z_][\w:<>, ]*)"),),
+    "dart": (re.compile(r"^\s*(?:(?:final|late|var|static)\s+)*([A-Za-z_][\w<>?]*)\s+(_?[A-Za-z_]\w*)\s*(?:;|=)"),),
 }
 
 
@@ -453,7 +492,10 @@ def _value_text(pf: PgFile, start: int, end: int) -> str:
     """
     parts = [pf.masked[start:end]]
     for groups in INTERP_RE.findall(pf.code[start:end]):
-        parts.extend(group for group in groups if group)
+        for group in groups:
+            if not group:
+                continue
+            parts.append(group[1:] if pf.language == "dart" and group.startswith("$") else group)
     return " ".join(parts)
 
 
@@ -523,6 +565,15 @@ def _param_names(param: str, family: str) -> tuple[list[str], str]:
         name, _, typ = text.partition(":")
         name = re.sub(r"^(?:mut|ref)\s+", "", name).strip()
         return ([name] if re.match(r"^[A-Za-z_]\w*$", name) else []), typ.strip()
+    if family == "dart":
+        text = re.sub(r"^(?:required|covariant|final)\s+", "", text).strip("{}[] ")
+        text = text.split("=", 1)[0].strip()
+        pieces = text.rsplit(None, 1)
+        if len(pieces) == 2 and re.match(r"^[A-Za-z_]\w*$", pieces[1]):
+            return [pieces[1]], pieces[0]
+        if len(pieces) == 1 and re.match(r"^[A-Za-z_]\w*$", pieces[0]):
+            return [pieces[0]], ""
+        return [], ""
     text = re.sub(r"^(?:this|params|ref|out|in|scoped)\s+", "", text)
     pieces = text.rsplit(None, 1)
     if len(pieces) == 2 and re.match(r"^[A-Za-z_]\w*$", pieces[1]):
@@ -731,6 +782,11 @@ def _field_types(pf: PgFile, cls: PgSymbol) -> dict[str, str]:
     elif family == "php":
         for match in pattern.finditer(body_code):
             types.setdefault("$" + match.group(2), match.group(1))
+    elif family == "dart":
+        for line in body_masked.split("\n"):
+            match = pattern.match(line)
+            if match and match.group(1) not in ("return", "throw", "await"):
+                types.setdefault(match.group(2), match.group(1))
     for raw in cls.params:  # C# 12 primary constructors
         names, typ = _param_names(raw, family)
         for name in names:
@@ -795,7 +851,7 @@ class _Resolver:
             unique = self.by_name.get((family, call.name), [])
             return unique if len(unique) == 1 else []
         parts = receiver.split(".")
-        head = parts[0]
+        head = parts[0].removesuffix("()")
         self_names = {"this", "$this", "self", "static"}
         if fn.receiver_var:
             self_names.add(fn.receiver_var)
@@ -1026,6 +1082,16 @@ def _rust_command_sink(fn: _Fn, sink: _Sink) -> bool:
     return executable in {"sh", "bash", "dash", "zsh", "ksh", "fish", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"} or executable.endswith((".bat", ".cmd"))
 
 
+def _dart_command_sink(fn: _Fn, sink: _Sink) -> bool:
+    """Flag Process.run/start when runInShell: true or the executable itself is non-literal."""
+    pf = fn.pf
+    full_args = pf.code[sink.arg_start : sink.arg_end]
+    if re.search(r"\brunInShell\s*:\s*true\b", full_args):
+        return True
+    first_arg = full_args.split(",", 1)[0].strip()
+    return not _is_literal_only(first_arg)
+
+
 def _flow_metadata(trace: Trace) -> list[dict[str, Any]]:
     return [{"loc": f"{hop.path}:{hop.line}", "node": hop.node_id, "role": hop.role} for hop in trace]
 
@@ -1098,6 +1164,8 @@ def analyze_polyglot_security(graph: Graph, index: PolyglotIndex) -> list[Findin
         for sink in sorted(fn.sinks, key=lambda s: (s.pos, s.order)):
             rule = sink.rule
             if rule.rule_id == "PG-RS-CMD" and not _rust_command_sink(fn, sink):
+                continue
+            if rule.rule_id == "PG-DART-CMD" and not _dart_command_sink(fn, sink):
                 continue
             arg = pf.code[sink.arg_start : sink.arg_end]
             if rule.sanitizer is not None and rule.sanitizer.search(arg):

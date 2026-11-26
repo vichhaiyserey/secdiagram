@@ -42,6 +42,7 @@ LANGUAGE_BY_SUFFIX: dict[str, str] = {
     ".php": "php",
     ".go": "go",
     ".rs": "rust",
+    ".dart": "dart",
 }
 LANGUAGE_LABELS = {
     "csharp": "C# / .NET",
@@ -50,6 +51,7 @@ LANGUAGE_LABELS = {
     "php": "PHP",
     "go": "Go",
     "rust": "Rust",
+    "dart": "Dart / Flutter",
 }
 JS_LANGS: frozenset[str] = frozenset({"javascript", "typescript"})
 HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD")
@@ -151,6 +153,7 @@ _STARTERS = {
     "go": re.compile(r"//|/\*|\"|'|`"),
     # A lifetime/label (e.g. 'static or 'outer:) is not a character literal.
     "rust": re.compile(r"""//|/\*|b?r#*"|b?"|b?'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|[^\r\n])|[^\\'\r\n])'"""),
+    "dart": re.compile(r'''//|/\*|r?"""|r?\'\'\'|r?"|r?\''''),
 }
 _RUST_COMMENT_DELIMITER = re.compile(r"/\*|\*/")
 _PHP_OPEN_RE = re.compile(r"<\?(?:php|=)?")
@@ -202,7 +205,7 @@ def _views(text: str, language: str) -> tuple[str, str]:
             pos = end
             continue
         if token == "/*":
-            if language == "rust":
+            if language in ("rust", "dart"):
                 depth = 1
                 curr = start + 2
                 while curr < n and depth > 0:
@@ -245,9 +248,26 @@ def _views(text: str, language: str) -> tuple[str, str]:
             _blank(masked, start + (2 if token.startswith("b") else 1), match.end() - 1)
             pos = match.end()
             continue
+        if language == "dart" and token.endswith(('"""', "'''")):
+            delim = token[-3:]
+            raw_dart = token.startswith("r")
+            j = match.end()
+            end = n
+            while j < n:
+                if not raw_dart and text[j] == "\\":
+                    j += 2
+                    continue
+                if text.startswith(delim, j):
+                    end = j + 3
+                    break
+                j += 1
+            inner_end = end - 3 if end <= n and text.startswith(delim, end - 3) else end
+            _blank(masked, match.end(), inner_end)
+            pos = max(end, start + 1)
+            continue
         quote = token[-1]
         verbatim = language == "csharp" and "@" in token
-        raw = language == "go" and quote == "`"
+        raw = (language == "go" and quote == "`") or (language == "dart" and token.startswith("r"))
         multiline = quote == "`" or verbatim or language in ("php", "rust")
         escapes = not verbatim and not raw
         j = match.end()
@@ -1569,6 +1589,211 @@ def _parse_rust(pf: PgFile) -> None:
             cls.bases = sorted(set(cls.bases))
 
 
+# ------------------------------------------------------------------ Dart / Flutter
+
+DART_IMPORT_RE = re.compile(r"^\s*(?:import|export|part)\s+['\"]([^'\"]+)['\"]")
+DART_TYPE_RE = re.compile(
+    r"^\s*(?:abstract\s+(?:interface\s+|base\s+|final\s+|sealed\s+)?)?"
+    r"(class|mixin|enum|extension)\s+([A-Za-z_]\w*)"
+)
+DART_BASES_RE = re.compile(r"\b(?:extends|with|implements|on)\s+([^{]+)")
+DART_FN_RE = re.compile(
+    r"^\s*(?:(?:static|external|factory|const|abstract|override)\s+)*"
+    r"(?:(?:Future|Stream|Widget|Response|void|bool|int|double|num|String|dynamic|Object|List|Map|Set|[A-Za-z_]\w*)"
+    r"(?:<[^>{}()]*?(?:<[^>{}()]*?(?:<[^>{}()]*?>[^>{}()]*?)*>[^>{}()]*?)*>)?\??\s+)?"
+    r"([A-Za-z_]\w*)\s*\("
+)
+DART_NOT_FN = frozenset(
+    {
+        "if", "for", "while", "switch", "catch", "return", "throw", "assert",
+        "else", "try", "finally", "new", "const", "super", "this", "await",
+    }
+)
+DART_GOROUTE_RE = re.compile(r"\bGoRoute\s*\(")
+DART_SHELF_ROUTE_RE = re.compile(
+    r"\b(?:router|app)\s*\.\s*(get|post|put|delete|patch|all)\s*\(\s*['\"]([^'\"]+)['\"]\s*,\s*([A-Za-z_]\w*)"
+)
+DART_INGRESS_TYPES = (
+    "GoRouterState", "RouteSettings", "MethodCall", "JavaScriptMessage",
+    "RequestContext", "Request", "Uri",
+)
+
+
+def _dart_stereotype(name: str, bases: list[str]) -> str:
+    lower = name.lower()
+    base_lower = " ".join(b.lower() for b in bases)
+    if any(w in base_lower for w in ("statelesswidget", "statefulwidget", "state<", "consumerwidget", "hookwidget")):
+        return "view"
+    for suffix, stereotype in (
+        ("controller", "controller"),
+        ("bloc", "controller"),
+        ("cubit", "controller"),
+        ("notifier", "controller"),
+        ("repository", "repository"),
+        ("repo", "repository"),
+        ("datasource", "repository"),
+        ("dao", "repository"),
+        ("service", "service"),
+        ("client", "service"),
+        ("api", "service"),
+    ):
+        if lower.endswith(suffix):
+            return stereotype
+    return ""
+
+
+def _dart_tainted_params(params: list[str]) -> list[str]:
+    tainted: list[str] = []
+    for raw in params:
+        text = re.sub(r"^(?:required|covariant|final)\s+", "", raw.strip()).strip("{}[] ")
+        if not text:
+            continue
+        # Remove default value
+        text = text.split("=", 1)[0].strip()
+        parts = text.rsplit(None, 1)
+        if len(parts) == 2:
+            typ, name = parts[0].strip(), parts[1].strip()
+            if any(t in typ for t in DART_INGRESS_TYPES):
+                tainted.append(name)
+        elif len(parts) == 1 and re.match(r"^[A-Za-z_]\w*$", parts[0]):
+            if parts[0] in ("request", "context", "call", "message", "state", "settings", "uri", "args"):
+                tainted.append(parts[0])
+    return tainted
+
+
+def _parse_dart(pf: PgFile) -> None:
+    masked_lines = pf.masked.split("\n")
+    code_lines = pf.code.split("\n")
+    pairs = _brace_pairs(pf.masked)
+    scopes = _line_scopes(pf.masked, pf._line_starts)
+
+    for idx, line in enumerate(code_lines):
+        imp = DART_IMPORT_RE.match(line) if DART_IMPORT_RE.match(masked_lines[idx]) else None
+        if imp:
+            pf.imports.append((imp.group(1).strip(), idx + 1))
+
+    for idx, line in enumerate(masked_lines):
+        match = DART_TYPE_RE.match(line)
+        if not match:
+            continue
+        decl_kind, name = match.group(1), match.group(2)
+        pos = pf.line_start(idx + 1) + match.end()
+        body = _body_after(pf.masked, pairs, pos)
+        header = pf.code[pf.line_start(idx + 1) : body[0] if body[0] >= 0 else pf.line_start(idx + 1) + len(line)]
+        bases: list[str] = []
+        bases_m = DART_BASES_RE.search(header)
+        if bases_m:
+            raw_bases = re.split(r"\b(?:extends|with|implements|on)\b", bases_m.group(1))
+            for chunk in raw_bases:
+                for b in chunk.split(","):
+                    b = b.strip()
+                    if b:
+                        bases.append(b)
+        decos = _decorators_before(code_lines, idx, "@")
+        sym = PgSymbol(
+            kind="class",
+            name=name,
+            qualname=f"{pf.path}:{name}",
+            line=idx + 1,
+            end_line=pf.line_of(body[1]) if body[1] >= 0 else idx + 1,
+            body_start=body[0],
+            body_end=body[1],
+            decl_kind=decl_kind,
+            bases=sorted(set(bases)),
+            decorators=decos,
+            stereotype=_dart_stereotype(name, bases),
+        )
+        _add_symbol(pf, sym)
+
+    classes_by_brace = {s.body_start: s for s in pf.symbols if s.kind == "class" and s.body_start >= 0}
+    for idx, line in enumerate(masked_lines):
+        if DART_TYPE_RE.match(line):
+            continue
+        match = DART_FN_RE.match(line)
+        if not match:
+            continue
+        name = match.group(1)
+        if name in DART_NOT_FN:
+            continue
+        open_pos = pf.line_start(idx + 1) + match.end() - 1
+        close = _match_paren(pf, open_pos)
+        if close == -1:
+            continue
+        body = _body_after(pf.masked, pairs, close + 1)
+        if body[0] < 0 or body[1] <= body[0]:
+            continue
+        owner = classes_by_brace.get(scopes[idx]) if idx < len(scopes) else None
+        if owner is not None and name == owner.name:
+            continue  # constructor
+        raw_params = _split_params(pf.code[open_pos + 1 : close])
+        decos = _decorators_before(code_lines, idx, "@")
+        owner_qual = owner.qualname if owner is not None else ""
+        is_method = owner is not None
+        tainted_params = _dart_tainted_params(raw_params)
+        is_entrypoint = bool(tainted_params) or name in ("main", "onRequest", "onGenerateRoute")
+        sym = PgSymbol(
+            kind="endpoint" if (is_entrypoint and tainted_params) else ("method" if is_method else "function"),
+            name=name,
+            qualname=f"{owner_qual}.{name}" if owner_qual else f"{pf.path}:{name}",
+            line=idx + 1,
+            end_line=pf.line_of(body[1]) if body[1] >= 0 else idx + 1,
+            body_start=body[0],
+            body_end=body[1],
+            container=owner_qual,
+            decl_kind="method" if is_method else "function",
+            params=raw_params,
+            decorators=decos,
+            tainted_params=tainted_params,
+            routes=[{"method": "INGRESS", "path": f"/{name}"}] if (is_entrypoint and tainted_params) else [],
+            auth="anonymous" if (is_entrypoint and tainted_params) else "",
+            framework="flutter" if (is_entrypoint and tainted_params) else "",
+        )
+        _add_symbol(pf, sym)
+
+    # GoRouter routes: GoRoute(path: '/...', ...)
+    for route_match in DART_GOROUTE_RE.finditer(pf.masked):
+        open_pos = route_match.end() - 1
+        close = _match_paren(pf, open_pos)
+        if close == -1:
+            continue
+        args_code = pf.code[open_pos + 1 : close]
+        path_m = re.search(r"\bpath\s*:\s*['\"]([^'\"]+)['\"]", args_code)
+        if not path_m:
+            continue
+        route_path = path_m.group(1)
+        call_line = pf.line_of(route_match.start())
+        route_sym = PgSymbol(
+            kind="endpoint",
+            name=f"ROUTE {route_path}",
+            qualname=f"{pf.path}:{call_line}:ROUTE {route_path}",
+            line=call_line,
+            end_line=pf.line_of(close),
+            routes=[{"method": "NAV", "path": route_path}],
+            framework="go_router",
+            decl_kind="route",
+        )
+        _add_symbol(pf, route_sym)
+
+    # Shelf / Dart backend routes: router.get('/path', handler)
+    for shelf_m in DART_SHELF_ROUTE_RE.finditer(pf.code):
+        verb, route_path, handler_ref = shelf_m.group(1).upper(), shelf_m.group(2), shelf_m.group(3)
+        call_line = pf.line_of(shelf_m.start())
+        _add_symbol(
+            pf,
+            PgSymbol(
+                kind="endpoint",
+                name=f"{verb} {route_path}",
+                qualname=f"{pf.path}:{call_line}:{verb} {route_path}",
+                line=call_line,
+                end_line=call_line,
+                routes=[{"method": verb, "path": route_path}],
+                framework="shelf",
+                handler_ref=handler_ref,
+                decl_kind="route",
+            ),
+        )
+
+
 # ------------------------------------------------------------- auth markers
 
 AUTH_MW_RE = re.compile(
@@ -1687,6 +1912,7 @@ PARSERS = {
     "php": _parse_php,
     "go": _parse_go,
     "rust": _parse_rust,
+    "dart": _parse_dart,
 }
 
 
@@ -1795,6 +2021,8 @@ def _link_route_handlers(index: PolyglotIndex) -> None:
                     target.tainted_params = _php_tainted_params(target.params)
                 elif pf.language == "rust":
                     target.tainted_params = _rust_tainted_params(target.params)
+                elif pf.language == "dart":
+                    target.tainted_params = _dart_tainted_params(target.params)
             target.decorators.append(f"route@{pf.path}:{sym.line}")
         pf.symbols = remaining
 
@@ -1858,7 +2086,7 @@ def build_polyglot_graph(graph: Graph, index: PolyglotIndex) -> None:
     module_nodes: dict[str, str] = {}
 
     def container_node(pf: PgFile) -> str:
-        if pf.language in JS_LANGS or (pf.language == "php" and not pf.namespace):
+        if pf.language in JS_LANGS or pf.language == "dart" or (pf.language == "php" and not pf.namespace):
             key = ("module", pf.path)
             if key not in containers:
                 stem = re.sub(r"\.[^./]+$", "", pf.path)
@@ -1946,6 +2174,9 @@ def build_polyglot_graph(graph: Graph, index: PolyglotIndex) -> None:
             )
             if sym.kind == "endpoint":
                 _tags(node, "endpoint", "route")
+                if pf.language == "dart" and sym.tainted_params:
+                    node.attrs["trust_boundary"] = "ingress"
+                    node.attrs["security"] = ["source"]
             graph.add_node(node)
             sym_node[id(sym)] = node.id
             fn_nodes.setdefault(f"{family}:{sym.name}", []).append((pf, sym, node.id))
@@ -2056,12 +2287,45 @@ def build_polyglot_graph(graph: Graph, index: PolyglotIndex) -> None:
 
     for path in sorted(index.files):
         pf = index.files[path]
-        if pf.language not in JS_LANGS or path not in module_nodes:
+        if path not in module_nodes:
             continue
-        for spec, line in sorted(set(pf.imports), key=lambda item: (item[1], item[0])):
-            imported = _resolve_js_import(index, path, spec)
-            if imported and imported in module_nodes and imported != path:
-                graph.add_edge(module_nodes[path], module_nodes[imported], "imports", evidence=[Loc(path, line)])
+        if pf.language in JS_LANGS:
+            for spec, line in sorted(set(pf.imports), key=lambda item: (item[1], item[0])):
+                imported = _resolve_js_import(index, path, spec)
+                if imported and imported in module_nodes and imported != path:
+                    graph.add_edge(module_nodes[path], module_nodes[imported], "imports", evidence=[Loc(path, line)])
+        elif pf.language == "dart":
+            base_dir = path.rsplit("/", 1)[0] if "/" in path else ""
+            for spec, line in sorted(set(pf.imports), key=lambda item: (item[1], item[0])):
+                if spec.startswith(("dart:", "package:flutter/")):
+                    continue
+                target_path: str | None = None
+                if spec.startswith("package:"):
+                    rel = spec.split("/", 1)[1] if "/" in spec else ""
+                    if rel:
+                        cand = f"lib/{rel}"
+                        if cand in index.files:
+                            target_path = cand
+                        else:
+                            for p in index.files:
+                                if p.endswith("/" + cand):
+                                    target_path = p
+                                    break
+                else:
+                    parts = [p for p in base_dir.split("/") if p]
+                    for piece in spec.split("/"):
+                        if piece in ("", "."):
+                            continue
+                        if piece == "..":
+                            if parts:
+                                parts.pop()
+                        else:
+                            parts.append(piece)
+                    cand = "/".join(parts)
+                    if cand in index.files:
+                        target_path = cand
+                if target_path and target_path in module_nodes and target_path != path:
+                    graph.add_edge(module_nodes[path], module_nodes[target_path], "imports", evidence=[Loc(path, line)])
 
     for path in sorted(index.files):
         pf = index.files[path]

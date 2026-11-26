@@ -90,6 +90,7 @@ class SecurityReport:
     finding_confidence_floor: float
     gate: Gate
     risk: Risk
+    exploitability: dict[str, Any]
     priorities: list[Finding]
     new_findings: list[Finding]
     baselined_findings: list[Finding]
@@ -176,6 +177,27 @@ def _risk(findings: list[Finding], baselined: int) -> Risk:
         baselined_count=baselined,
         highest=highest,
     )
+
+
+def _exploitability(findings: list[Finding]) -> dict[str, Any]:
+    active = [finding for finding in findings if not finding.baseline]
+    levels = ("likely", "plausible", "unlikely", "informational")
+    by_level = {level: 0 for level in levels}
+    for finding in active:
+        if finding.exploitability in by_level:
+            by_level[finding.exploitability] += 1
+    likely = sorted(
+        (finding for finding in active if finding.exploitability == "likely"),
+        key=lambda finding: (-finding.exploitability_score, finding.id),
+    )
+    return {
+        "model": (
+            "impact_class x provenance x reachability x mitigation x deployment_context x confidence (0-10)"
+        ),
+        "by_level": by_level,
+        "likely": [finding.id for finding in likely],
+        "top": likely[0].id if likely else None,
+    }
 
 
 def _gate(findings: list[Finding], threshold: str | None, enabled: bool, policy: dict[str, Any] | None = None) -> Gate:
@@ -566,6 +588,7 @@ def build_security_report(
         finding_confidence_floor=float(meta.get("finding_confidence_floor") or 0.0),
         gate=_gate(findings, fail_on, enabled, policy),
         risk=risk,
+        exploitability=_exploitability(findings),
         priorities=new_findings[:PRIORITY_LIMIT],
         new_findings=new_findings,
         baselined_findings=baselined,

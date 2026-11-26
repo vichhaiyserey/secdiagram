@@ -31,11 +31,15 @@ are not presented as observed findings.
 
 Facts report what the analyzer detected. A static trace is evidence that the
 analyzer connected locations; it does not prove a feasible runtime exploit.
-`exploitability: static-flow` means a trace is attached, while `unverified` means
-there is no resolved trace. Neither value means exploitation was demonstrated.
-Confidence is the rule's estimate, not a measured probability of exploitation.
-Severity and risk retain the existing finding/risk model; no new CI blocking
-policy or ATT&CK audit behavior is introduced.
+The exploitability field uses the same evidence-based levels as the security
+report: `likely`, `plausible`, `unlikely`, or `informational` (see
+[SECURITY_AND_IAC.md](SECURITY_AND_IAC.md#exploitability-triage)). It combines
+impact class, evidence provenance, reachability, mitigation, deployment context
+and confidence. `unverified` and `static-flow` remain valid values for snapshots
+that predate the assessment. None of these values means exploitation was
+demonstrated. Confidence is the rule's estimate, not a measured probability of
+exploitation. Severity and risk retain the existing finding/risk model; no new
+CI blocking policy or ATT&CK audit behavior is introduced.
 
 Authentication signals are deliberately conservative. For example:
 

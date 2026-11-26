@@ -418,6 +418,22 @@ def _detect_role_from_cargo(repo_path: Path) -> tuple[str, float, list[str]]:
     return "unknown", 0.0, []
 
 
+def _detect_role_from_pubspec(repo_path: Path) -> tuple[str, float, list[str]]:
+    """Detect role from pubspec.yaml (Flutter / Dart)."""
+    pubspec = repo_path / "pubspec.yaml"
+    text = _safe_read_text(repo_path, pubspec)
+    if text is None:
+        return "unknown", 0.0, []
+
+    lower = text.lower()
+    if re.search(r"^\s*flutter\s*:", lower, re.M):
+        return "frontend", 0.9, ["Flutter pubspec.yaml"]
+    for marker in ("shelf", "dart_frog", "serverpod", "conduit"):
+        if re.search(rf"^\s*{re.escape(marker)}\s*:", lower, re.M):
+            return "backend", 0.85, [f"Dart backend framework: {marker}"]
+    return "library", 0.7, ["Dart pubspec.yaml"]
+
+
 def _detect_role_from_infra(repo_path: Path) -> tuple[str, float, list[str]]:
     """Detect infrastructure repos from Terraform, Helm, K8s manifests, Dockerfiles."""
     evidence: list[str] = []
@@ -518,6 +534,7 @@ def detect_repo_role(
         _detect_role_from_java,
         _detect_role_from_go,
         _detect_role_from_cargo,
+        _detect_role_from_pubspec,
         _detect_role_from_infra,
     ]
 
@@ -967,11 +984,11 @@ def discover_workspace(
     _source_indicators = {
         "package.json", "pyproject.toml", "setup.py", "setup.cfg",
         "go.mod", "pom.xml", "build.gradle", "build.gradle.kts",
-        "composer.json", "Cargo.toml", "Gemfile",
+        "composer.json", "Cargo.toml", "pubspec.yaml", "Gemfile",
         "Chart.yaml",  # Helm
     }
     _source_suffixes = {
-        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb", ".rs",
+        ".py", ".js", ".ts", ".java", ".cs", ".go", ".php", ".rb", ".rs", ".dart",
         ".tf",  # Terraform
     }
 

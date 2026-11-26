@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .exploitability import assess_graph
 from .model import Finding, Graph, Node
 from .taint_flows import TaintFlow, build_taint_flows
 
@@ -200,6 +201,7 @@ def score_findings(graph: Graph, flows: list[TaintFlow] | None = None) -> list[t
         },
         "top": [finding.id for finding, _ in ranked if not finding.baseline][:10],
     }
+    assess_graph(graph, flows)
     return ranked
 
 

@@ -46,6 +46,9 @@ SKIP_DIRS = {
     "htmlcov",
     ".gradle",
     ".mvn",
+    ".dart_tool",
+    ".fvm",
+    ".pub-cache",
     "obj",
     "Pods",
 }
