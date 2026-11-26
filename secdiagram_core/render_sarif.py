@@ -221,6 +221,26 @@ def _risk_properties(finding: Finding) -> dict[str, Any]:
     }
 
 
+def _exploitability_properties(finding: Finding) -> dict[str, Any]:
+    assessment = finding.metadata.get("exploitability") or {}
+    properties: dict[str, Any] = {}
+    if finding.exploitability:
+        properties["exploitability"] = finding.exploitability
+    if finding.exploitability_score > 0:
+        properties["exploitabilityScore"] = finding.exploitability_score
+    if assessment:
+        for source, target in (
+            ("impact_class", "impactClass"),
+            ("provenance", "provenance"),
+            ("reachability", "reachability"),
+            ("context", "deploymentContext"),
+            ("recommended_action", "recommendedAction"),
+        ):
+            if source in assessment:
+                properties[target] = assessment[source]
+    return properties
+
+
 def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
     findings = graph.sorted_findings()
     if skip_baseline:
@@ -303,6 +323,7 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 "recommendation": finding.recommendation,
                 "source": finding.source,
                 **_risk_properties(finding),
+                **_exploitability_properties(finding),
                 **_policy_properties(finding, policy_mode),
             },
         }

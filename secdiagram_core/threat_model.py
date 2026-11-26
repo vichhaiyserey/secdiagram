@@ -98,6 +98,8 @@ class Threat:
     evidence: list[str] = field(default_factory=list)
     priority: str | None = None
     max_score: float = 0.0
+    max_exploitability: str | None = None
+    max_exploitability_score: float = 0.0
     note: str = ""
     records: list[dict[str, Any]] = field(default_factory=list)
 
@@ -105,6 +107,8 @@ class Threat:
         return {
             "id": self.id, "boundary": self.boundary, "stride": self.stride, "title": self.title,
             "status": self.status, "priority": self.priority, "max_score": self.max_score,
+            "max_exploitability": self.max_exploitability,
+            "max_exploitability_score": self.max_exploitability_score,
             "finding_ids": self.finding_ids, "evidence": self.evidence, "mitigation": self.mitigation,
             "note": self.note,
             "records": self.records,
@@ -114,6 +118,10 @@ class Threat:
 def _risk(finding: Finding) -> tuple[float, str]:
     risk = finding.metadata.get("risk") or {}
     return float(risk.get("score", 0.0)), str(risk.get("priority", "P3"))
+
+
+def _exploitability(finding: Finding) -> tuple[float, str]:
+    return float(finding.exploitability_score), finding.exploitability or "informational"
 
 
 def build_threat_model(graph: Graph) -> list[Threat]:
@@ -136,6 +144,8 @@ def build_threat_model(graph: Graph) -> list[Threat]:
             threat.finding_ids = [f.id for f in matched]
             threat.evidence = [f"{f.title} ({f.evidence[0].ref})" for f in matched[:3] if f.evidence]
             threat.max_score, threat.priority = _risk(matched[0])
+            exploitable = max(matched, key=lambda f: (_exploitability(f), _risk(f), f.id))
+            threat.max_exploitability_score, threat.max_exploitability = _exploitability(exploitable)
         elif not categories:
             threat.status = "not-assessed"
             threat.note = "Not verifiable by static analysis; confirm in design review or runtime testing."
@@ -163,6 +173,8 @@ def build_threat_model(graph: Graph) -> list[Threat]:
             threat.finding_ids = [f.id for f in reaching]
             threat.evidence = [f"{f.title} ({f.evidence[0].ref})" for f in reaching[:3] if f.evidence]
             threat.max_score, threat.priority = _risk(reaching[0])
+            exploitable = max(reaching, key=lambda f: (_exploitability(f), _risk(f), f.id))
+            threat.max_exploitability_score, threat.max_exploitability = _exploitability(exploitable)
         threats.insert(0, threat)
     attach_threat_records(graph, threats)
     for threat in threats:
@@ -179,6 +191,10 @@ def summarize_threat_model(graph: Graph, threats: list[Threat]) -> None:
         "review": sum(1 for t in threats if t.status == "review"),
         "not_assessed": sum(1 for t in threats if t.status == "not-assessed"),
         "records": sum(len(t.records) for t in threats),
+        "by_exploitability": {
+            level: sum(1 for t in threats if t.max_exploitability == level)
+            for level in ("likely", "plausible", "unlikely", "informational")
+        },
         "by_boundary": {
             key: sum(1 for t in threats if t.boundary == key and t.status == "observed") for key, _, _ in BOUNDARIES
         },

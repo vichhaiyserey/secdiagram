@@ -58,17 +58,22 @@ def _confidence(finding: Finding) -> str:
 
 
 def _badges(finding: Finding) -> list[str]:
+    badges: list[str]
     if finding.metadata.get("runtime_confirmed"):
-        return ["Runtime-confirmed"]
-    if is_known_exploited(finding):
-        return ["Known exploited", "Advisory validated"]
-    if is_validated(finding):
-        return ["Advisory validated"]
-    if finding.trace:
-        return ["Taint-confirmed"]
-    if finding.source != "secdiagram":
-        return ["Scanner-reported"]
-    return ["Heuristic"]
+        badges = ["Runtime-confirmed"]
+    elif is_known_exploited(finding):
+        badges = ["Known exploited", "Advisory validated"]
+    elif is_validated(finding):
+        badges = ["Advisory validated"]
+    elif finding.trace:
+        badges = ["Taint-confirmed"]
+    elif finding.source != "secdiagram":
+        badges = ["Scanner-reported"]
+    else:
+        badges = ["Heuristic"]
+    if finding.exploitability:
+        badges.append(f"Exploitability {finding.exploitability}")
+    return badges
 
 
 def _why(finding: Finding) -> str:
@@ -98,6 +103,19 @@ def _provenance(finding: Finding) -> list[tuple[str, str]]:
     if finding.external_id:
         items.append(("External ID", finding.external_id))
     metadata = finding.metadata or {}
+    assessment = metadata.get("exploitability")
+    if isinstance(assessment, dict):
+        items.append(
+            (
+                "Exploitability",
+                f"{assessment.get('level', 'unknown')} ({assessment.get('score', 0)}/10)",
+            )
+        )
+        items.append(("Impact class", str(assessment.get("impact_class") or "other")))
+        items.append(("Recommended action", str(assessment.get("recommended_action") or "investigate")))
+        conditions = assessment.get("conditions") or []
+        if conditions:
+            items.append(("Conditions", "; ".join(str(condition) for condition in conditions)))
     for key, label in (
         ("package", "Package"),
         ("version", "Version"),
@@ -234,6 +252,18 @@ def render_security_markdown(report: SecurityReport) -> str:
         for category, count in sorted(report.risk.by_category.items()):
             lines.append(f"| {_md(category)} | {count} |")
         lines.append("")
+    lines.append("### Exploitability triage")
+    lines.append("")
+    lines.append("| Exploitability | New findings |")
+    lines.append("|---|---:|")
+    for level in ("likely", "plausible", "unlikely", "informational"):
+        lines.append(f"| {level.title()} | {report.exploitability['by_level'][level]} |")
+    lines.append("")
+    lines.append(
+        "Exploitability combines impact class, evidence provenance, reachability, mitigation, "
+        "deployment context, and confidence. It is a triage aid, not a proof of exploitability."
+    )
+    lines.append("")
     if report.gate.threshold:
         lines.append(
             f"CI gate: new findings at or above **{report.gate.threshold}** must be resolved "
@@ -724,7 +754,8 @@ def render_security_html(report: SecurityReport) -> str:
         f'<p class="callout">Advisory validation: <strong>{validated}</strong> finding(s) '
         f"corroborated; <strong>{known_exploited}</strong> known-exploited match(es). "
         f"Risk index formula: <code>{_h(report.risk.formula)}</code>. "
-                 "This is a prioritization aid, not a CVSS score or exploitability proof.</p>")
+                 "This is a prioritization aid, not a CVSS score; see the exploitability triage "
+                 "for the evidence-based likelihood.</p>")
     parts.append(f"<p><strong>Detection sources.</strong> {_h(_external_summary(report))}</p>")
     severity_rows = [
         [_h(label), str(report.risk.by_severity[key])]
@@ -743,6 +774,16 @@ def render_security_html(report: SecurityReport) -> str:
             for category, count in sorted(report.risk.by_category.items())
         ]
         parts.append(_html_table(["Category", "New findings"], category_rows, compact=True))
+    exploitability_rows = [
+        [_h(level.title()), str(report.exploitability["by_level"][level])]
+        for level in ("likely", "plausible", "unlikely", "informational")
+    ]
+    parts.append(_html_table(["Exploitability", "New findings"], exploitability_rows, compact=True))
+    parts.append(
+        '<p class="callout">Exploitability combines impact class, evidence provenance, reachability, '
+        "mitigation, deployment context, and confidence. It is a triage aid, not a proof of "
+        "exploitability.</p>"
+    )
     if report.gate.threshold:
         parts.append(
             f'<p class="callout">CI gate: new findings at or above '

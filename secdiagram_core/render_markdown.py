@@ -78,8 +78,8 @@ def _flows(graph: Graph, endpoints: list[Node], node_by_id: dict[str, Node], lim
 
 
 _POLYGLOT_LABELS = (
-    ("csharp", "C#"), ("javascript", "JavaScript"), ("typescript", "TypeScript"), ("php", "PHP"), ("go", "Go"),
-    ("rust", "Rust"),
+    ("csharp", "C#"), ("dart", "Dart / Flutter"), ("javascript", "JavaScript"), ("typescript", "TypeScript"),
+    ("php", "PHP"), ("go", "Go"), ("rust", "Rust"),
 )
 
 

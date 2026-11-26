@@ -54,6 +54,11 @@ _EXPOSURE_TO_REACHABILITY = {
 MIN_COMPLETE_HOPS = 2
 
 
+def reachability_for_exposure(exposure: str) -> str:
+    """Map a canonical exposure class to a reachability state."""
+    return _EXPOSURE_TO_REACHABILITY.get(exposure, "unknown")
+
+
 def classify_reachability(graph: Graph, finding: Finding) -> str:
     """Classify how a finding's vulnerable sink is reached."""
     if finding.metadata.get("runtime_confirmed") and finding.node_id:

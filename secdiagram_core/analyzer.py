@@ -52,6 +52,7 @@ LANGUAGE_BY_SUFFIX = {
     ".rb": "ruby",
     ".php": "php",
     ".rs": "rust",
+    ".dart": "dart",
     ".c": "c",
     ".h": "c",
     ".cpp": "cpp",
@@ -60,7 +61,7 @@ LANGUAGE_BY_SUFFIX = {
     ".swift": "swift",
 }
 
-SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "rust", "typescript")
+SECURITY_LANGUAGES = ("csharp", "dart", "go", "java", "javascript", "php", "python", "rust", "typescript")
 
 
 @dataclass(slots=True)
