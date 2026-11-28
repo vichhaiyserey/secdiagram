@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .assessment import is_public_client_identifier, refresh_assessment
 from .confidence import BLOCK_CONFIDENCE_THRESHOLD, compute_confidence
 from .dast_reports import DAST_SOURCES
 from .exposure import BLOCK_ELIGIBLE_EXPOSURES, classify_exposure
@@ -74,6 +75,11 @@ HIGH_RISK_CATEGORIES = frozenset(
     }
 )
 
+PUBLIC_CLIENT_ACTIONS = (
+    "Restrict the key in the provider console",
+    "Keep client configuration out of server-side secret stores",
+    "Review the provider key restrictions for production use",
+)
 SECRET_REMOVAL_ACTIONS = (
     "Rotate the credential",
     "Remove the secret from source",
@@ -190,6 +196,8 @@ def _evidence_quality(graph: Graph, finding: Finding) -> str:
         return "llm_only"
     if _is_runtime_confirmed(finding):
         return "externally_verified"
+    if is_public_client_identifier(finding):
+        return "public_client_identifier"
     if finding.category == "secret" and _secret_kind(finding) == "provider_token":
         return "provider_verified"
     validation = finding.metadata.get("validation") or {}
@@ -207,6 +215,8 @@ def _evidence_quality(graph: Graph, finding: Finding) -> str:
 def _required_actions(finding: Finding) -> tuple[str, ...]:
     if _is_runtime_confirmed(finding):
         return RUNTIME_ACTIONS
+    if is_public_client_identifier(finding):
+        return PUBLIC_CLIENT_ACTIONS
     if finding.category == "secret":
         return SECRET_REMOVAL_ACTIONS
     if _is_dependency_finding(finding):
@@ -230,6 +240,8 @@ def _blocking_eligibility(
         # apply.
         return None
     if finding.category == "secret":
+        if is_public_client_identifier(finding):
+            return "public client identifier is not a secret"
         if _secret_kind(finding) != "provider_token":
             return "secret is not a format-verified provider token"
         return None
@@ -395,6 +407,7 @@ def apply_policy(
         finding.required_actions = list(result.required_actions)
         risk = finding.metadata.get("risk") or {}
         finding.risk_score = float(risk.get("score", 0.0))
+        refresh_assessment(finding)
         if enforcement != "suppressed":
             summary.decisions[enforcement] = summary.decisions.get(enforcement, 0) + 1
             if enforcement == "block":

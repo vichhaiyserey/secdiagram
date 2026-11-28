@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__, agentic, studio_ui
 from . import studio as studio_install
 from .analyzer import AnalysisConfig, AnalysisResult, run_analysis
+from .assessment import rule_id
 from .config import SecdiagramConfig, load_config
 from .diagram_edit import (
     DiagramOverrideError,
@@ -39,7 +40,7 @@ from .diagram_edit import (
 )
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .llm import NarrativeError, generate_narrative
-from .model import SEVERITY_RANK, Finding, Graph
+from .model import Finding, Graph
 from .redaction import redact_secrets, sanitize_path_text, sanitize_url_path
 from .render_html import render_html
 from .render_image import ImageRenderError, render_image
@@ -58,6 +59,48 @@ def _sev_counts(graph: Graph) -> dict[str, int]:
             counts[severity] = 0
         counts[severity] += 1
     return counts
+
+
+_PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def _assessment_counts(graph: Graph) -> dict[str, Any]:
+    priorities = {label: 0 for label in ("P0", "P1", "P2", "P3")}
+    levels = {label: 0 for label in ("likely", "plausible", "unlikely", "informational")}
+    reachability = {label: 0 for label in (
+        "externally_reachable", "authenticated_reachable", "local_reachable",
+        "internal_reachable", "unreachable", "unknown",
+    )}
+    exposure = {label: 0 for label in (
+        "public", "privileged", "sensitive_data", "internal_high_impact",
+        "isolated", "unknown",
+    )}
+    blocking = 0
+    suppressed = 0
+    for finding in graph.findings:
+        assessment = finding.assessment or {}
+        risk = finding.metadata.get("risk") or {}
+        exploit = finding.metadata.get("exploitability") or {}
+        priority = str(assessment.get("priority") or risk.get("priority") or "P3")
+        level = str(assessment.get("level") or exploit.get("level") or "informational")
+        reach = str(assessment.get("reachability") or risk.get("reachability") or "unknown")
+        exp = str(assessment.get("exposure") or risk.get("exposure") or "unknown")
+        priorities[priority] = priorities.get(priority, 0) + 1
+        levels[level] = levels.get(level, 0) + 1
+        reachability[reach] = reachability.get(reach, 0) + 1
+        exposure[exp] = exposure.get(exp, 0) + 1
+        if assessment.get("blocking") or finding.enforcement == "block":
+            blocking += 1
+        if assessment.get("suppressed") or finding.baseline or finding.enforcement == "suppressed":
+            suppressed += 1
+    return {
+        "by_priority": priorities,
+        "by_level": levels,
+        "by_reachability": reachability,
+        "by_exposure": exposure,
+        "blocking": blocking,
+        "suppressed": suppressed,
+    }
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -784,7 +827,15 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                 "findings_count": len(graph.findings),
                 "features_count": len(graph.features),
                 "severities": _sev_counts(graph),
+                "assessment": _assessment_counts(graph),
                 "languages": graph.meta.get("languages", {}),
+                "coverage": {
+                    "languages": graph.meta.get("languages", {}),
+                    "security_languages": graph.meta.get("security_languages", []),
+                    "unsupported_security_languages": graph.meta.get(
+                        "unsupported_security_languages", []
+                    ),
+                },
             })
             return
 
@@ -822,11 +873,94 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     pass
 
-            findings.sort(key=lambda f: (-SEVERITY_RANK.get(f.severity, 0), f.id))
+            priority_filter = {p.upper() for p in query.get("priority", [])}
+            if priority_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.assessment or {}).get("priority")
+                           or (f.metadata.get("risk") or {}).get("priority", "P3")).upper()
+                    in priority_filter
+                ]
+
+            level_filter = {level.lower() for level in query.get("assessment_level", [])}
+            if level_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.assessment or {}).get("level")
+                           or f.exploitability or "informational").lower()
+                    in level_filter
+                ]
+
+            reach_filter = {reach.lower() for reach in query.get("reachability", [])}
+            if reach_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.assessment or {}).get("reachability")
+                           or f.reachability or "unknown").lower()
+                    in reach_filter
+                ]
+
+            rule_filter = {rule for rule in query.get("rule", [])}
+            if rule_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.rule or {}).get("id") or rule_id(f)) in rule_filter
+                ]
+
+            suppressed_filter = (query.get("suppressed") or [""])[0].lower()
+            if suppressed_filter in {"1", "true", "yes"}:
+                findings = [
+                    f for f in findings
+                    if f.baseline or f.enforcement == "suppressed"
+                ]
+            elif suppressed_filter in {"0", "false", "no"}:
+                findings = [
+                    f for f in findings
+                    if not f.baseline and f.enforcement != "suppressed"
+                ]
+
+            findings.sort(key=lambda f: (
+                _PRIORITY_ORDER.get(
+                    str((f.assessment or {}).get("priority")
+                        or (f.metadata.get("risk") or {}).get("priority", "P3")),
+                    3,
+                ),
+                -float((f.metadata.get("risk") or {}).get("score", 0.0)),
+                f.id,
+            ))
             self._send_json(200, {
                 "total": len(findings),
                 "findings": [f.to_dict() for f in findings],
             })
+            return
+
+        if path == "/api/v1/rules":
+            analysis = state.get_analysis()
+            rules: dict[str, dict[str, Any]] = {}
+            for finding in analysis.graph.sorted_findings():
+                descriptor = finding.rule or {}
+                rid = str(descriptor.get("id") or rule_id(finding))
+                entry = rules.setdefault(
+                    rid,
+                    {
+                        "id": rid,
+                        "name": descriptor.get("name", f"secdiagram/{finding.category}"),
+                        "category": descriptor.get("category", finding.category),
+                        "cwe": descriptor.get("cwe", finding.cwe),
+                        "owasp": list(descriptor.get("owasp", [])),
+                        "help_uri": descriptor.get("help_uri"),
+                        "source": descriptor.get("source", finding.source),
+                        "count": 0,
+                        "severities": {},
+                        "finding_ids": [],
+                    },
+                )
+                entry["count"] += 1
+                severity = finding.severity.lower()
+                entry["severities"][severity] = entry["severities"].get(severity, 0) + 1
+                entry["finding_ids"].append(finding.id)
+            ordered = [rules[key] for key in sorted(rules)]
+            self._send_json(200, {"total": len(ordered), "rules": ordered})
             return
 
         if path == "/api/v1/threat-model":

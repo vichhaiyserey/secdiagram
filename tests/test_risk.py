@@ -80,7 +80,7 @@ class RiskScoringTests(unittest.TestCase):
         unknown_sql = risk["node/routes.ts:6"]
         auth_sql = risk["node/routes.ts:10"]
         self.assertEqual((public_cmd["exposure"], public_cmd["priority"]), ("public", "P0"))
-        self.assertEqual((auth_cmd["exposure"], auth_cmd["priority"]), ("authenticated", "P1"))
+        self.assertEqual((auth_cmd["exposure"], auth_cmd["priority"]), ("privileged", "P1"))
         self.assertGreater(public_cmd["score"], auth_cmd["score"])
         self.assertGreater(unknown_sql["score"], auth_sql["score"])
         self.assertEqual(public_cmd["evidence"], "proven-flow")

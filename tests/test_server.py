@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest import mock
+from urllib.parse import quote
 
 from secdiagram_core.config import SecdiagramConfig
 from secdiagram_core.model import Graph
@@ -349,6 +350,53 @@ class ServerIntegrationTests(unittest.TestCase):
             crit_data = json.loads(resp.read().decode("utf-8"))
             for f in crit_data["findings"]:
                 self.assertEqual(f["severity"].lower(), "critical")
+
+    def test_assessment_rules_and_finding_filters(self) -> None:
+        with urllib.request.urlopen(f"{self.base_url}/api/v1/findings", timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertGreaterEqual(data["total"], 1)
+        first = data["findings"][0]
+        self.assertIn("assessment", first)
+        self.assertIn("rule", first)
+        self.assertIn("provenance", first)
+        self.assertIn("remediation", first)
+        priority = first["assessment"]["priority"]
+        rule = first["rule"]["id"]
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/v1/findings?priority={quote(priority)}", timeout=5
+        ) as resp:
+            filtered = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(filtered["findings"])
+        self.assertTrue(all(
+            item["assessment"]["priority"] == priority for item in filtered["findings"]
+        ))
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/v1/findings?rule={quote(rule)}", timeout=5
+        ) as resp:
+            by_rule = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(by_rule["findings"])
+        self.assertTrue(all(item["rule"]["id"] == rule for item in by_rule["findings"]))
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/v1/findings?suppressed=false", timeout=5
+        ) as resp:
+            active = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(all(not item.get("baseline") for item in active["findings"]))
+
+        with urllib.request.urlopen(f"{self.base_url}/api/v1/rules", timeout=5) as resp:
+            rules = json.loads(resp.read().decode("utf-8"))
+        self.assertGreaterEqual(rules["total"], 1)
+        self.assertTrue(all(item["count"] >= 1 for item in rules["rules"]))
+
+        with urllib.request.urlopen(f"{self.base_url}/api/v1/summary", timeout=5) as resp:
+            summary = json.loads(resp.read().decode("utf-8"))
+        self.assertIn("by_priority", summary["assessment"])
+        self.assertIn("by_level", summary["assessment"])
+        self.assertIn("languages", summary)
+        self.assertIn("coverage", summary)
+        self.assertIn("languages", summary["coverage"])
 
     def test_sarif_and_diagram_endpoints(self) -> None:
         sarif_url = f"{self.base_url}/api/v1/sarif"

@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .assessment import is_public_client_identifier
 from .model import Finding, Graph, Loc, stable_id
 from .risk import endpoint_exposure
 from .threat_review import attach_threat_records, render_threat_records
@@ -126,7 +127,10 @@ def _exploitability(finding: Finding) -> tuple[float, str]:
 
 def build_threat_model(graph: Graph) -> list[Threat]:
     """STRIDE threats per trust boundary, evidenced by the graph's findings."""
-    active = [f for f in graph.sorted_findings() if not f.baseline]
+    active = [
+        f for f in graph.sorted_findings()
+        if not f.baseline and not is_public_client_identifier(f)
+    ]
     endpoints = [n for n in graph.sorted_nodes() if n.kind == "endpoint"]
     exposures = [endpoint_exposure(n) for n in endpoints]
     threats: list[Threat] = []
@@ -416,7 +420,10 @@ def evaluate_attack(graph: Graph, findings: list[Finding] | None = None) -> list
     Deterministic: rules are evaluated in ``ATTACK_RULES`` order and evidence is
     sorted by risk score, then source location.
     """
-    active = [f for f in (findings if findings is not None else graph.sorted_findings()) if not f.baseline]
+    active = [
+        f for f in (findings if findings is not None else graph.sorted_findings())
+        if not f.baseline and not is_public_client_identifier(f)
+    ]
     evals: list[AttackEval] = []
     for rule in ATTACK_RULES:
         matched = sorted(
