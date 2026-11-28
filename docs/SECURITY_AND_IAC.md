@@ -21,6 +21,8 @@ The static analysis engine inspects Python and Java/Spring sources (and, see 1.1
 
 Findings carry full source-to-sink taint paths (`codeFlows`), exact `path:line` citations, and stable partial fingerprints.
 
+Public client identifiers (Firebase `google-services.json` / `GoogleService-Info.plist` API keys) are classified as `public_client_identifier` and reported at `info` severity. They are shipped by design in client applications, do not trigger ATT&CK `T1552`, and never block policy or audit gates. Format-verified provider tokens remain `provider_token` and keep their blocking behavior.
+
 ### 1.1 C#/.NET, JavaScript/TypeScript, PHP, Go and Rust
 
 `polyglot_index.py` and `polyglot_security.py` add the same graph and SAST

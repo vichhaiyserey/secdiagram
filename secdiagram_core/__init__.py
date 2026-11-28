@@ -6,6 +6,12 @@ from typing import Any
 
 __version__ = "0.5.0"
 SCHEMA_VERSION = 1
+SCHEMA_FEATURES = (
+    "finding.assessment/v1",
+    "finding.rule/v1",
+    "finding.provenance/v1",
+    "finding.remediation/v1",
+)
 
 from .analyzer import AnalysisConfig, AnalysisResult, analyze, run_analysis
 from .config import SecdiagramConfig, load_config
@@ -90,6 +96,7 @@ def render_mermaid(
 __all__ = [
     "__version__",
     "SCHEMA_VERSION",
+    "SCHEMA_FEATURES",
     "analyze",
     "run_analysis",
     "AnalysisConfig",

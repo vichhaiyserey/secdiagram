@@ -79,6 +79,20 @@ SECRET_CONFIG_RE = re.compile(
 
 # Curated high-confidence provider patterns. Prefixes and lengths are based on the
 # public gitleaks ruleset and GitHub's supported secret-scanning patterns.
+PUBLIC_CLIENT_CONFIG_FILES = frozenset({"google-services.json", "googleservice-info.plist"})
+PUBLIC_CLIENT_KEY_RE = re.compile(r"^AIza[0-9A-Za-z_-]{35}$")
+PUBLIC_CLIENT_RECOMMENDATION = (
+    "Public client identifiers are shipped by design in client applications. "
+    "Restrict the key in the provider console instead of rotating it as a server secret."
+)
+
+def _is_public_client_identifier(path: str, value: str) -> bool:
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name in PUBLIC_CLIENT_CONFIG_FILES and bool(
+        PUBLIC_CLIENT_KEY_RE.fullmatch(value.strip().strip("'\""))
+    )
+
+
 SECRET_TOKEN_RES = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\bASIA[0-9A-Z]{16}\b"),
@@ -220,6 +234,7 @@ TEXT_SECRET_SUFFIXES = {
     ".swift",
     ".sql",
     ".xml",
+    ".plist",
     ".gradle",
 }
 
@@ -1092,12 +1107,35 @@ class SecurityAnalyzer:
             return True
         return any(word in lowered for word in PLACEHOLDER_WORDS)
 
+    def _add_public_client_finding(
+        self, key: str, path: str, line_number: int, node_id: str | None
+    ) -> None:
+        self._add_finding(
+            category=SECRET_CATEGORY,
+            severity="info",
+            title=f"Public client identifier: {key}",
+            message=f"Public client configuration value found at {path}:{line_number}.",
+            loc=Loc(path, line_number),
+            cwe=SECRET_CWE,
+            node_id=node_id,
+            confidence=0.9,
+            recommendation=PUBLIC_CLIENT_RECOMMENDATION,
+            metadata={
+                "secret_kind": "public_client_identifier",
+                "public_client": True,
+                "provider": "google_firebase",
+            },
+        )
+
     def _secret_line_findings(
         self, line: str, path: str, line_number: int, node_id: str | None
     ) -> bool:
         match = SECRET_ASSIGN_RE.search(line)
         if match and not self._is_placeholder_secret(match.group("value")):
             value = match.group("value")
+            if _is_public_client_identifier(path, value):
+                self._add_public_client_finding(match.group("key"), path, line_number, node_id)
+                return True
             # A credential-shaped assignment whose value matches a curated
             # provider format is verified evidence, not a heuristic guess.
             provider_verified = any(pattern.search(value) for pattern in SECRET_TOKEN_RES)
@@ -1115,20 +1153,25 @@ class SecurityAnalyzer:
             )
             return True
         for pattern in SECRET_TOKEN_RES:
-            if pattern.search(line):
-                self._add_finding(
-                    category=SECRET_CATEGORY,
-                    severity="high",
-                    title="Possible hardcoded token",
-                    message=f"Token-shaped literal found at {path}:{line_number}.",
-                    loc=Loc(path, line_number),
-                    cwe=SECRET_CWE,
-                    node_id=node_id,
-                    confidence=0.8,
-                    recommendation=SECRET_RECOMMENDATION,
-                    metadata={"secret_kind": "provider_token"},
-                )
+            token_match = pattern.search(line)
+            if token_match is None:
+                continue
+            if _is_public_client_identifier(path, token_match.group(0)):
+                self._add_public_client_finding("API key", path, line_number, node_id)
                 return True
+            self._add_finding(
+                category=SECRET_CATEGORY,
+                severity="high",
+                title="Possible hardcoded token",
+                message=f"Token-shaped literal found at {path}:{line_number}.",
+                loc=Loc(path, line_number),
+                cwe=SECRET_CWE,
+                node_id=node_id,
+                confidence=0.8,
+                recommendation=SECRET_RECOMMENDATION,
+                metadata={"secret_kind": "provider_token"},
+            )
+            return True
         return False
 
     def _config_secret_findings(
@@ -1136,6 +1179,9 @@ class SecurityAnalyzer:
     ) -> bool:
         match = SECRET_CONFIG_RE.match(line)
         if match and not self._is_placeholder_secret(match.group("value")):
+            if _is_public_client_identifier(path, match.group("value")):
+                self._add_public_client_finding(match.group("key"), path, line_number, node_id)
+                return True
             self._add_finding(
                 category=SECRET_CATEGORY,
                 severity="high",

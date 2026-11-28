@@ -323,11 +323,22 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 "precision": _precision(finding.confidence),
                 "recommendation": finding.recommendation,
                 "source": finding.source,
+                "blocking": bool(
+                    (finding.assessment or {}).get("blocking") or finding.enforcement == "block"
+                ),
                 **_risk_properties(finding),
                 **_exploitability_properties(finding),
                 **_policy_properties(finding, policy_mode),
             },
         }
+        if finding.assessment:
+            result["properties"]["assessment"] = finding.assessment
+        if finding.rule:
+            result["properties"]["rule"] = finding.rule
+        if finding.provenance:
+            result["properties"]["provenance"] = finding.provenance
+        if finding.remediation:
+            result["properties"]["remediation"] = finding.remediation
         if finding.external_id:
             result["properties"]["external_id"] = finding.external_id
         if finding.metadata.get("validation"):

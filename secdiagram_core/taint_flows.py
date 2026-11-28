@@ -233,6 +233,10 @@ EXPOSURE_BADGES = {
     "public": "PUBLIC - no auth",
     "unknown": "auth not detected",
     "authenticated": "authenticated",
+    "privileged": "authenticated",
+    "sensitive_data": "credential material",
+    "internal_high_impact": "internal high impact",
+    "isolated": "isolated",
     "local": "local entry",
     "internal": "internal",
 }

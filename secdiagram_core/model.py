@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import SCHEMA_VERSION, __version__
+from . import SCHEMA_FEATURES, SCHEMA_VERSION, __version__
 
 SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
@@ -184,6 +184,10 @@ class Finding:
     required_actions: list[str] = field(default_factory=list)
     exploitability: str = ""
     exploitability_score: float = 0.0
+    assessment: dict[str, Any] = field(default_factory=dict)
+    rule: dict[str, Any] = field(default_factory=dict)
+    provenance: dict[str, Any] = field(default_factory=dict)
+    remediation: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -230,6 +234,14 @@ class Finding:
             out["exploitability"] = self.exploitability
         if self.exploitability_score > 0:
             out["exploitability_score"] = round(float(self.exploitability_score), 2)
+        if self.assessment:
+            out["assessment"] = self.assessment
+        if self.rule:
+            out["rule"] = self.rule
+        if self.provenance:
+            out["provenance"] = self.provenance
+        if self.remediation:
+            out["remediation"] = self.remediation
         return out
 
     @classmethod
@@ -261,6 +273,10 @@ class Finding:
             required_actions=[str(action) for action in data.get("required_actions", [])],
             exploitability=str(data.get("exploitability", "")),
             exploitability_score=float(data.get("exploitability_score", 0.0)),
+            assessment=dict(data.get("assessment") or {}),
+            rule=dict(data.get("rule") or {}),
+            provenance=dict(data.get("provenance") or {}),
+            remediation=dict(data.get("remediation") or {}),
         )
 
 
@@ -358,6 +374,7 @@ class Graph:
         self.findings = self.sorted_findings()
         return {
             "schema_version": SCHEMA_VERSION,
+            "schema_features": list(SCHEMA_FEATURES),
             "meta": {
                 **self.meta,
                 "tool": "secdiagram",

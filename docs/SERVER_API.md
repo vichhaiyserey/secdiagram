@@ -72,10 +72,11 @@ All endpoints require Basic Authentication unless the server was explicitly star
 | `GET` | `/` | Interactive self-contained HTML report (`report.html`) |
 | `GET` | `/api/v1/health` | Server health and version |
 | `GET` | `/api/v1/config` | Active configuration (secrets omitted) |
-| `GET` | `/api/v1/summary` | Node/edge/finding counts for the current analysis |
+| `GET` | `/api/v1/summary` | Node/edge/finding counts, severity counts, canonical assessment counts, and coverage metadata |
 | `GET` | `/api/v1/graph` | Deterministic graph JSON (`graph.json`), including `findings[].metadata.flow` taint paths |
 | `GET` | `/api/v1/sarif` | OASIS SARIF v2.1.0 security report (`security.sarif`) |
-| `GET` | `/api/v1/findings` | Findings, highest severity first (each carries `metadata.risk`: score, priority, exposure) |
+| `GET` | `/api/v1/findings` | Findings ordered by canonical priority then score. Each carries `assessment`, `rule`, `provenance`, and `remediation` objects. Filters: `severity`, `category`, `min_confidence`, `priority`, `assessment_level`, `reachability`, `rule`, `suppressed`. |
+| `GET` | `/api/v1/rules` | Observed rules with finding counts, severities, CWE/OWASP metadata, and help URIs |
 | `GET` | `/api/v1/threat-model` | STRIDE threat model per trust boundary (Markdown) |
 | `GET` | `/api/v1/diagram` | Mermaid diagram. `?detail=architecture` (default, taint paths highlighted), `?detail=high-level` (C4 tiers) or `?detail=taint` (attack-path diagram) |
 | `POST` | `/api/v1/scan` | Trigger a new scan. Body accepts JSON options (`{"dir": "...", "security": true}`). Disabled when `read_only: true`. |
@@ -92,6 +93,60 @@ All endpoints require Basic Authentication unless the server was explicitly star
 | `POST` | `/api/v1/studio/handoff` | Write `HANDOFF.md`/`handoff.json` with `{"write":true}` after all phases are done. |
 | `POST` | `/api/v1/studio/generate` | Optional evidence-grounded narrative from Ollama or OpenAI. |
 | `POST` | `/api/v1/studio/installer` | Always `403`; installer writes are CLI-only. |
+
+### Finding assessment contract
+
+`/api/v1/graph`, `/api/v1/findings`, and `security.sarif` share the same canonical assessment fields. Existing keys are unchanged and `schema_version` stays `1`; consumers can detect the additive contract through `schema_features`.
+
+```json
+{
+  "id": "…",
+  "severity": "high",
+  "assessment": {
+    "model": "canonical-assessment/v1",
+    "priority": "P3",
+    "score": 0.7,
+    "level": "unlikely",
+    "impact_class": "supply-chain",
+    "reachability": "unknown",
+    "exposure": "isolated",
+    "evidence": "inventory-only",
+    "provenance": "dependency-in-use",
+    "context": "production",
+    "confidence": 0.8,
+    "recommended_action": "monitor",
+    "conditions": ["…"],
+    "blocking": false,
+    "suppressed": false,
+    "trust": "external-unverified"
+  },
+  "rule": {
+    "id": "dependency:CWE-829",
+    "name": "secdiagram/trivy/dependency",
+    "category": "dependency",
+    "cwe": "CWE-829",
+    "owasp": ["A03:2025", "A06:2021"],
+    "help_uri": "https://cwe.mitre.org/data/definitions/829.html",
+    "source": "trivy"
+  },
+  "provenance": {
+    "source": "trivy",
+    "external_id": "CVE-2023-39137",
+    "report": "trivy.json",
+    "imported": true,
+    "validated": false,
+    "evidence_quality": "",
+    "trust": "external-unverified"
+  },
+  "remediation": {
+    "summary": "Upgrade archive to 3.3.8.",
+    "actions": ["Upgrade the affected package to a fixed version"],
+    "commands": ["flutter pub upgrade archive:^3.3.8"]
+  }
+}
+```
+
+Public client identifiers (for example Firebase `google-services.json` API keys) are reported as `severity: info` with `metadata.secret_kind: public_client_identifier`. They are not credential material, do not trigger ATT&CK `T1552`, and never block policy or audit gates. Format-verified provider tokens remain `provider_token` and keep their blocking behavior.
 
 ---
 

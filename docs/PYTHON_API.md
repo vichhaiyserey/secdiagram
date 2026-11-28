@@ -82,6 +82,29 @@ for pkg, summary in result.dependency_usage.items():
     print(f"{pkg}: reachable={summary.is_reachable}, imports={summary.import_count}, sinks={summary.sinks_invoked}")
 ```
 
+### Canonical finding assessment
+
+`score_findings(graph)` (also run by `run_analysis`) attaches a canonical, additive assessment to every finding. The existing `metadata["risk"]` and `metadata["exploitability"]` objects remain available; the new fields remove the need to reconcile their taxonomies:
+
+```python
+from secdiagram_core.risk import score_findings
+
+score_findings(result.graph)
+for finding in result.graph.sorted_findings():
+    assessment = finding.assessment
+    print(
+        assessment["priority"],
+        assessment["level"],
+        assessment["reachability"],
+        assessment["exposure"],
+        assessment["blocking"],
+    )
+    print(finding.rule["id"], finding.provenance["trust"])
+    print(finding.remediation["commands"])
+```
+
+The same objects appear in `graph.to_dict()["findings"]` and the REST API. `schema_version` remains `1`; `schema_features` lists the additive fields (`finding.assessment/v1`, `finding.rule/v1`, `finding.provenance/v1`, `finding.remediation/v1`).
+
 ---
 
 ## 3. Serialization & Caching (`to_dict` / `from_dict` / `to_json` / `from_json`)
