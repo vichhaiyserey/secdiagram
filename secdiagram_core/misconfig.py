@@ -45,6 +45,8 @@ LANGUAGE_BY_SUFFIX = {
     ".php": "php",
     ".go": "go",
     ".java": "java",
+    ".rs": "rust",
+    ".dart": "dart",
 }
 TOKEN_WORDS = r"(?i:token|secret|password|passw|otp|nonce|salt|session|api_?key|apikey|reset|verification|csrf|auth_?code)"
 
@@ -53,6 +55,8 @@ JS = frozenset({"javascript", "typescript"})
 PHP = frozenset({"php"})
 GO = frozenset({"go"})
 JAVA = frozenset({"java"})
+RS = frozenset({"rust"})
+DART = frozenset({"dart"})
 
 RECOMMEND = {
     "jwt": "Validate token signatures with a pinned algorithm and key, and enforce expiry, issuer and audience.",
@@ -62,7 +66,8 @@ RECOMMEND = {
     "cookie": "Set HttpOnly and Secure (and SameSite) on session and authentication cookies.",
     "xxe": "Disable DTD processing and external entity resolution on XML parsers.",
     "randomness": "Generate tokens, secrets and OTPs with a CSPRNG (RandomNumberGenerator, crypto.randomBytes / "
-    "randomUUID, random_bytes, crypto/rand, SecureRandom).",
+    "randomUUID, random_bytes, crypto/rand, SecureRandom, Random.secure()).",
+    "credential": "Store tokens, passwords and secrets in encrypted platform keystores (FlutterSecureStorage / Keychain / Keystore) instead of plaintext preferences.",
     "misconfig": "Enable detailed error pages only in development (guard with an environment check).",
 }
 
@@ -173,6 +178,22 @@ RULES: tuple[ConfigRule, ...] = (
     ConfigRule("CFG-JAVA-RANDOM", JAVA, "randomness", "CWE-338", "medium", "Non-cryptographic RNG for a security value",
                _r(r"\bnew\s+Random\s*\(|\bMath\.random\s*\(|\bThreadLocalRandom\.current\s*\("), near=_r(TOKEN_WORDS),
                near_lines=1),
+    ConfigRule("CFG-RS-CORS", RS, "cors", "CWE-942", "high", "CORS trusts any origin or permissive preset",
+               _r(r"CorsLayer::very_permissive\s*\(|\.allow_any_origin\s*\(\)")),
+    ConfigRule("CFG-RS-RANDOM", RS, "randomness", "CWE-338", "medium", "Non-cryptographic RNG for a security value",
+               _r(r"\b(?:fastrand::(?:u\d+|i\d+|f32|f64|bool|fill)|SmallRng::(?:seed_from_u64|from_entropy|from_rng|from_os_rng))\s*\("),
+               near=_r(TOKEN_WORDS), near_lines=1),
+    # ----------------------------------------------------------- Flutter / Dart
+    ConfigRule("CFG-DART-INSECURE-STORAGE", DART, "credential", "CWE-312", "high",
+               "Sensitive credential stored in unencrypted SharedPreferences",
+               _r(r"\.\s*setString\s*\(\s*['\"][^'\"]*" + TOKEN_WORDS + r"[^'\"]*['\"]"), in_strings=False),
+    ConfigRule("CFG-DART-WEBVIEW-ACCESS", DART, "misconfig", "CWE-749", "high",
+               "WebView permits local file access or mixed HTTP/HTTPS content",
+               _r(r"\b(?:allowUniversalAccessFromFileURLs|allowFileAccessFromFileURLs)\s*:\s*true\b|"
+                  r"\bmixedContentMode\s*:\s*MixedContentMode\.MIXED_CONTENT_ALWAYS_ALLOW\b")),
+    ConfigRule("CFG-DART-RANDOM", DART, "randomness", "CWE-338", "medium",
+               "Non-cryptographic Random() used for a security value (use Random.secure())",
+               _r(r"(?<!\.)\bRandom\s*\("), near=_r(TOKEN_WORDS), near_lines=1),
     # ----------------------------------------------------------- debug pages
     ConfigRule("CFG-CS-DEVPAGE", CS, "misconfig", "CWE-209", "medium", "Developer exception page without environment guard",
                _r(r"\bUseDeveloperExceptionPage\s*\("), absent=_r(r"\bIsDevelopment\s*\(|\bIsEnvironment\s*\(")),
@@ -210,7 +231,7 @@ def _innermost_nodes(graph: Graph) -> dict[str, list[tuple[int, str]]]:
 
 
 def analyze_misconfig(graph: Graph, root: Path, rel_files: list[str]) -> list[Finding]:
-    """Scan C#, JS/TS, PHP, Go and Java sources for web/API misconfigurations."""
+    """Scan C#, JS/TS, PHP, Go, Java and Rust for web/API misconfigurations."""
     findings: list[Finding] = []
     seen: set[str] = set()
     nodes = _innermost_nodes(graph)

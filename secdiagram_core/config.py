@@ -26,6 +26,7 @@ class ServerConfig:
     max_concurrent_scans: int = 1
     scan_roots: list[str] = field(default_factory=list)
     audit_log: str | None = None
+    strict_port: bool = False
 
     def is_auth_enabled(self) -> bool:
         return self.auth_mode == "basic" and bool(self.auth_username and self.auth_password)
@@ -114,6 +115,8 @@ def load_config(root: Path, config_path: Path | None = None) -> SecdiagramConfig
                         cfg.server.scan_roots = [str(p) for p in srv["scan_roots"]]
                     if "audit_log" in srv and srv["audit_log"]:
                         cfg.server.audit_log = str(srv["audit_log"])
+                    if "strict_port" in srv:
+                        cfg.server.strict_port = bool(srv["strict_port"])
 
                 # Analysis section
                 ana = content.get("analysis", {})
@@ -199,6 +202,10 @@ def load_config(root: Path, config_path: Path | None = None) -> SecdiagramConfig
     env_audit = os.environ.get("SECDIAGRAM_AUDIT_LOG")
     if env_audit:
         cfg.server.audit_log = env_audit
+
+    env_strict_port = os.environ.get("SECDIAGRAM_SERVER_STRICT_PORT")
+    if env_strict_port:
+        cfg.server.strict_port = env_strict_port.lower() in {"1", "true", "yes"}
 
     # If credentials are provided but auth_mode was left as "none", promote to basic
     if cfg.server.auth_username and cfg.server.auth_password and cfg.server.auth_mode == "none":

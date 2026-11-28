@@ -13,6 +13,12 @@ from typing import Any
 from .advisories import apply_advisories, load_advisories
 from .ast_index import index_repo
 from .cache import IndexCache
+from .dast_reports import RuntimeObservation, correlate_runtime, load_dast_reports
+from .dependency_correlation import correlate
+from .dependency_graph import add_inventory
+from .dependency_inventory import pub_inventory
+from .dependency_reports import import_reports
+from .dependency_versions import apply_pub_ranges
 from .discover import RepoInfo, discover
 from .external_reports import load_external_reports
 from .features import assign_features
@@ -51,6 +57,7 @@ LANGUAGE_BY_SUFFIX = {
     ".rb": "ruby",
     ".php": "php",
     ".rs": "rust",
+    ".dart": "dart",
     ".c": "c",
     ".h": "c",
     ".cpp": "cpp",
@@ -59,7 +66,7 @@ LANGUAGE_BY_SUFFIX = {
     ".swift": "swift",
 }
 
-SECURITY_LANGUAGES = ("csharp", "go", "java", "javascript", "php", "python", "typescript")
+SECURITY_LANGUAGES = ("csharp", "dart", "go", "java", "javascript", "php", "python", "rust", "typescript")
 
 
 @dataclass(slots=True)
@@ -71,7 +78,12 @@ class AnalysisConfig:
     max_nodes: int = 2000
     security: bool = True
     sonarqube_report: Path | None = None
+    trivy_report: Path | None = None
+    sbom: Path | None = None
+    verified_dependency_reports: dict[str, dict[str, Any]] | None = None
     xray_report: Path | None = None
+    zap_report: Path | None = None
+    nuclei_report: Path | None = None
     advisory_dbs: list[Path] = field(default_factory=list)
     jobs: int = 0
     cache_dir: Path | None = None
@@ -270,6 +282,11 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if polyglot_index.files:
         build_polyglot_graph(graph, polyglot_index)
 
+    packages, dependency_warnings = pub_inventory(repo.root, repo.rel_files)
+    add_inventory(graph, packages)
+    if dependency_warnings:
+        graph.meta["dependency_inventory_warnings"] = dependency_warnings
+
     plugin_errors: list[dict[str, str]] = []
     for custom_indexer in sorted(get_registered_indexers(), key=lambda item: str(item.name)):
         snapshot = (copy.deepcopy(graph.nodes), list(graph.edges), list(graph.features))
@@ -283,6 +300,9 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
 
     stage("threat analysis")
     findings: list[Finding] = []
+    runtime_observations: list[RuntimeObservation] = []
+    runtime_summaries: list[dict[str, Any]] = []
+    dependency_findings: list[Finding] = []
     if config.security:
         findings.extend(analyze_iac(graph, repo))
         findings.extend(analyze_security(graph, indexes, resolver, repo.root, repo.rel_files))
@@ -298,6 +318,13 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
                 plugin_errors.append(_plugin_error("security_provider", custom_provider.name, exc, repo.root))
                 continue
             findings.extend(_disambiguate_plugin_findings(custom_provider.name, provider_findings, findings))
+        runtime_findings, runtime_observations, runtime_summaries = load_dast_reports(
+            repo.root,
+            repo.rel_files,
+            config.zap_report,
+            config.nuclei_report,
+        )
+        findings.extend(runtime_findings)
         external, external_summaries = load_external_reports(
             repo.root,
             repo.rel_files,
@@ -305,8 +332,19 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
             config.xray_report,
         )
         findings.extend(external)
-        if external_summaries:
-            graph.meta["external_reports"] = external_summaries
+        dependency_findings = import_reports(
+            graph, config.trivy_report, config.sbom, config.verified_dependency_reports,
+        )
+
+
+        report_summaries = sorted(
+            list(external_summaries) + list(runtime_summaries),
+            key=lambda item: (str(item.get("source") or ""), str(item.get("file") or "")),
+        )
+        if report_summaries:
+            graph.meta["external_reports"] = report_summaries
+        if runtime_summaries:
+            graph.meta["runtime_reports"] = list(runtime_summaries)
     merged: dict[str, Finding] = {}
     for finding in findings:
         merged.setdefault(finding.id, finding)
@@ -314,11 +352,20 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
     if plugin_errors:
         graph.meta["plugin_errors"] = plugin_errors
     annotate_flows(graph)
-    if config.advisory_dbs:
-        advisory_index, advisory_summaries = load_advisories(config.advisory_dbs)
-        validated = apply_advisories(graph.findings, advisory_index)
+    if runtime_summaries:
+        graph.meta["runtime_analysis"] = correlate_runtime(graph, runtime_observations)
+    verified_advisory = (config.verified_dependency_reports or {}).get("advisory")
+    if config.advisory_dbs or verified_advisory is not None:
+        osv_records: list[Any] = []
+        advisory_index, advisory_summaries = load_advisories(
+            config.advisory_dbs, osv_records=osv_records, verified_document=verified_advisory,
+        )
+        apply_pub_ranges(dependency_findings, osv_records)
+        validated = apply_advisories([*graph.findings, *dependency_findings], advisory_index)
         graph.meta["advisory_sources"] = advisory_summaries
         graph.meta["advisory_validated_findings"] = validated
+    graph.findings.extend(dependency_findings)
+    correlate(graph, polyglot_index, dependency_findings)
     # Rank by risk last, once flows and exploit intelligence (KEV) are known.
     score_findings(graph)
     summarize_threat_model(graph, build_threat_model(graph))
@@ -335,6 +382,12 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
                    "Check syntax and the running Python version; use --exclude to omit this file.")
         for path in parse_errors
     ]
+    for path, pf in sorted(polyglot_index.files.items()):
+        for message in pf.diagnostics:
+            diagnostics.append(diagnostic(
+                "polyglot_scan_limit", path, message,
+                "Partial lexical analysis; simplify the declaration or review the omitted source manually.",
+            ))
     for module, paths in sorted(builder.stats.duplicate_modules.items()):
         diagnostics.append(diagnostic(
             "ambiguous_layout", ", ".join(sorted(paths)), f"Multiple files resolve to module {module}",
@@ -361,7 +414,7 @@ def run_analysis(config: AnalysisConfig) -> AnalysisResult:
         if language and rel not in parsed_paths and rel not in parse_errors:
             diagnostics.append(diagnostic(
                 "not_parsed", rel, f"No architecture index produced for {language} source",
-                "Built-in indexers cover Python, Java, C#, JavaScript/TypeScript, PHP and Go; check file size and syntax or supply an indexer plugin.",
+                "Built-in indexers cover Python, Java, C#, JavaScript/TypeScript, PHP, Go and Rust; check file size and syntax or supply an indexer plugin.",
             ))
     if not parsed_paths:
         diagnostics.append(diagnostic("empty_project", ".", "No supported source files were parsed",
@@ -442,7 +495,11 @@ def analyze(
     max_nodes: int = 2000,
     security: bool = True,
     sonarqube_report: Path | None = None,
+    trivy_report: Path | None = None,
+    sbom: Path | None = None,
     xray_report: Path | None = None,
+    zap_report: Path | None = None,
+    nuclei_report: Path | None = None,
     advisory_dbs: list[Path] | None = None,
     jobs: int = 0,
     cache_dir: Path | None = None,
@@ -462,6 +519,10 @@ def analyze(
         security=security,
         sonarqube_report=sonarqube_report,
         xray_report=xray_report,
+        trivy_report=trivy_report,
+        sbom=sbom,
+        zap_report=zap_report,
+        nuclei_report=nuclei_report,
         advisory_dbs=advisory_dbs or [],
         jobs=jobs,
         cache_dir=cache_dir,

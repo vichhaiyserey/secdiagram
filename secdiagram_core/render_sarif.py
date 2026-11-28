@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from . import __version__
+from .dependency_remediation import dependency_details
 from .model import SEVERITY_RANK, Finding, Graph, Loc
 
 LEVEL = {"critical": "error", "high": "error", "medium": "warning", "low": "note", "info": "note"}
@@ -40,6 +41,7 @@ CATEGORY_OWASP = {
     "redirect": ("A01:2025", "A01:2021"),
     "auth": ("A07:2025", "A07:2021"),
     "misconfig": ("A02:2025", "A05:2021"),
+    "runtime": ("A05:2025", "A03:2021"),
     "secret": ("A02:2025", "A07:2021"),
     "container": ("A02:2025", "A05:2021"),
     "cloud": ("A02:2025", "A05:2021"),
@@ -62,6 +64,7 @@ CATEGORY_DESCRIPTIONS = {
     "redirect": "Request-derived input controls a redirect target, enabling open redirects and credential theft.",
     "auth": "Authentication or authorization controls are disabled or weakened.",
     "misconfig": "A framework or runtime setting weakens the security posture of the application.",
+    "runtime": "A dynamic application security scanner observed this issue against a running endpoint.",
     "secret": "A credential-shaped value is committed to source or configuration and may be exposed to anyone with repository access.",
     "container": "Container configuration weakens isolation and increases the impact of a compromise.",
     "supply-chain": "A dependency or build artifact is not pinned, allowing unexpected upstream changes.",
@@ -194,6 +197,8 @@ def _rule_properties(finding: Finding, severity: str, confidence: float) -> dict
     }
     if finding.metadata.get("validation"):
         properties["validation"] = finding.metadata["validation"]
+    if finding.metadata.get("runtime_confirmed"):
+        properties["runtimeConfirmed"] = True
     return properties
 
 
@@ -215,6 +220,26 @@ def _risk_properties(finding: Finding) -> dict[str, Any]:
         "exposure": risk["exposure"],
         "evidenceKind": risk["evidence"],
     }
+
+
+def _exploitability_properties(finding: Finding) -> dict[str, Any]:
+    assessment = finding.metadata.get("exploitability") or {}
+    properties: dict[str, Any] = {}
+    if finding.exploitability:
+        properties["exploitability"] = finding.exploitability
+    if finding.exploitability_score > 0:
+        properties["exploitabilityScore"] = finding.exploitability_score
+    if assessment:
+        for source, target in (
+            ("impact_class", "impactClass"),
+            ("provenance", "provenance"),
+            ("reachability", "reachability"),
+            ("context", "deploymentContext"),
+            ("recommended_action", "recommendedAction"),
+        ):
+            if source in assessment:
+                properties[target] = assessment[source]
+    return properties
 
 
 def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
@@ -298,14 +323,32 @@ def render_sarif(graph: Graph, skip_baseline: bool = False) -> str:
                 "precision": _precision(finding.confidence),
                 "recommendation": finding.recommendation,
                 "source": finding.source,
+                "blocking": bool(
+                    (finding.assessment or {}).get("blocking") or finding.enforcement == "block"
+                ),
                 **_risk_properties(finding),
+                **_exploitability_properties(finding),
                 **_policy_properties(finding, policy_mode),
             },
         }
+        if finding.assessment:
+            result["properties"]["assessment"] = finding.assessment
+        if finding.rule:
+            result["properties"]["rule"] = finding.rule
+        if finding.provenance:
+            result["properties"]["provenance"] = finding.provenance
+        if finding.remediation:
+            result["properties"]["remediation"] = finding.remediation
         if finding.external_id:
             result["properties"]["external_id"] = finding.external_id
         if finding.metadata.get("validation"):
             result["properties"]["validation"] = finding.metadata["validation"]
+        if finding.metadata.get("runtime_confirmed"):
+            result["properties"]["runtimeConfirmed"] = True
+        if details := dependency_details(finding):
+            result["properties"]["dependency"] = details
+        if finding.metadata.get("runtime"):
+            result["properties"]["runtime"] = finding.metadata["runtime"]
         locations = _dedupe_locations(finding.evidence)
         if not locations and finding.trace:
             locations = [finding.trace[-1]]

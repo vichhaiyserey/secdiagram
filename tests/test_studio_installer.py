@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +16,37 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 class StudioInstallerTests(unittest.TestCase):
+    def test_real_private_venv_runs_without_bootstrap_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "studio-home"
+            result = studio.install(studio.InstallOptions(home=home, project_root=REPO))
+            self.assertTrue(result.venv_created)
+            python = home / studio.VENV_DIRNAME / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            completed = subprocess.run(
+                [str(python), "-c", "import importlib.util, json; print(json.dumps({name: importlib.util.find_spec(name) is not None for name in ('pip', 'setuptools', 'secdiagram_core')}))"],
+                capture_output=True, text=True, check=True, timeout=30, cwd=home,
+                env={**os.environ, "PYTHONPATH": str(REPO)},
+            )
+            self.assertEqual(json.loads(completed.stdout), {"pip": False, "setuptools": False, "secdiagram_core": True})
+            help_result = subprocess.run(
+                [str(python), "-m", "secdiagram_core.cli", "--help"],
+                capture_output=True, text=True, check=True, timeout=30, cwd=home,
+                env={**os.environ, "PYTHONPATH": str(REPO)},
+            )
+            self.assertIn("secdiagram", help_result.stdout)
+            self.assertTrue(studio.status(home)["healthy"])
+
+    def test_venv_bootstrap_flag_and_failure_are_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "venv"
+            with mock.patch.object(studio.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+                studio._create_venv(target)
+            self.assertEqual(run.call_args.args[0], [sys.executable, "-m", "venv", "--without-pip", str(target)])
+            self.assertEqual(run.call_args.kwargs["timeout"], 300)
+            with mock.patch.object(studio.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, stderr="creation failed")):
+                with self.assertRaisesRegex(studio.StudioInstallError, "creation failed"):
+                    studio._create_venv(target)
+
     def test_install_writes_skill_and_launchers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "studio-home"
@@ -39,11 +73,19 @@ class StudioInstallerTests(unittest.TestCase):
 
             manifest = result.manifest
             self.assertEqual(manifest["project_root"], REPO.as_posix())
+            self.assertTrue(manifest["source_checkout"])
+            launcher_text = (home / "bin" / "secdiagram-studio").read_text(encoding="utf-8")
+            self.assertIn('--dir "$ROOT"', launcher_text)
             recorded = {entry["path"]: entry for entry in manifest["files"]}
+            self.assertTrue(recorded, "an empty manifest must not appear verified")
+            self.assertEqual(set(result.files), set(recorded))
             for rel_path in result.files:
                 self.assertIn(rel_path, recorded)
                 self.assertEqual(recorded[rel_path]["bytes"], (home / rel_path).stat().st_size)
-                self.assertEqual(len(recorded[rel_path]["sha256"]), 64)
+                self.assertEqual(
+                    recorded[rel_path]["sha256"],
+                    hashlib.sha256((home / rel_path).read_bytes()).hexdigest(),
+                )
 
             status = studio.status(home)
             self.assertTrue(status["installed"])
@@ -86,6 +128,28 @@ class StudioInstallerTests(unittest.TestCase):
                 )
             )
             self.assertEqual(forced.manifest["version"], __version__)
+
+    def test_package_install_defaults_launchers_to_target_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target-repo"
+            target.mkdir()
+            home = Path(tmp) / "studio-home"
+            result = studio.install(
+                studio.InstallOptions(home=home, project_root=target, create_venv=False)
+            )
+            self.assertFalse(result.manifest["source_checkout"])
+            self.assertEqual(
+                (home / "project-root.txt").read_text(encoding="utf-8").strip(),
+                # Windows runners may expose TEMP through an 8.3 short name;
+                # install records the resolved long path on every platform.
+                target.resolve().as_posix(),
+            )
+            launcher = (home / "bin" / "secdiagram-studio").read_text(encoding="utf-8")
+            self.assertIn('--dir "$ROOT"', launcher)
+            status = studio.status(home)
+            self.assertTrue(status["installed"])
+            self.assertTrue(status["healthy"])
+            self.assertFalse(status["source_checkout"])
 
     def test_missing_project_root_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

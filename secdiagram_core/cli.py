@@ -104,8 +104,15 @@ def _security_reproduce_command(args: argparse.Namespace) -> str:
     ]
     if args.sonarqube_report:
         parts.extend(["--sonarqube-report", quote(args.sonarqube_report)])
+    for option in ("trivy_report", "sbom"):
+        if value := getattr(args, option):
+            parts.extend(["--" + option.replace("_", "-"), quote(value)])
     if args.xray_report:
         parts.extend(["--xray-report", quote(args.xray_report)])
+    if args.zap_report:
+        parts.extend(["--zap-report", quote(args.zap_report)])
+    if args.nuclei_report:
+        parts.extend(["--nuclei-report", quote(args.nuclei_report)])
     for advisory in args.advisory_db:
         parts.extend(["--advisory-db", quote(advisory)])
     if args.baseline:
@@ -230,11 +237,25 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="import a SonarQube issues JSON export as security findings",
     )
+    parser.add_argument("--trivy-report", metavar="PATH", help="import local Trivy JSON evidence")
+    parser.add_argument("--sbom", metavar="PATH", help="import local CycloneDX JSON inventory")
     parser.add_argument(
         "--xray-report",
         default=None,
         metavar="PATH",
         help="import a JFrog Xray violations JSON export as dependency findings",
+    )
+    parser.add_argument(
+        "--zap-report",
+        default=None,
+        metavar="PATH",
+        help="import an OWASP ZAP Traditional JSON report as runtime findings and endpoint evidence",
+    )
+    parser.add_argument(
+        "--nuclei-report",
+        default=None,
+        metavar="PATH",
+        help="import Nuclei JSONL/JSON output as runtime findings and endpoint evidence",
     )
     parser.add_argument(
         "--advisory-db",
@@ -489,6 +510,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="append structured audit events to FILE (default: stderr)",
     )
     parser.add_argument(
+        "--server-strict-port",
+        action="store_true",
+        default=False,
+        help="fail if the server port is already in use instead of choosing another port",
+    )
+    parser.add_argument(
         "--config",
         default=None,
         metavar="FILE",
@@ -589,6 +616,12 @@ def server_main(argv: list[str] | None = None) -> int:
         metavar="FILE",
         help="append structured audit events to FILE (default: stderr)",
     )
+    parser.add_argument(
+        "--strict-port",
+        action="store_true",
+        default=False,
+        help="fail if the specified port is already in use instead of choosing another port",
+    )
     parser.add_argument("--config", default=None, help="configuration file path")
     args = parser.parse_args(argv)
     from .server import serve
@@ -608,6 +641,7 @@ def server_main(argv: list[str] | None = None) -> int:
         max_concurrent_scans=args.max_concurrent_scans,
         scan_roots=args.scan_root,
         audit_log=args.audit_log,
+        strict_port=args.strict_port,
     )
 
 
@@ -628,7 +662,12 @@ def studio_main(argv: list[str] | None = None) -> int:
 
     install_parser = sub.add_parser("install", help="create the Studio home, venv, launchers, and agent skill")
     install_parser.add_argument("--home", type=Path, default=None, help="Studio home (default: ~/.secdiagram/studio)")
-    install_parser.add_argument("--project-root", type=Path, default=None, help="secdiagram source checkout")
+    install_parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="source checkout or default repository to serve (default: detected checkout or cwd)",
+    )
     install_parser.add_argument("--no-venv", action="store_true", help="skip virtual environment creation")
     install_parser.add_argument("--force", action="store_true", help="update or repair an existing install")
     install_parser.add_argument("--profile", default="default", help="skill profile name (default: default)")
@@ -676,10 +715,13 @@ def studio_main(argv: list[str] | None = None) -> int:
         else:
             print(f"secdiagram Studio installed at {result.home}")
             print(f"  project root: {result.project_root}")
-            print(f"  virtualenv: {'created' if result.venv_created else 'present'}")
+            venv_state = "created" if result.venv_created else (
+                "present" if result.manifest.get("venv") else "not created"
+            )
+            print(f"  virtualenv: {venv_state}")
             print(f"  skill: {(result.home / studio_install.SKILL_DIRNAME / 'SKILL.md').as_posix()}")
             print(f"  launcher: {(result.home / 'bin' / 'secdiagram-studio').as_posix()}")
-            print("  next: secdiagram studio serve --dir .")
+            print(f"  next: secdiagram studio serve --dir {result.project_root}")
         return 0
     if args.command == "status":
         payload = studio_install.status(args.home)
@@ -742,8 +784,38 @@ def audit_main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="write the machine-readable audit result to PATH",
     )
+    parser.add_argument("--trivy-report", metavar="PATH", help="read a local Trivy report")
+    parser.add_argument("--sbom", metavar="PATH", help="read a local CycloneDX report")
+    parser.add_argument("--offline", action="store_true", help="audit uses only local evidence")
     parser.add_argument("--quiet", action="store_true", help="print only violations or PASS")
+    parser.add_argument("--dependency-review", metavar="PATH", help="apply local reviewed Dart symbol decisions")
+    parser.add_argument("--advisory-db", action="append", default=[], metavar="PATH", help="read local advisory intelligence")
+    parser.add_argument("--evidence-bundle", metavar="PATH", help="verify and consume a local evidence manifest")
+    parser.add_argument("--require-evidence", action="store_true", help="exit 2 if the bundle is missing, stale or invalid")
+    parser.add_argument("--evidence-as-of", type=date.fromisoformat, metavar="DATE", help="UTC reference date for reproducible freshness checks")
+    parser.add_argument("--evidence-max-age", type=int, default=7, metavar="DAYS")
     args = parser.parse_args(argv)
+    if args.evidence_max_age < 0:
+        parser.error("--evidence-max-age must be nonnegative")
+    if args.evidence_bundle and (args.trivy_report or args.sbom):
+        parser.error("--evidence-bundle cannot be combined with individual reports")
+    verified_reports = None
+    evidence_status: dict[str, Any] = {"freshness": "missing"}
+    if args.evidence_bundle:
+        from datetime import datetime, timezone
+
+        from .dependency_bundle import load_bundle
+
+        try:
+            verified_reports, evidence_status = load_bundle(
+                _normalize_cli_path(args.evidence_bundle),
+                as_of=args.evidence_as_of or (datetime.now(timezone.utc).date() if args.require_evidence else None),
+                max_age=args.evidence_max_age, analysis_root=_normalize_cli_path(args.dir),
+            )
+        except (OSError, ValueError, RuntimeError):
+            evidence_status = {"freshness": "invalid"}
+    if args.evidence_bundle and evidence_status["freshness"] in {"invalid", "stale", "future"}:
+        print(f"secdiagram: evidence bundle is {evidence_status['freshness']}", file=sys.stderr)
     root = _normalize_cli_path(args.dir)
 
     try:
@@ -763,7 +835,13 @@ def audit_main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        result = run_analysis(AnalysisConfig(root=root, security=True))
+        result = run_analysis(AnalysisConfig(
+            root=root, security=True,
+            verified_dependency_reports=verified_reports,
+            advisory_dbs=[_normalize_cli_path(path) for path in args.advisory_db],
+            trivy_report=_normalize_cli_path(args.trivy_report) if args.trivy_report else None,
+            sbom=_normalize_cli_path(args.sbom) if args.sbom else None,
+        ))
     except (FileNotFoundError, NotADirectoryError) as exc:
         print(f"secdiagram: {exc}", file=sys.stderr)
         return 1
@@ -771,19 +849,63 @@ def audit_main(argv: list[str] | None = None) -> int:
         print(f"secdiagram: analysis failed: {exc}", file=sys.stderr)
         return 1
 
+    if evidence_status.get("revision") and (
+        evidence_status["revision"] != result.repo.commit or result.repo.dirty
+    ):
+        print("secdiagram: evidence bundle does not match the clean repository revision", file=sys.stderr)
+        evidence_status["freshness"] = "revision_mismatch"
+
     graph = result.graph
     score_findings(graph)
-    evals = evaluate_attack(graph)
+    # Scanner findings are enforced by the reviewed dependency gate below.
+    evals = evaluate_attack(graph, [
+        finding for finding in graph.sorted_findings()
+        if finding.source not in {"trivy", "cyclonedx"}
+    ])
     violating = policy_violations(evals, policy)
     summarize_attack(graph, evals)
+
+    dependency_reports = graph.meta.get("dependency_reports", [])
+    for report in dependency_reports:
+        if report["invalid_records"]:
+            print(
+                f"secdiagram: {report['source']} input has {report['invalid_records']} invalid record(s); coverage may be incomplete.",
+                file=sys.stderr,
+            )
+
+    evidence_failed = args.require_evidence and (
+        evidence_status["freshness"] != "current"
+        or not dependency_reports
+        or any(report["invalid_records"] for report in dependency_reports)
+    )
+    dependency_violations: list[dict[str, Any]] = []
+    bundled_review = (verified_reports or {}).get("review")
+    if (args.dependency_review or bundled_review is not None) and evidence_status["freshness"] != "revision_mismatch":
+        from .dependency_gate import reviewed_dependency_violations
+
+        try:
+            dependency_violations = reviewed_dependency_violations(
+                graph, bundled_review if bundled_review is not None else _normalize_cli_path(args.dependency_review),
+            )
+        except (OSError, ValueError, RuntimeError):
+            print("secdiagram: invalid dependency review input", file=sys.stderr)
+            return 2
 
     if args.json_out:
         payload = {
             "repository": result.repo.name,
             "policy": policy.to_dict(),
             "policy_source": policy_source,
-            "pass": not violating,
+            "pass": not violating and not evidence_failed and not dependency_violations,
+            "dependency_violations": dependency_violations,
+            "evidence": evidence_status,
+            "evidence_required": args.require_evidence,
             "techniques": [evaluation.to_dict() for evaluation in evals],
+            "dependency_reports": graph.meta.get("dependency_reports", []),
+            "dependency_findings": [
+                finding.to_dict() for finding in graph.findings
+                if finding.source in {"trivy", "cyclonedx"}
+            ],
             "violations": [evaluation.to_dict() for evaluation in violating],
         }
         path = _normalize_cli_path(args.json_out)
@@ -797,6 +919,13 @@ def audit_main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         print(render_attack_summary(evals, policy, violating), end="")
 
+    if evidence_failed:
+        print("secdiagram: audit requires a current, valid local evidence bundle", file=sys.stderr)
+        return 2
+
+    if dependency_violations:
+        print(f"secdiagram: audit FAILED with {len(dependency_violations)} reviewed dependency violation(s)", file=sys.stderr)
+        return 1
     if violating:
         print(
             f"secdiagram: audit FAILED against {policy_source}: "
@@ -1109,6 +1238,7 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
             max_concurrent_scans=args.server_max_concurrent_scans,
             scan_roots=args.server_scan_root,
             audit_log=args.server_audit_log,
+            strict_port=args.server_strict_port,
         )
 
     out = _normalize_cli_path(args.out) if args.out else root / ".secdiagram"
@@ -1128,7 +1258,13 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
 
     if args.offline and (args.llm or args.ollama):
         return fail("--offline disables narrative HTTP requests; omit --llm/--ollama for a fully offline scan")
-    for label, value in (("--sonarqube-report", args.sonarqube_report), ("--xray-report", args.xray_report), ("--mermaid-js", args.mermaid_js)):
+    for label, value in (
+        ("--sonarqube-report", args.sonarqube_report),
+        ("--xray-report", args.xray_report),
+        ("--zap-report", args.zap_report),
+        ("--nuclei-report", args.nuclei_report),
+        ("--mermaid-js", args.mermaid_js),
+    ):
         if value and not _normalize_cli_path(value).is_file():
             return fail(f"{label} file does not exist or is unreadable: {value}; provide a readable local file or omit {label}")
     for value in args.advisory_db:
@@ -1172,8 +1308,18 @@ def _scan_main(argv: list[str] | None = None, summary: dict[str, Any] | None = N
                     if args.sonarqube_report
                     else None
                 ),
+                trivy_report=_normalize_cli_path(args.trivy_report) if args.trivy_report else None,
+                sbom=_normalize_cli_path(args.sbom) if args.sbom else None,
                 xray_report=(
                     _normalize_cli_path(args.xray_report) if args.xray_report else None
+                ),
+                zap_report=(
+                    _normalize_cli_path(args.zap_report) if args.zap_report else None
+                ),
+                nuclei_report=(
+                    _normalize_cli_path(args.nuclei_report)
+                    if args.nuclei_report
+                    else None
                 ),
                 advisory_dbs=[
                     _normalize_cli_path(path) for path in args.advisory_db
@@ -1629,3 +1775,7 @@ def main(argv: list[str] | None = None) -> int:
     summary.update({"exit_code": code, "status": "ok" if code == 0 else "failed"})
     print(json.dumps(summary, sort_keys=True))
     return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

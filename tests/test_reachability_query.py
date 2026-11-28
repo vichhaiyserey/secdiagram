@@ -18,42 +18,36 @@ class ReachabilityQueryTests(unittest.TestCase):
 
     def test_has_taint_at(self) -> None:
         """Verifies querying taint presence by file and line number."""
-        # Find a known finding in sample_app
-        self.assertGreater(len(self.result.graph.findings), 0)
-        finding = self.result.graph.findings[0]
-        self.assertTrue(bool(finding.evidence))
-        evidence = finding.evidence[0]
-
-        # Target exact path and line
-        has_taint = self.result.has_taint_at(evidence.path, evidence.line)
-        self.assertTrue(has_taint)
-
-        # Target file without line
-        has_file_taint = self.result.has_taint_at(evidence.path)
-        self.assertTrue(has_file_taint)
-
-        # Target non-existent file
-        self.assertFalse(self.result.has_taint_at("non_existent_file.py"))
-        # Target non-existent line
-        self.assertFalse(self.result.has_taint_at(evidence.path, line=999999))
+        for path, line, expected in (
+            ("app/service.py", 16, True),
+            ("app/service.py", None, True),
+            ("non_existent_file.py", None, False),
+            ("app/service.py", 999999, False),
+        ):
+            with self.subTest(path=path, line=line):
+                self.assertEqual(self.result.has_taint_at(path, line), expected)
 
     def test_get_taint_traces(self) -> None:
         """Verifies returning TaintTrace objects for triage service."""
         # Query traces for a known tainted file in sample_app
-        traces = self.result.get_taint_traces("app/service.py")
-        self.assertIsInstance(traces, list)
-        self.assertGreater(len(traces), 0)
-
-        trace = traces[0]
-        self.assertTrue(trace.finding_id)
-        self.assertTrue(trace.category)
-        self.assertTrue(trace.severity)
-        self.assertIsInstance(trace.trace, list)
-
-        # Verify trace serialization to dict
-        t_dict = trace.to_dict()
-        self.assertEqual(t_dict["finding_id"], trace.finding_id)
-        self.assertEqual(t_dict["category"], trace.category)
+        traces = self.result.get_taint_traces("app/service.py", 16)
+        self.assertEqual(len(traces), 2)
+        self.assertEqual(sorted(trace.severity for trace in traces), ["critical", "high"])
+        for trace in traces:
+            with self.subTest(finding=trace.finding_id):
+                payload = trace.to_dict()
+                self.assertIn(payload["finding_id"], {f.id for f in self.result.graph.findings})
+                self.assertEqual(
+                    (payload["category"], payload["cwe"]),
+                    ("command", "CWE-78"),
+                )
+                self.assertEqual(payload["source"], {"path": "app/main.py", "line": 12, "col": 0})
+                self.assertEqual(payload["sink"], {"path": "app/service.py", "line": 16, "col": 11})
+                self.assertEqual(
+                    [(loc["path"], loc["line"]) for loc in payload["trace"]],
+                    [("app/main.py", 12), ("app/main.py", 13), ("app/service.py", 16)],
+                )
+        self.assertEqual(self.result.get_taint_traces("missing.py"), [])
 
     def test_is_reachable_for_endpoints_and_symbols(self) -> None:
         """Verifies checking execution reachability from HTTP entrypoints."""
@@ -65,15 +59,14 @@ class ReachabilityQueryTests(unittest.TestCase):
 
     def test_package_reachability_indexing(self) -> None:
         """Verifies package & dependency reachability indexing for SCA bridge."""
-        self.assertIsInstance(self.result.dependency_usage, dict)
-        self.assertGreater(len(self.result.dependency_usage), 0)
-
         # In sample_app, fastapi is imported in app/main.py
         self.assertIn("fastapi", self.result.dependency_usage)
         fastapi_summary = self.result.dependency_usage["fastapi"]
         self.assertTrue(fastapi_summary.imported)
         self.assertTrue(fastapi_summary.reachable_from_entrypoint)
-        self.assertGreater(len(fastapi_summary.import_sites), 0)
+        self.assertEqual(
+            [(loc.path, loc.line) for loc in fastapi_summary.import_sites], [("app/main.py", 3)]
+        )
 
         # Helper method on result
         self.assertTrue(self.result.is_package_reachable("fastapi"))

@@ -33,6 +33,12 @@ home and records every managed file with its size and SHA-256 in `manifest.json`
 edits the analyzed repository. Uninstall skips paths that escape the home directory or that
 were not recorded in the manifest.
 
+Private environments use `venv --without-pip`: Studio and the generated launchers
+need only Python's standard library and the existing secdiagram package. Creating
+the environment does not bootstrap package managers or download dependencies.
+This also works in the minimal container, which removes build-only pip and
+ensurepip after installation.
+
 Installed layout:
 
 ```text
@@ -78,11 +84,11 @@ rejects installer writes with `403 Forbidden`.
 
 | Panel | Purpose |
 | :--- | :--- |
-| **Overview** | Repository name, languages, node/edge/component counts, risk-ranked findings, and artifact status. |
-| **Diagram** | Render architecture, high-level C4, overview, or attack-path diagrams. Rename or hide nodes, choose direction/theme, and export Mermaid or a local image. |
-| **SDLC** | Drive the five phases, attach evidence, block/unblock, and preview the next agent handoff. |
+| **Overview** | Repository summary, node/edge/finding counts, severity profile, pipeline status, artifact names, and quick actions. |
+| **Diagram** | Render architecture, high-level C4, overview, or attack-path diagrams. Rename or hide nodes, choose direction/theme, inspect Mermaid source, and render a local SVG. Node loading is bounded and searchable. |
+| **SDLC** | Drive the five phases with separate evidence and note fields, block/unblock, save notes/evidence, and preview the next agent handoff. |
 | **AI Review** | Request an evidence-grounded narrative from local Ollama or an OpenAI-compatible endpoint with an explicit provider, model, template, and base URL. |
-| **Installer** | Read-only view of the user-level Studio home, skill, launcher, and virtualenv status. |
+| **Installer** | Read-only view of the user-level Studio home, package/source mode, skill, launcher, and virtualenv status. |
 
 Edits are stored separately from the analysis:
 
@@ -92,6 +98,17 @@ Edits are stored separately from the analysis:
 
 The source graph is never mutated. Re-running the analysis and re-applying the overrides
 produces the same edited graph.
+
+The component editor loads nodes lazily when the Diagram tab opens. `/api/v1/studio/nodes`
+supports `limit`, `offset`, and `q`, returns `total`, and the UI displays when results are
+truncated. Filters are debounced and sent to the server. Unsaved diagram edits and SDLC note/
+evidence drafts survive tab switches and rescans in the same browser session, prompt before a
+reset or page unload, and stale rendered previews are cleared when diagram options change.
+
+Installer launchers default to the repository recorded during `studio install`. Source
+checkouts use the checkout on `PYTHONPATH`; pip-installed packages point `PYTHONPATH` at the
+installed package parent instead. Pass `--user`/`--password` to `studio serve`, or set
+`SECDIAGRAM_AUTH_USER` and `SECDIAGRAM_AUTH_PASS`.
 
 ---
 
@@ -141,7 +158,9 @@ Narratives are optional: the Studio remains fully useful offline with static ana
 - State-changing POSTs reject cross-origin `Origin` values.
 - Request bodies are bounded; installer writes are unavailable over HTTP.
 - Overrides are capped at 1 MiB and 5,000 entries, with strict schema validation.
-- Diagram text is sent with the server's standard security headers and no remote assets.
+- Studio HTML/assets use a strict route-specific CSP: no inline scripts, no CDN scripts, and
+  `img-src 'self' data: blob:` for the local SVG preview. The classic report keeps the broader
+  CSP it needs for its inline Mermaid bootstrap.
 - Image rendering uses local `mmdc`; if it is missing the endpoint returns `503` instead of
   silently calling a remote service.
 - The analyzed repository is parsed statically. No repository code is imported or executed.
@@ -175,12 +194,14 @@ certification is implied. Validate changes with the assistive technology you sup
 
 ```bash
 python -m unittest tests.test_agentic tests.test_diagram_edit \
-  tests.test_studio_installer tests.test_studio_server \
+  tests.test_studio_installer tests.test_studio_server tests.test_server \
   tests.test_studio_ui_accessibility -v
 node --check secdiagram_core/studio_ui/app.js
 ```
 
-The tests cover phase gates, deterministic state/handoff files, override validation and
-non-mutation, installer containment and idempotency, Studio asset serving, read-only mode,
-origin rejection, SSRF rejection, the complete phase flow through the REST API, and the
-Studio's landmark, tab, labelling, live-region, focus, and reduced-motion hooks.
+CI runs the same JavaScript syntax check. The tests cover phase gates, deterministic
+state/handoff files, override validation and non-mutation, hidden-node editing, installer
+containment/idempotency/package mode, bounded and filtered node loading, concurrent bootstrap
+analysis, strict Studio CSP, Studio asset serving, read-only mode, origin rejection, SSRF
+rejection, the complete phase flow through the REST API, and the Studio's landmark, tab,
+labelling, live-region, focus, and reduced-motion hooks.

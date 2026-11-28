@@ -2,18 +2,25 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import socket
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
+from urllib.parse import quote
 
 from secdiagram_core.config import SecdiagramConfig
+from secdiagram_core.model import Graph
 from secdiagram_core.server import (
     AuditLogger,
     BasicAuthenticator,
     NoOpAuthenticator,
+    PlatformState,
     RateLimiter,
     ScanManager,
     create_server,
@@ -117,6 +124,38 @@ class LimitPrimitiveTests(unittest.TestCase):
         manager.release()
 
 
+class PlatformStateTests(unittest.TestCase):
+    def test_concurrent_bootstrap_analyzes_once(self) -> None:
+        cfg = SecdiagramConfig()
+        state = PlatformState(FIXTURE, cfg, [FIXTURE])
+        barrier = threading.Barrier(3)
+        calls = 0
+        calls_lock = threading.Lock()
+        results = []
+
+        def fake_run_analysis(_config) -> mock.Mock:
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.05)
+            return mock.Mock(graph=Graph())
+
+        def worker() -> None:
+            barrier.wait()
+            results.append(state.get_analysis())
+
+        with mock.patch("secdiagram_core.server.run_analysis", side_effect=fake_run_analysis):
+            threads = [threading.Thread(target=worker) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(result is results[0] for result in results))
+
+
 class ServerConstructionTests(unittest.TestCase):
     def test_requires_auth_by_default(self) -> None:
         cfg = SecdiagramConfig()
@@ -141,6 +180,112 @@ class ServerConstructionTests(unittest.TestCase):
         cfg.server.scan_roots = [str(FIXTURE.parent / "elsewhere")]
         with self.assertRaises(ValueError):
             create_server(FIXTURE, cfg)
+
+
+class ServerPortFallbackTests(unittest.TestCase):
+    def test_port_conflict_fallback_to_next_port(self) -> None:
+        dummy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dummy.bind(("127.0.0.1", 0))
+        dummy.listen(1)
+        occupied_port = dummy.getsockname()[1]
+
+        cfg = SecdiagramConfig()
+        cfg.server.host = "127.0.0.1"
+        cfg.server.port = occupied_port
+        cfg.server.insecure_no_auth = True
+
+        server = None
+        try:
+            server = create_server(FIXTURE, cfg)
+            actual_port = server.server_address[1]
+            self.assertNotEqual(actual_port, occupied_port)
+            self.assertEqual(cfg.server.port, actual_port)
+            self.assertEqual(server.platform_state.config.server.port, actual_port)
+        finally:
+            if server:
+                server.server_close()
+            dummy.close()
+
+    def test_consecutive_occupied_ports_fallback(self) -> None:
+        dummy1 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dummy1.bind(("127.0.0.1", 0))
+        dummy1.listen(1)
+        p1 = dummy1.getsockname()[1]
+
+        dummy2 = None
+        try:
+            dummy2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            dummy2.bind(("127.0.0.1", p1 + 1))
+            dummy2.listen(1)
+        except OSError:
+            dummy1.close()
+            self.skipTest(f"Could not bind second socket to port {p1 + 1}")
+
+        cfg = SecdiagramConfig()
+        cfg.server.host = "127.0.0.1"
+        cfg.server.port = p1
+        cfg.server.insecure_no_auth = True
+
+        server = None
+        try:
+            server = create_server(FIXTURE, cfg)
+            actual_port = server.server_address[1]
+            self.assertNotIn(actual_port, {p1, p1 + 1})
+            self.assertEqual(cfg.server.port, actual_port)
+        finally:
+            if server:
+                server.server_close()
+            if dummy2:
+                dummy2.close()
+            dummy1.close()
+
+    def test_strict_port_raises_on_conflict(self) -> None:
+        dummy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        dummy.bind(("127.0.0.1", 0))
+        dummy.listen(1)
+        occupied_port = dummy.getsockname()[1]
+
+        cfg = SecdiagramConfig()
+        cfg.server.host = "127.0.0.1"
+        cfg.server.port = occupied_port
+        cfg.server.insecure_no_auth = True
+        cfg.server.strict_port = True
+
+        try:
+            with self.assertRaises(OSError):
+                create_server(FIXTURE, cfg)
+
+            cfg.server.strict_port = False
+            with self.assertRaises(OSError):
+                create_server(FIXTURE, cfg, strict_port=True)
+        finally:
+            dummy.close()
+
+    def test_strict_port_config_loading_and_env(self) -> None:
+        from secdiagram_core.config import load_config
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cfg_file = tmp_path / "secdiagram.config.json"
+            cfg_file.write_text(json.dumps({"server": {"strict_port": True}}), encoding="utf-8")
+            loaded = load_config(tmp_path)
+            self.assertTrue(loaded.server.strict_port)
+
+        with mock.patch.dict(os.environ, {"SECDIAGRAM_SERVER_STRICT_PORT": "true"}):
+            loaded = load_config(FIXTURE)
+            self.assertTrue(loaded.server.strict_port)
+
+    def test_cli_strict_port_flags(self) -> None:
+        from secdiagram_core.cli import build_parser, server_main
+        parser = build_parser()
+        args = parser.parse_args(["--server-strict-port"])
+        self.assertTrue(args.server_strict_port)
+
+        # server_main parser accepts --strict-port
+        with mock.patch("secdiagram_core.server.serve") as mock_serve:
+            mock_serve.return_value = 0
+            server_main(["--strict-port", "--insecure-no-auth"])
+            mock_serve.assert_called_once()
+            self.assertTrue(mock_serve.call_args.kwargs.get("strict_port"))
 
 
 class ServerIntegrationTests(unittest.TestCase):
@@ -205,6 +350,53 @@ class ServerIntegrationTests(unittest.TestCase):
             crit_data = json.loads(resp.read().decode("utf-8"))
             for f in crit_data["findings"]:
                 self.assertEqual(f["severity"].lower(), "critical")
+
+    def test_assessment_rules_and_finding_filters(self) -> None:
+        with urllib.request.urlopen(f"{self.base_url}/api/v1/findings", timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        self.assertGreaterEqual(data["total"], 1)
+        first = data["findings"][0]
+        self.assertIn("assessment", first)
+        self.assertIn("rule", first)
+        self.assertIn("provenance", first)
+        self.assertIn("remediation", first)
+        priority = first["assessment"]["priority"]
+        rule = first["rule"]["id"]
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/v1/findings?priority={quote(priority)}", timeout=5
+        ) as resp:
+            filtered = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(filtered["findings"])
+        self.assertTrue(all(
+            item["assessment"]["priority"] == priority for item in filtered["findings"]
+        ))
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/v1/findings?rule={quote(rule)}", timeout=5
+        ) as resp:
+            by_rule = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(by_rule["findings"])
+        self.assertTrue(all(item["rule"]["id"] == rule for item in by_rule["findings"]))
+
+        with urllib.request.urlopen(
+            f"{self.base_url}/api/v1/findings?suppressed=false", timeout=5
+        ) as resp:
+            active = json.loads(resp.read().decode("utf-8"))
+        self.assertTrue(all(not item.get("baseline") for item in active["findings"]))
+
+        with urllib.request.urlopen(f"{self.base_url}/api/v1/rules", timeout=5) as resp:
+            rules = json.loads(resp.read().decode("utf-8"))
+        self.assertGreaterEqual(rules["total"], 1)
+        self.assertTrue(all(item["count"] >= 1 for item in rules["rules"]))
+
+        with urllib.request.urlopen(f"{self.base_url}/api/v1/summary", timeout=5) as resp:
+            summary = json.loads(resp.read().decode("utf-8"))
+        self.assertIn("by_priority", summary["assessment"])
+        self.assertIn("by_level", summary["assessment"])
+        self.assertIn("languages", summary)
+        self.assertIn("coverage", summary)
+        self.assertIn("languages", summary["coverage"])
 
     def test_sarif_and_diagram_endpoints(self) -> None:
         sarif_url = f"{self.base_url}/api/v1/sarif"

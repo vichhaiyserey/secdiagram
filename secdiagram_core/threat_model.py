@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .assessment import is_public_client_identifier
 from .model import Finding, Graph, Loc, stable_id
 from .risk import endpoint_exposure
 from .threat_review import attach_threat_records, render_threat_records
@@ -98,6 +99,8 @@ class Threat:
     evidence: list[str] = field(default_factory=list)
     priority: str | None = None
     max_score: float = 0.0
+    max_exploitability: str | None = None
+    max_exploitability_score: float = 0.0
     note: str = ""
     records: list[dict[str, Any]] = field(default_factory=list)
 
@@ -105,6 +108,8 @@ class Threat:
         return {
             "id": self.id, "boundary": self.boundary, "stride": self.stride, "title": self.title,
             "status": self.status, "priority": self.priority, "max_score": self.max_score,
+            "max_exploitability": self.max_exploitability,
+            "max_exploitability_score": self.max_exploitability_score,
             "finding_ids": self.finding_ids, "evidence": self.evidence, "mitigation": self.mitigation,
             "note": self.note,
             "records": self.records,
@@ -116,9 +121,16 @@ def _risk(finding: Finding) -> tuple[float, str]:
     return float(risk.get("score", 0.0)), str(risk.get("priority", "P3"))
 
 
+def _exploitability(finding: Finding) -> tuple[float, str]:
+    return float(finding.exploitability_score), finding.exploitability or "informational"
+
+
 def build_threat_model(graph: Graph) -> list[Threat]:
     """STRIDE threats per trust boundary, evidenced by the graph's findings."""
-    active = [f for f in graph.sorted_findings() if not f.baseline]
+    active = [
+        f for f in graph.sorted_findings()
+        if not f.baseline and not is_public_client_identifier(f)
+    ]
     endpoints = [n for n in graph.sorted_nodes() if n.kind == "endpoint"]
     exposures = [endpoint_exposure(n) for n in endpoints]
     threats: list[Threat] = []
@@ -136,6 +148,8 @@ def build_threat_model(graph: Graph) -> list[Threat]:
             threat.finding_ids = [f.id for f in matched]
             threat.evidence = [f"{f.title} ({f.evidence[0].ref})" for f in matched[:3] if f.evidence]
             threat.max_score, threat.priority = _risk(matched[0])
+            exploitable = max(matched, key=lambda f: (_exploitability(f), _risk(f), f.id))
+            threat.max_exploitability_score, threat.max_exploitability = _exploitability(exploitable)
         elif not categories:
             threat.status = "not-assessed"
             threat.note = "Not verifiable by static analysis; confirm in design review or runtime testing."
@@ -163,6 +177,8 @@ def build_threat_model(graph: Graph) -> list[Threat]:
             threat.finding_ids = [f.id for f in reaching]
             threat.evidence = [f"{f.title} ({f.evidence[0].ref})" for f in reaching[:3] if f.evidence]
             threat.max_score, threat.priority = _risk(reaching[0])
+            exploitable = max(reaching, key=lambda f: (_exploitability(f), _risk(f), f.id))
+            threat.max_exploitability_score, threat.max_exploitability = _exploitability(exploitable)
         threats.insert(0, threat)
     attach_threat_records(graph, threats)
     for threat in threats:
@@ -179,6 +195,10 @@ def summarize_threat_model(graph: Graph, threats: list[Threat]) -> None:
         "review": sum(1 for t in threats if t.status == "review"),
         "not_assessed": sum(1 for t in threats if t.status == "not-assessed"),
         "records": sum(len(t.records) for t in threats),
+        "by_exploitability": {
+            level: sum(1 for t in threats if t.max_exploitability == level)
+            for level in ("likely", "plausible", "unlikely", "informational")
+        },
         "by_boundary": {
             key: sum(1 for t in threats if t.boundary == key and t.status == "observed") for key, _, _ in BOUNDARIES
         },
@@ -400,7 +420,10 @@ def evaluate_attack(graph: Graph, findings: list[Finding] | None = None) -> list
     Deterministic: rules are evaluated in ``ATTACK_RULES`` order and evidence is
     sorted by risk score, then source location.
     """
-    active = [f for f in (findings if findings is not None else graph.sorted_findings()) if not f.baseline]
+    active = [
+        f for f in (findings if findings is not None else graph.sorted_findings())
+        if not f.baseline and not is_public_client_identifier(f)
+    ]
     evals: list[AttackEval] = []
     for rule in ATTACK_RULES:
         matched = sorted(
@@ -510,7 +533,7 @@ def _parse_policy_yaml(text: str) -> dict[str, Any]:
     root: dict[str, Any] = {}
     stack: list[tuple[int, Any]] = [(-1, root)]
     for index, (lineno, raw) in enumerate(significant):
-        indent = len(raw) - len(raw.lstrip(" "))
+        indent = len(raw) - len(raw.lstrip(" \t"))
         if "\t" in raw[:indent]:
             raise ValueError(f"policy line {lineno}: tabs are not allowed for indentation")
         while len(stack) > 1 and indent <= stack[-1][0]:

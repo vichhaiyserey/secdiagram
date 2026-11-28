@@ -46,21 +46,21 @@ def _codes(model: DiagramModel) -> list[str]:
 
 
 class LayoutRankTests(unittest.TestCase):
-    def test_chain_ranks_increase_with_depth(self) -> None:
-        ranks = compute_layout_ranks(["c", "b", "a"], [("a", "b"), ("b", "c")])
-        self.assertEqual(ranks, {"a": 0, "b": 1, "c": 2})
-
-    def test_cycles_share_one_rank(self) -> None:
-        ranks = compute_layout_ranks(["a", "b", "c"], [("a", "b"), ("b", "c"), ("c", "b")])
-        self.assertEqual(ranks["a"], 0)
-        self.assertEqual(ranks["b"], ranks["c"])
-        self.assertEqual(ranks["b"], 1)
-
-    def test_self_loops_do_not_change_ranks(self) -> None:
-        self.assertEqual(compute_layout_ranks(["a"], [("a", "a")]), {"a": 0})
-
-    def test_ranks_ignore_unknown_endpoints(self) -> None:
-        self.assertEqual(compute_layout_ranks(["a"], [("a", "missing")]), {"a": 0})
+    def test_layout_ranks_for_chains_cycles_and_nonparticipating_edges(self) -> None:
+        for condition, nodes, edges, expected in (
+            ("chain", ["c", "b", "a"], [("a", "b"), ("b", "c")], {"a": 0, "b": 1, "c": 2}),
+            (
+                "cycle",
+                ["a", "b", "c"],
+                [("a", "b"), ("b", "c"), ("c", "b")],
+                {"a": 0, "b": 1, "c": 1},
+            ),
+            ("self loop", ["a"], [("a", "a")], {"a": 0}),
+            ("unknown destination", ["a"], [("a", "missing")], {"a": 0}),
+            ("empty graph", [], [], {}),
+        ):
+            with self.subTest(condition=condition):
+                self.assertEqual(compute_layout_ranks(nodes, edges), expected)
 
 
 class ModelTests(unittest.TestCase):

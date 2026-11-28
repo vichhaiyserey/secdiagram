@@ -250,12 +250,16 @@ def render_readme(home: Path, project_root: Path) -> str:
         "## Launch\n"
         "\n"
         "```bash\n"
-        "secdiagram studio serve --dir /path/to/repository\n"
+        "secdiagram studio serve --dir /path/to/repository --user analyst --password 'change-me'\n"
         "```\n"
         "\n"
-        "Or run the generated launcher from `bin/`. The Studio is served on "
-        "`http://127.0.0.1:8080/studio` and inherits the hardened Basic-Auth, "
-        "rate-limit, and request-size defaults.\n"
+        "The generated launchers in `bin/` default to the repository recorded at "
+        "install time (`project-root.txt`). Override it with `--dir` if needed. "
+        "The server requires Basic Auth by default; you can also set "
+        "`SECDIAGRAM_AUTH_USER` and `SECDIAGRAM_AUTH_PASS`, and use "
+        "`--insecure-no-auth` only for loopback development. The Studio is served "
+        "on `http://127.0.0.1:8080/studio` and inherits the hardened rate-limit "
+        "and request-size defaults.\n"
         "\n"
         "## Agent skill\n"
         "\n"
@@ -274,8 +278,22 @@ def render_readme(home: Path, project_root: Path) -> str:
     )
 
 
-def launcher_scripts() -> dict[str, str]:
-    """Return portable launcher scripts keyed by relative path."""
+def launcher_scripts(*, source_checkout: bool = True, package_root: Path | None = None) -> dict[str, str]:
+    """Return portable launcher scripts keyed by relative path.
+
+    Source installs add the checkout to ``PYTHONPATH``.  Package installs point
+    ``PYTHONPATH`` at the installed package parent instead, so pip-installed
+    copies do not depend on a source tree.  Both default ``--dir`` to the
+    repository recorded at install time.
+    """
+    runtime = (package_root or Path(__file__).resolve().parent.parent).as_posix()
+    posix_pythonpath = (
+        'PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"'
+        if source_checkout
+        else f'PYTHONPATH="{runtime}${{PYTHONPATH:+:$PYTHONPATH}}"'
+    )
+    cmd_pythonpath = "%ROOT%;%PYTHONPATH%" if source_checkout else f"{runtime};%PYTHONPATH%"
+    ps_pythonpath = '"$root;$env:PYTHONPATH"' if source_checkout else f'"{runtime};$env:PYTHONPATH"'
     posix = (
         "#!/bin/sh\n"
         "set -eu\n"
@@ -283,7 +301,7 @@ def launcher_scripts() -> dict[str, str]:
         'ROOT=$(cat "$HERE/../project-root.txt")\n'
         'PY="$HERE/../venv/bin/python"\n'
         '[ -x "$PY" ] || PY="${PYTHON:-python3}"\n'
-        'PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m secdiagram_core.cli studio serve "$@"\n'
+        f'{posix_pythonpath} exec "$PY" -m secdiagram_core.cli studio serve --dir "$ROOT" "$@"\n'
     )
     windows_cmd = (
         "@echo off\r\n"
@@ -292,8 +310,8 @@ def launcher_scripts() -> dict[str, str]:
         'set /p ROOT=<"%HERE%..\\project-root.txt"\r\n'
         'set "PY=%HERE%..\\venv\\Scripts\\python.exe"\r\n'
         'if not exist "%PY%" set "PY=python"\r\n'
-        'set "PYTHONPATH=%ROOT%;%PYTHONPATH%"\r\n'
-        '"%PY%" -m secdiagram_core.cli studio serve %*\r\n'
+        f'set "PYTHONPATH={cmd_pythonpath}"\r\n'
+        '"%PY%" -m secdiagram_core.cli studio serve --dir "%ROOT%" %*\r\n'
     )
     windows_ps1 = (
         "$ErrorActionPreference = 'Stop'\n"
@@ -301,8 +319,8 @@ def launcher_scripts() -> dict[str, str]:
         "$root = Get-Content -LiteralPath (Join-Path $here '..\\project-root.txt')\n"
         "$py = Join-Path $here '..\\venv\\Scripts\\python.exe'\n"
         "if (-not (Test-Path -LiteralPath $py)) { $py = 'python' }\n"
-        "$env:PYTHONPATH = \"$root;$env:PYTHONPATH\"\n"
-        "& $py -m secdiagram_core.cli studio serve @args\n"
+        f"$env:PYTHONPATH = {ps_pythonpath}\n"
+        "& $py -m secdiagram_core.cli studio serve --dir \"$root\" @args\n"
         "exit $LASTEXITCODE\n"
     )
     return {
@@ -355,7 +373,7 @@ def _create_venv(venv_dir: Path, python: str | None = None) -> None:
     executable = python or sys.executable
     try:
         completed = subprocess.run(
-            [executable, "-m", "venv", str(venv_dir)],
+            [executable, "-m", "venv", "--without-pip", str(venv_dir)],
             check=False,
             capture_output=True,
             text=True,
@@ -388,8 +406,8 @@ def install(options: InstallOptions | None = None) -> InstallResult:
         )
     if not project_root.is_dir():
         raise StudioInstallError(f"project root does not exist or is not a directory: {project_root}")
-    if not (project_root / "secdiagram_core").is_dir():
-        raise StudioInstallError(f"project root does not contain secdiagram_core: {project_root}")
+    source_checkout = (project_root / "secdiagram_core").is_dir() and (project_root / "pyproject.toml").is_file()
+    package_root = Path(__file__).resolve().parent.parent
 
     home.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
@@ -419,7 +437,11 @@ def install(options: InstallOptions | None = None) -> InstallResult:
     )
     files.append((SKILL_DIRNAME / "skill.json").as_posix())
 
-    for rel_path, content in sorted(launcher_scripts().items()):
+    launchers = launcher_scripts(
+        source_checkout=source_checkout,
+        package_root=None if source_checkout else package_root,
+    )
+    for rel_path, content in sorted(launchers.items()):
         _atomic_write_text(home / rel_path, content, executable=rel_path.endswith("secdiagram-studio"))
         files.append(rel_path)
 
@@ -442,6 +464,7 @@ def install(options: InstallOptions | None = None) -> InstallResult:
         "profile": profile,
         "home": home.as_posix(),
         "project_root": project_root.as_posix(),
+        "source_checkout": source_checkout,
         "venv": VENV_DIRNAME if venv_dir.exists() else None,
         "skill": {
             "name": SKILL_NAME,
@@ -481,6 +504,7 @@ def status(home: Path | None = None) -> dict[str, Any]:
             "stale": False,
             "skill_installed": False,
             "venv_present": False,
+            "source_checkout": False,
         }
 
     skill_rel = f"{SKILL_DIRNAME.as_posix()}/SKILL.md"
@@ -495,6 +519,7 @@ def status(home: Path | None = None) -> dict[str, Any]:
         "profile": str(manifest.get("profile", "default")),
         "project_root": project_root,
         "project_root_present": bool(project_root) and Path(project_root).is_dir(),
+        "source_checkout": bool(manifest.get("source_checkout", True)),
         "skill_installed": (target / skill_rel).is_file(),
         "skill_path": (target / skill_rel).as_posix(),
         "skill_manifest": (target / SKILL_DIRNAME / "skill.json").as_posix(),

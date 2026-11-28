@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import base64
+import errno
 import ipaddress
 import json
 import secrets
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__, agentic, studio_ui
 from . import studio as studio_install
 from .analyzer import AnalysisConfig, AnalysisResult, run_analysis
+from .assessment import rule_id
 from .config import SecdiagramConfig, load_config
 from .diagram_edit import (
     DiagramOverrideError,
@@ -38,7 +40,7 @@ from .diagram_edit import (
 )
 from .high_level import build_high_level_architecture, render_mermaid_highlevel
 from .llm import NarrativeError, generate_narrative
-from .model import SEVERITY_RANK, Finding, Graph
+from .model import Finding, Graph
 from .redaction import redact_secrets, sanitize_path_text, sanitize_url_path
 from .render_html import render_html
 from .render_image import ImageRenderError, render_image
@@ -57,6 +59,48 @@ def _sev_counts(graph: Graph) -> dict[str, int]:
             counts[severity] = 0
         counts[severity] += 1
     return counts
+
+
+_PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def _assessment_counts(graph: Graph) -> dict[str, Any]:
+    priorities = {label: 0 for label in ("P0", "P1", "P2", "P3")}
+    levels = {label: 0 for label in ("likely", "plausible", "unlikely", "informational")}
+    reachability = {label: 0 for label in (
+        "externally_reachable", "authenticated_reachable", "local_reachable",
+        "internal_reachable", "unreachable", "unknown",
+    )}
+    exposure = {label: 0 for label in (
+        "public", "privileged", "sensitive_data", "internal_high_impact",
+        "isolated", "unknown",
+    )}
+    blocking = 0
+    suppressed = 0
+    for finding in graph.findings:
+        assessment = finding.assessment or {}
+        risk = finding.metadata.get("risk") or {}
+        exploit = finding.metadata.get("exploitability") or {}
+        priority = str(assessment.get("priority") or risk.get("priority") or "P3")
+        level = str(assessment.get("level") or exploit.get("level") or "informational")
+        reach = str(assessment.get("reachability") or risk.get("reachability") or "unknown")
+        exp = str(assessment.get("exposure") or risk.get("exposure") or "unknown")
+        priorities[priority] = priorities.get(priority, 0) + 1
+        levels[level] = levels.get(level, 0) + 1
+        reachability[reach] = reachability.get(reach, 0) + 1
+        exposure[exp] = exposure.get(exp, 0) + 1
+        if assessment.get("blocking") or finding.enforcement == "block":
+            blocking += 1
+        if assessment.get("suppressed") or finding.baseline or finding.enforcement == "suppressed":
+            suppressed += 1
+    return {
+        "by_priority": priorities,
+        "by_level": levels,
+        "by_reachability": reachability,
+        "by_exposure": exposure,
+        "blocking": blocking,
+        "suppressed": suppressed,
+    }
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -79,7 +123,8 @@ def _is_within(path: Path, parent: Path) -> bool:
         return False
 
 
-# Standard security headers applied to all HTTP responses
+# Standard security headers applied to all HTTP responses.  The inline script
+# and Mermaid CDN allowances are required by the classic standalone HTML report.
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; "
@@ -93,6 +138,21 @@ SECURITY_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "geolocation=(), camera=(), microphone=()",
     "Cache-Control": "no-store, no-cache, must-revalidate",
+}
+
+# The Studio has no inline scripts or CDN assets.  Its SVG preview uses a
+# same-origin blob URL, which must be explicitly allowed by CSP.
+STUDIO_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self'; "
+        "base-uri 'none'; "
+        "object-src 'none'; "
+        "frame-ancestors 'none';"
+    ),
 }
 
 
@@ -421,8 +481,10 @@ class PlatformState:
             theme=chosen_theme,
         )
 
-    def rescan(self) -> AnalysisResult:
+    def rescan(self, *, force: bool = True) -> AnalysisResult:
         with self.lock:
+            if not force and self.last_analysis is not None:
+                return self.last_analysis
             ana_cfg = self.config.analysis
             result = run_analysis(
                 AnalysisConfig(
@@ -445,9 +507,12 @@ class PlatformState:
             return result
 
     def get_analysis(self) -> AnalysisResult:
-        if self.last_analysis is None:
-            return self.rescan()
-        return self.last_analysis
+        with self.lock:
+            if self.last_analysis is not None:
+                return self.last_analysis
+        # Re-check under the lock inside rescan so concurrent first requests run
+        # the analysis exactly once.
+        return self.rescan(force=False)
 
     def get_html_report(self) -> str:
         with self.lock:
@@ -500,8 +565,9 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
     def platform_server(self) -> PlatformHTTPServer:
         return cast(PlatformHTTPServer, self.server)
 
-    def send_security_headers(self) -> None:
-        for header, value in SECURITY_HEADERS.items():
+    def send_security_headers(self, overrides: Mapping[str, str] | None = None) -> None:
+        headers = SECURITY_HEADERS if overrides is None else {**SECURITY_HEADERS, **overrides}
+        for header, value in headers.items():
             self.send_header(header, value)
 
     def _send_json(
@@ -510,7 +576,13 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         data: Any,
         extra_headers: Mapping[str, str] | None = None,
     ) -> None:
-        payload = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+        raw_json = (
+            json.dumps(data, indent=2, sort_keys=True)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
+        payload = raw_json.encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
@@ -521,20 +593,32 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _send_text(self, status_code: int, content: str, content_type: str = "text/plain; charset=utf-8") -> None:
+    def _send_text(
+        self,
+        status_code: int,
+        content: str,
+        content_type: str = "text/plain; charset=utf-8",
+        *,
+        security_headers: Mapping[str, str] | None = None,
+    ) -> None:
         payload = content.encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_security_headers()
+        self.send_security_headers(security_headers)
         self.end_headers()
         self.wfile.write(payload)
 
     def _send_bytes(self, status_code: int, payload: bytes, content_type: str) -> None:
+        overrides = (
+            {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox"}
+            if content_type == "image/svg+xml"
+            else None
+        )
         self.send_response(status_code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
-        self.send_security_headers()
+        self.send_security_headers(overrides)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -687,7 +771,12 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
         # 2. Studio single-page app and static assets
         if path in {"/studio", "/studio/index.html"}:
             try:
-                self._send_text(200, studio_ui.render_studio_html(), "text/html; charset=utf-8")
+                self._send_text(
+                    200,
+                    studio_ui.render_studio_html(),
+                    "text/html; charset=utf-8",
+                    security_headers=STUDIO_SECURITY_HEADERS,
+                )
             except studio_ui.StudioAssetError:
                 self._send_json(500, {"error": "InternalServerError", "message": "Studio UI assets are missing."})
             return
@@ -698,7 +787,12 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             except studio_ui.StudioAssetError:
                 self._send_json(404, {"error": "NotFound", "message": f"Studio asset '{name}' does not exist."})
                 return
-            self._send_text(200, content, content_type)
+            self._send_text(
+                200,
+                content,
+                content_type,
+                security_headers=STUDIO_SECURITY_HEADERS,
+            )
             return
 
         # 3. REST API v1
@@ -733,7 +827,15 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                 "findings_count": len(graph.findings),
                 "features_count": len(graph.features),
                 "severities": _sev_counts(graph),
+                "assessment": _assessment_counts(graph),
                 "languages": graph.meta.get("languages", {}),
+                "coverage": {
+                    "languages": graph.meta.get("languages", {}),
+                    "security_languages": graph.meta.get("security_languages", []),
+                    "unsupported_security_languages": graph.meta.get(
+                        "unsupported_security_languages", []
+                    ),
+                },
             })
             return
 
@@ -771,11 +873,94 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     pass
 
-            findings.sort(key=lambda f: (-SEVERITY_RANK.get(f.severity, 0), f.id))
+            priority_filter = {p.upper() for p in query.get("priority", [])}
+            if priority_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.assessment or {}).get("priority")
+                           or (f.metadata.get("risk") or {}).get("priority", "P3")).upper()
+                    in priority_filter
+                ]
+
+            level_filter = {level.lower() for level in query.get("assessment_level", [])}
+            if level_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.assessment or {}).get("level")
+                           or f.exploitability or "informational").lower()
+                    in level_filter
+                ]
+
+            reach_filter = {reach.lower() for reach in query.get("reachability", [])}
+            if reach_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.assessment or {}).get("reachability")
+                           or f.reachability or "unknown").lower()
+                    in reach_filter
+                ]
+
+            rule_filter = {rule for rule in query.get("rule", [])}
+            if rule_filter:
+                findings = [
+                    f for f in findings
+                    if str((f.rule or {}).get("id") or rule_id(f)) in rule_filter
+                ]
+
+            suppressed_filter = (query.get("suppressed") or [""])[0].lower()
+            if suppressed_filter in {"1", "true", "yes"}:
+                findings = [
+                    f for f in findings
+                    if f.baseline or f.enforcement == "suppressed"
+                ]
+            elif suppressed_filter in {"0", "false", "no"}:
+                findings = [
+                    f for f in findings
+                    if not f.baseline and f.enforcement != "suppressed"
+                ]
+
+            findings.sort(key=lambda f: (
+                _PRIORITY_ORDER.get(
+                    str((f.assessment or {}).get("priority")
+                        or (f.metadata.get("risk") or {}).get("priority", "P3")),
+                    3,
+                ),
+                -float((f.metadata.get("risk") or {}).get("score", 0.0)),
+                f.id,
+            ))
             self._send_json(200, {
                 "total": len(findings),
                 "findings": [f.to_dict() for f in findings],
             })
+            return
+
+        if path == "/api/v1/rules":
+            analysis = state.get_analysis()
+            rules: dict[str, dict[str, Any]] = {}
+            for finding in analysis.graph.sorted_findings():
+                descriptor = finding.rule or {}
+                rid = str(descriptor.get("id") or rule_id(finding))
+                entry = rules.setdefault(
+                    rid,
+                    {
+                        "id": rid,
+                        "name": descriptor.get("name", f"secdiagram/{finding.category}"),
+                        "category": descriptor.get("category", finding.category),
+                        "cwe": descriptor.get("cwe", finding.cwe),
+                        "owasp": list(descriptor.get("owasp", [])),
+                        "help_uri": descriptor.get("help_uri"),
+                        "source": descriptor.get("source", finding.source),
+                        "count": 0,
+                        "severities": {},
+                        "finding_ids": [],
+                    },
+                )
+                entry["count"] += 1
+                severity = finding.severity.lower()
+                entry["severities"][severity] = entry["severities"].get(severity, 0) + 1
+                entry["finding_ids"].append(finding.id)
+            ordered = [rules[key] for key in sorted(rules)]
+            self._send_json(200, {"total": len(ordered), "rules": ordered})
             return
 
         if path == "/api/v1/threat-model":
@@ -837,9 +1022,37 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/v1/studio/nodes":
-            graph = state.get_edited_graph()
-            nodes = [
-                {
+            # Return the unedited graph so hidden nodes remain editable in the
+            # Studio; overrides are applied when rendering the diagram.
+            try:
+                limit = int(query.get("limit", ["400"])[0])
+            except ValueError:
+                limit = 400
+            try:
+                offset = int(query.get("offset", ["0"])[0])
+            except ValueError:
+                offset = 0
+            limit = max(1, min(limit, 1000))
+            offset = max(0, offset)
+            needle = (query.get("q", [""])[0] or "").strip().lower()[:200]
+            graph = state.get_analysis().graph
+            nodes: list[dict[str, Any]] = []
+            for node in sorted(
+                graph.nodes.values(),
+                key=lambda item: (
+                    item.feature or "",
+                    item.kind,
+                    item.qualname,
+                    item.path or "",
+                    item.id,
+                ),
+            ):
+                haystack = " ".join(
+                    part for part in (node.id, node.name, node.kind, node.qualname, node.path, node.feature) if part
+                ).lower()
+                if needle and needle not in haystack:
+                    continue
+                nodes.append({
                     "id": node.id,
                     "name": node.name,
                     "kind": node.kind,
@@ -847,19 +1060,16 @@ class SecdiagramRequestHandler(BaseHTTPRequestHandler):
                     "path": node.path,
                     "line": node.line,
                     "feature": node.feature,
-                }
-                for node in sorted(
-                    graph.nodes.values(),
-                    key=lambda item: (
-                        item.feature or "",
-                        item.kind,
-                        item.qualname,
-                        item.path or "",
-                        item.id,
-                    ),
-                )
-            ]
-            self._send_json(200, {"total": len(nodes), "nodes": nodes})
+                })
+            total = len(nodes)
+            page = nodes[offset: offset + limit]
+            self._send_json(200, {
+                "total": total,
+                "returned": len(page),
+                "limit": limit,
+                "offset": offset,
+                "nodes": page,
+            })
             return
 
         if path == "/api/v1/studio/diagram":
@@ -1315,10 +1525,62 @@ def _resolve_scan_roots(root: Path, configured: list[str]) -> list[Path]:
     return resolved
 
 
-def create_server(root: Path, config: SecdiagramConfig | None = None) -> PlatformHTTPServer:
+def _is_port_in_use_error(exc: OSError) -> bool:
+    addr_in_use_errnos = {
+        errno.EADDRINUSE,
+        getattr(errno, "WSAEADDRINUSE", 10048),
+    }
+    winerror = getattr(exc, "winerror", None)
+    return exc.errno in addr_in_use_errnos or winerror in {10048, 10013}
+
+
+def _bind_server(
+    host: str,
+    port: int,
+    strict_port: bool = False,
+    max_port_attempts: int = 100,
+) -> tuple[PlatformHTTPServer, int]:
+    """Bind PlatformHTTPServer, automatically trying subsequent ports if port is in use."""
+    if port == 0 or strict_port:
+        server = PlatformHTTPServer((host, port), SecdiagramRequestHandler)
+        bound_port = int(server.server_address[1])
+        return server, bound_port
+
+    last_error: OSError | None = None
+    for offset in range(max_port_attempts):
+        candidate_port = port + offset
+        if candidate_port > 65535:
+            break
+        try:
+            server = PlatformHTTPServer((host, candidate_port), SecdiagramRequestHandler)
+            bound_port = int(server.server_address[1])
+            if offset > 0:
+                print(
+                    f"Port {port} is in use; starting platform on port {bound_port}.",
+                    file=sys.stderr,
+                )
+            return server, bound_port
+        except OSError as exc:
+            if _is_port_in_use_error(exc):
+                last_error = exc
+                continue
+            raise
+
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"Could not bind to any port in range {port}..{min(65535, port + max_port_attempts - 1)}")
+
+
+def create_server(
+    root: Path,
+    config: SecdiagramConfig | None = None,
+    strict_port: bool | None = None,
+) -> PlatformHTTPServer:
     """Create and configure a PlatformHTTPServer instance."""
     resolved_root = root.resolve()
     cfg = config or load_config(resolved_root)
+    if strict_port is not None:
+        cfg.server.strict_port = strict_port
 
     if not cfg.server.is_auth_enabled():
         if not cfg.server.insecure_no_auth:
@@ -1334,6 +1596,13 @@ def create_server(root: Path, config: SecdiagramConfig | None = None) -> Platfor
             )
 
     allowed_scan_roots = _resolve_scan_roots(resolved_root, cfg.server.scan_roots)
+    server, bound_port = _bind_server(
+        cfg.server.host,
+        cfg.server.port,
+        strict_port=cfg.server.strict_port,
+    )
+    cfg.server.port = bound_port
+
     state = PlatformState(resolved_root, cfg, allowed_scan_roots)
     audit = AuditLogger(cfg.server.audit_log, resolved_root)
 
@@ -1348,8 +1617,6 @@ def create_server(root: Path, config: SecdiagramConfig | None = None) -> Platfor
     else:
         authenticator = NoOpAuthenticator()
 
-    server_address = (cfg.server.host, cfg.server.port)
-    server = PlatformHTTPServer(server_address, SecdiagramRequestHandler)
     server.platform_state = state
     server.authenticator = authenticator
     server.audit = audit
@@ -1372,6 +1639,7 @@ def serve(
     max_concurrent_scans: int | None = None,
     scan_roots: list[str] | None = None,
     audit_log: str | None = None,
+    strict_port: bool = False,
 ) -> int:
     """Run the platform server daemon."""
     cfg = load_config(root, config_path)
@@ -1379,6 +1647,8 @@ def serve(
         cfg.server.host = host
     if port:
         cfg.server.port = port
+    if strict_port:
+        cfg.server.strict_port = True
     if auth_username:
         cfg.server.auth_username = auth_username
     if auth_password:

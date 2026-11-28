@@ -11,6 +11,14 @@ from secdiagram_core.config import find_config_file, load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolated = {
+            key: value for key, value in os.environ.items() if not key.startswith("SECDIAGRAM_")
+        }
+        self.environment = mock.patch.dict(os.environ, isolated, clear=True)
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
     def test_default_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -76,6 +84,10 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(cfg.server.audit_log, "/var/log/secdiagram/audit.jsonl")
             self.assertEqual(cfg.analysis.include, ["app/**/*.py"])
             self.assertEqual(cfg.analysis.min_confidence, 0.8)
+            self.assertEqual(cfg.analysis.exclude, ["tests/**"])
+            self.assertEqual(cfg.analysis.min_finding_confidence, 0.7)
+            self.assertEqual(cfg.analysis.max_nodes, 500)
+            self.assertTrue(cfg.analysis.security)
 
             # Test safe_dict redacts secret and absolute host paths
             safe = cfg.safe_dict()

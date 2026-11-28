@@ -19,46 +19,41 @@ class CacheSerializationTests(unittest.TestCase):
 
         # 1. to_dict / from_dict
         data = original.to_dict()
-        self.assertIsInstance(data, dict)
         self.assertEqual(data["repo"]["name"], original.repo.name)
-        self.assertEqual(len(data["graph"]["nodes"]), len(original.graph.nodes))
-        self.assertEqual(len(data["graph"]["edges"]), len(original.graph.edges))
-        self.assertEqual(len(data["graph"]["findings"]), len(original.graph.findings))
-
-        restored_from_dict = AnalysisResult.from_dict(data)
-        self.assertEqual(restored_from_dict.to_dict(), data, "all graph, evidence and dependency fields must survive")
-        self.assertEqual(restored_from_dict.repo.name, original.repo.name)
-        self.assertEqual(len(restored_from_dict.graph.nodes), len(original.graph.nodes))
-        self.assertEqual(len(restored_from_dict.graph.edges), len(original.graph.edges))
-        self.assertEqual(len(restored_from_dict.graph.findings), len(original.graph.findings))
-
-        # Query methods work on restored object
+        self.assertTrue(data["graph"]["nodes"])
+        self.assertTrue(data["graph"]["findings"])
+        self.assertIn("fastapi", data["dependency_usage"])
+        # Round-trip equality alone could bless a field omitted on both sides.
+        # Anchor representative serialized evidence to the known fixture.
+        command = [finding for finding in data["graph"]["findings"]
+                   if finding.get("category") == "command"]
+        self.assertTrue(command)
         self.assertEqual(
-            restored_from_dict.has_taint_at("app/service.py"),
-            original.has_taint_at("app/service.py"),
+            sorted(finding.get("severity") for finding in command),
+            ["critical", "high"],
         )
-        self.assertEqual(
-            restored_from_dict.is_package_reachable("fastapi"),
-            original.is_package_reachable("fastapi"),
-        )
-        self.assertTrue(restored_from_dict.has_taint_at("app/service.py"))
-        self.assertTrue(restored_from_dict.is_package_reachable("fastapi"))
-        self.assertFalse(restored_from_dict.has_taint_at("missing.py"))
-        self.assertFalse(restored_from_dict.is_package_reachable("mock_unused_package"))
-
-        # 2. to_json / from_json with file path
+        for finding in command:
+            self.assertEqual(finding.get("cwe"), "CWE-78")
+            self.assertEqual(finding.get("evidence"), [{"path": "app/service.py", "line": 16, "col": 11}])
         with tempfile.TemporaryDirectory() as tmp:
             json_path = Path(tmp) / "cache" / "analysis_result.json"
             original.to_json(json_path)
-            self.assertTrue(json_path.exists())
-
-            restored_from_file = AnalysisResult.from_json(json_path)
-            self.assertEqual(restored_from_file.to_dict(), data)
-            self.assertEqual(len(restored_from_file.graph.nodes), len(original.graph.nodes))
-            self.assertEqual(len(restored_from_file.graph.findings), len(original.graph.findings))
-
-            # 3. from_json with string payload
             raw_json = json_path.read_text(encoding="utf-8")
-            restored_from_str = AnalysisResult.from_json(raw_json)
-            self.assertEqual(restored_from_str.to_dict(), data)
-            self.assertEqual(len(restored_from_str.graph.nodes), len(original.graph.nodes))
+            # Full content equality subsumes the old repeated type/count checks.
+            # Exercise queries on every restoration path, not only the dict path.
+            for transport, restore in (
+                ("dict", lambda: AnalysisResult.from_dict(data)),
+                ("file", lambda: AnalysisResult.from_json(json_path)),
+                ("text", lambda: AnalysisResult.from_json(raw_json)),
+            ):
+                with self.subTest(transport=transport):
+                    restored = restore()
+                    self.assertEqual(
+                        restored.to_dict(),
+                        data,
+                        "graph, evidence and dependencies must survive losslessly",
+                    )
+                    self.assertTrue(restored.has_taint_at("app/service.py"))
+                    self.assertTrue(restored.is_package_reachable("fastapi"))
+                    self.assertFalse(restored.has_taint_at("missing.py"))
+                    self.assertFalse(restored.is_package_reachable("mock_unused_package"))

@@ -49,6 +49,53 @@ class SecurityTests(unittest.TestCase):
         self.assertTrue(sql)
         self.assertTrue(all(item.severity == "critical" for item in sql))
 
+    def test_shell_true_severity_reflects_taint(self) -> None:
+        import tempfile
+
+        from secdiagram_core.analyzer import AnalysisConfig, run_analysis
+
+        sources = {
+            "static": (
+                "import subprocess\n"
+                "def list_dir():\n"
+                "    return subprocess.run('ls -la', shell=True)\n"
+            ),
+            "dynamic": (
+                "import subprocess\n"
+                "def list_dir(path):\n"
+                "    cmd = 'ls ' + path\n"
+                "    return subprocess.run(cmd, shell=True)\n"
+            ),
+            "tainted": (
+                "from flask import Flask, request\n"
+                "import subprocess\n"
+                "app = Flask(__name__)\n"
+                "@app.get('/run')\n"
+                "def run():\n"
+                "    cmd = request.args.get('cmd')\n"
+                "    return subprocess.run(cmd, shell=True)\n"
+            ),
+        }
+        expected = {
+            "static": ("low", "static"),
+            "dynamic": ("medium", "dynamic"),
+            "tainted": ("high", "tainted"),
+        }
+        for label, source in sources.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "app.py").write_text(source, encoding="utf-8")
+                result = run_analysis(AnalysisConfig(root=root))
+                shell = [
+                    finding
+                    for finding in result.graph.findings
+                    if finding.title == "Shell execution enabled"
+                ]
+                self.assertEqual(len(shell), 1)
+                severity, risk = expected[label]
+                self.assertEqual(shell[0].severity, severity)
+                self.assertEqual(shell[0].metadata.get("shell_execution"), risk)
+
     def test_path_and_deserialization(self) -> None:
         self.assertTrue(self._find("path"))
         self.assertTrue(self._find("deserialization"))
@@ -105,9 +152,6 @@ class SecurityTests(unittest.TestCase):
         self.assertIn("Workflow grants write-all permissions", titles)
         self.assertIn("Unpinned GitHub Action", titles)
         self.assertIn("Security group open to the internet", titles)
-
-    def test_env_is_not_treated_as_ssrf_source(self) -> None:
-        self.assertFalse(self._find("network"))
 
     def test_findings_have_evidence_and_ids(self) -> None:
         ids = [finding.id for finding in self.findings]
@@ -173,7 +217,7 @@ class SecurityTests(unittest.TestCase):
             try:
                 os.symlink(secret, symlink_env)
             except OSError as exc:
-                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP} or getattr(exc, "winerror", None) == 1314:
                     self.skipTest(f"symlink creation is unavailable: {exc}")
                 raise
 

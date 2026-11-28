@@ -80,7 +80,7 @@ class RiskScoringTests(unittest.TestCase):
         unknown_sql = risk["node/routes.ts:6"]
         auth_sql = risk["node/routes.ts:10"]
         self.assertEqual((public_cmd["exposure"], public_cmd["priority"]), ("public", "P0"))
-        self.assertEqual((auth_cmd["exposure"], auth_cmd["priority"]), ("authenticated", "P1"))
+        self.assertEqual((auth_cmd["exposure"], auth_cmd["priority"]), ("privileged", "P1"))
         self.assertGreater(public_cmd["score"], auth_cmd["score"])
         self.assertGreater(unknown_sql["score"], auth_sql["score"])
         self.assertEqual(public_cmd["evidence"], "proven-flow")
@@ -167,6 +167,10 @@ class OutputTests(unittest.TestCase):
         graph = _analyze("exposure").graph
         report = build_security_report(graph)
         scores = [f.metadata["risk"]["score"] for f in report.priorities]
+        self.assertGreater(
+            len(scores), 1, "an empty/single-item priority list cannot exercise ranking"
+        )
+        self.assertGreater(max(scores), min(scores), "fixture must have different risks")
         self.assertEqual(scores, sorted(scores, reverse=True))
 
     def test_cli_writes_threat_model_only_with_security(self) -> None:

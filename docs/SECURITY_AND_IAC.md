@@ -6,7 +6,7 @@
 
 ## 1. Application Security Rules (SAST)
 
-The static analysis engine inspects Python and Java/Spring sources (and, see 1.1, C#/.NET, JavaScript/TypeScript, PHP and Go) to detect security vulnerabilities, untrusted source-to-sink dataflows, and dangerous configurations:
+The static analysis engine inspects Python and Java/Spring sources (and, see 1.1, C#/.NET, JavaScript/TypeScript, PHP, Go and Rust) to identify potential vulnerabilities, untrusted source-to-sink dataflows, and dangerous configurations:
 
 | Category | CWE | Patterns Detected | Default Severity |
 | :--- | :--- | :--- | :--- |
@@ -21,10 +21,12 @@ The static analysis engine inspects Python and Java/Spring sources (and, see 1.1
 
 Findings carry full source-to-sink taint paths (`codeFlows`), exact `path:line` citations, and stable partial fingerprints.
 
-### 1.1 C#/.NET, JavaScript/TypeScript, PHP and Go
+Public client identifiers (Firebase `google-services.json` / `GoogleService-Info.plist` API keys) are classified as `public_client_identifier` and reported at `info` severity. They are shipped by design in client applications, do not trigger ATT&CK `T1552`, and never block policy or audit gates. Format-verified provider tokens remain `provider_token` and keep their blocking behavior.
+
+### 1.1 C#/.NET, JavaScript/TypeScript, PHP, Go and Rust
 
 `polyglot_index.py` and `polyglot_security.py` add the same graph and SAST
-outputs for four more ecosystems. Like the Java indexer they are stdlib-only and
+outputs for these ecosystems. Like the Java indexer they are stdlib-only and
 lexical: source is read as text and never compiled or executed.
 
 **Architecture captured**
@@ -35,6 +37,14 @@ lexical: source is read as text and never compiled or executed.
 | JavaScript / TypeScript | Express/Koa/Fastify/Hono router calls and `.route()` chains, NestJS `@Controller` + `@Get`..., Next.js app router `route.ts` handlers and `pages/api` | modules, relative `import`/`require` edges, classes, functions, arrow handlers, NestJS constructor DI |
 | PHP | Laravel `Route::get/post/match/resource` (closures, `[Controller::class, 'method']`, `'Controller@method'`), Symfony `#[Route]` (class prefix + methods), Slim/Lumen receivers, legacy page scripts reading superglobals | namespaces, classes/traits/interfaces, `__construct` DI, inheritance, calls |
 | Go | `net/http` `HandleFunc` (incl. Go 1.22 `"GET /path"` patterns), gin/echo/chi/gorilla `.Methods()` | packages, structs/interfaces, methods by receiver, `NewX(...)` constructor injection, calls |
+| Rust | Axum literal `.route()` registrations (including multiline arguments) and Actix HTTP method attributes | structs/enums/traits/unions, functions and `impl` methods, source-path-qualified route handlers, Cargo runtime dependency inventory |
+
+Rust rules cover SQLx queries, detected shell/executable inputs, filesystem and
+HTTP sinks, disabled TLS verification, permissive CORS and selected insecure RNGs.
+Application state is not treated as request input; ordinary process arguments,
+owned literal SQL, `unsafe` syntax alone and cryptographic ThreadRng APIs are not
+vulnerability evidence. See [Rust support](RUST_SUPPORT.md) for exact patterns,
+positive/negative conditions and lexical coverage limits.
 
 Route registrations that name their handler (`app.get('/x', listUsers)`,
 `Route::get('/x', [UserController::class, 'show'])`, `r.GET("/x", h.Get)`)
@@ -149,6 +159,39 @@ report priorities, SARIF `rank` (score x 10) with `riskScore` / `riskPriority`
 / `exposure` properties, and the attack-path diagram (ordered and coloured by
 priority, entry points badged with their exposure). High-level subsystems are
 badged with their P0/P1 counts.
+
+#### Exploitability triage
+
+Risk ranking answers "what should we fix first"; exploitability answers "how
+likely is this observation to become real impact, given the evidence we hold".
+Every finding also receives `metadata.exploitability` with a level
+(**likely**, **plausible**, **unlikely**, **informational**), a 0-10 score, an
+impact class (RCE, memory corruption, deserialization, injection, file access,
+SSRF, credential, misconfiguration, supply chain), the evidence provenance,
+reachability, mitigation, deployment context, the conditions that drove the
+decision, and a recommended action (`fix-now`, `investigate`, `monitor`,
+`accept-or-document`).
+
+`score = impact_class x provenance x reachability x mitigation x deployment_context x confidence`
+
+| Factor | Values |
+| :--- | :--- |
+| Impact class | CWE-driven (e.g. CWE-78/94/502 -> RCE, CWE-787/119/416 -> memory corruption, CWE-89/79/611 -> injection, CWE-918 -> SSRF, CWE-798 -> credential) with a category fallback. |
+| Provenance | runtime-confirmed / known-exploited 1.0, credential in source 1.0, proven source-to-sink flow 0.9, configuration or dependency in use 0.85, dynamic construction 0.5, pattern 0.35, static 0.15. |
+| Reachability / exposure | public 1.0, authenticated/privileged 0.8, local 0.55, internal 0.5, unknown 0.65, isolated 0.4 (the stronger of reachability and exposure is used). |
+| Mitigation | sanitizer neutralizes the flow 0.3, no sanitizer 1.0, no flow evidence 0.9. |
+| Deployment context | production 1.0, test/fixture/example 0.5. Test code is downgraded explicitly, not dropped. |
+| Confidence | `0.7 + 0.3 x rule confidence`. |
+
+Levels: **likely** >= 6.5, **plausible** >= 3.5, **unlikely** >= 1.5,
+**informational** below. Runtime-confirmed and CISA KEV findings floor at 7.0
+(likely). Memory-corruption findings with external reachability but no proven
+flow are *plausible* (confirm the concrete input path and binary hardening);
+they are not automatically *likely*. The level is shown as a badge in the
+security report, in the "Exploitability triage" table, in threat records, and
+as `exploitability` / `exploitabilityScore` / `impactClass` /
+`recommendedAction` SARIF properties. Risk scores are unchanged: exploitability
+is a separate triage signal, not a replacement for the risk model.
 
 ### 1.4 STRIDE threat model (`THREAT_MODEL.md`)
 
@@ -280,7 +323,37 @@ secdiagram --sonarqube-report sonar-issues.json \
 
 ---
 
-## 4. Standalone Security Review (`--security-report`)
+## 4. Runtime DAST Evidence (OWASP ZAP & Nuclei)
+
+`secdiagram` does not launch ZAP or Nuclei itself. Doing so would require network targets, external binaries, and non-deterministic execution, which conflicts with the offline-first, zero-dependency, and strict-determinism guarantees. Instead, import their reports as local evidence and correlate every observed request with the statically parsed endpoint graph:
+
+```bash
+secdiagram --dir . \
+  --zap-report zap-traditional.json \
+  --nuclei-report nuclei.jsonl \
+  --security-report both \
+  --format json,sarif
+```
+
+Supported inputs:
+
+- **OWASP ZAP Traditional JSON** (`{"site": [{"alerts": [{"instances": [...]}]}]}`), including the variant with request/response bodies. Alerts without captured instances are treated as scanner rules, not runtime evidence.
+- **Nuclei JSONL or JSON** (`nuclei -jsonl-export`, `-json-export`, a JSON array, or a single result object). Non-HTTP templates are imported as findings but do not create endpoint observations.
+
+What the runtime evidence changes:
+
+- **Endpoint correlation**: each observed request is matched to an endpoint node by HTTP method and templated path (`/users/{id}`, `/users/<int:id>`, `/users/:id`, `[id]`, wildcards). Applications mounted under a base path are matched by route suffix.
+- **`runtime_observed` node metadata**: matched endpoints record deterministic `requests`, `sources`, `methods`, `params`, and observed `paths` in `graph.json`.
+- **`graph.meta.runtime_analysis`**: reports total/matched requests, observed versus total endpoints, runtime-only endpoints (seen in the running app but absent from the static graph), and unobserved endpoints.
+- **Runtime-confirmed findings**: ZAP/Nuclei findings are marked `runtime_confirmed`, anchored to the matched `path:line`, and classified as externally verified. Runtime-only observations remain findings anchored to the report.
+- **Policy**: a runtime-confirmed critical/high finding can block CI because the runtime request itself proves reachability, even when static exposure markers are missing. Findings that could not be correlated still require review; confidence and reachability gates continue to apply.
+- **Reports**: SARIF results carry `properties.runtimeConfirmed` and the structured runtime observation; the standalone security review adds a runtime evidence summary and per-endpoint runtime column.
+
+> Runtime evidence reflects only the requests the scanner observed. It is not a proof of complete endpoint coverage, and the static-only limitation text is replaced with an explicit runtime-scope limitation when DAST reports are imported.
+
+---
+
+## 5. Standalone Security Review (`--security-report`)
 
 Generate a print-first security review artifact that is separate from the architectural diagram:
 
@@ -300,7 +373,7 @@ The risk label floors at **High** for any critical finding and **Moderate** for 
 
 ---
 
-## 5. CycloneDX 1.6 VEX Export (`--format vex`)
+## 6. CycloneDX 1.6 VEX Export (`--format vex`)
 
 Generate machine-readable Vulnerability Exploitability eXchange (VEX) documents under the **CycloneDX 1.6** specification:
 
@@ -324,7 +397,7 @@ This allows downstream triage tools and SBOM scanners to automatically justify n
 
 ---
 
-## 6. Pluggable Framework, Sanitizer & Sink Registry
+## 7. Pluggable Framework, Sanitizer & Sink Registry
 
 Extend `secdiagram`'s detection heuristics to recognize internal microservice frameworks, custom authentication decorators, or proprietary sanitization functions.
 
@@ -374,7 +447,7 @@ register_sink("my_custom_sink")
 
 ---
 
-## 7. Security Baseline (`security.baseline.json`)
+## 8. Security Baseline (`security.baseline.json`)
 
 Establish a baseline of known, accepted findings to prevent breaking CI on legacy issues:
 

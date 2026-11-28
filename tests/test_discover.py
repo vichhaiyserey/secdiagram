@@ -55,18 +55,24 @@ class DiscoverTests(unittest.TestCase):
         self.assertIn("terraform/main.tf", iac)
 
     def test_include_and_exclude(self) -> None:
-        included = discover(FIXTURE, include=["app/*.py"])
-        self.assertTrue(included.rel_files)
-        self.assertTrue(all(path.startswith("app/") for path in included.rel_files))
+        expected = {
+            "app/__init__.py",
+            "app/broken.py",
+            "app/cli.py",
+            "app/main.py",
+            "app/models.py",
+            "app/service.py",
+            "app/tasks.py",
+            "app/utils.py",
+        }
+        for spelling in ("app/*.py", "app\\*.py"):
+            with self.subTest(glob=spelling):
+                included = discover(FIXTURE, include=[spelling])
+                self.assertEqual(set(included.rel_files), expected)
         excluded = discover(FIXTURE, exclude=["app/service.py", "app/broken.py"])
         self.assertNotIn("app/service.py", excluded.rel_files)
         self.assertNotIn("app/broken.py", excluded.rel_files)
         self.assertIn("app/main.py", excluded.rel_files)
-
-    def test_cross_platform_backslash_globs(self) -> None:
-        included = discover(FIXTURE, include=["app\\*.py"])
-        self.assertTrue(included.rel_files)
-        self.assertTrue(all(path.startswith("app/") for path in included.rel_files))
 
     def test_git_discovery_respects_gitignore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,7 +102,7 @@ class DiscoverTests(unittest.TestCase):
             try:
                 os.symlink(secret, symlink_py)
             except OSError as exc:
-                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP} or getattr(exc, "winerror", None) == 1314:
                     self.skipTest(f"symlink creation is unavailable: {exc}")
                 raise
 
@@ -118,7 +124,7 @@ class DiscoverTests(unittest.TestCase):
             try:
                 os.symlink(secret, symlink_py)
             except OSError as exc:
-                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}:
+                if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP} or getattr(exc, "winerror", None) == 1314:
                     self.skipTest(f"symlink creation is unavailable: {exc}")
                 raise
 

@@ -32,7 +32,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .assessment import is_public_client_identifier, refresh_assessment
 from .confidence import BLOCK_CONFIDENCE_THRESHOLD, compute_confidence
+from .dast_reports import DAST_SOURCES
 from .exposure import BLOCK_ELIGIBLE_EXPOSURES, classify_exposure
 from .model import Finding, Graph
 from .reachability import (
@@ -73,6 +75,11 @@ HIGH_RISK_CATEGORIES = frozenset(
     }
 )
 
+PUBLIC_CLIENT_ACTIONS = (
+    "Restrict the key in the provider console",
+    "Keep client configuration out of server-side secret stores",
+    "Review the provider key restrictions for production use",
+)
 SECRET_REMOVAL_ACTIONS = (
     "Rotate the credential",
     "Remove the secret from source",
@@ -88,6 +95,11 @@ DEPENDENCY_ACTIONS = (
     "Upgrade the affected package to a fixed version",
     "Confirm the vulnerable code path is not reachable",
     "Pin and monitor the dependency for a fix",
+)
+RUNTIME_ACTIONS = (
+    "Reproduce the runtime finding against the affected endpoint",
+    "Fix or validate the affected endpoint and parameter",
+    "Add a regression test that covers the observed request",
 )
 
 
@@ -143,6 +155,12 @@ def _is_dependency_finding(finding: Finding) -> bool:
     return bool(finding.metadata.get("package") or finding.metadata.get("cves"))
 
 
+def _is_runtime_confirmed(finding: Finding) -> bool:
+    return finding.source in DAST_SOURCES and bool(
+        finding.metadata.get("runtime_confirmed")
+    )
+
+
 def _package_in_use(graph: Graph, finding: Finding, dependency_usage: dict[str, Any] | None) -> bool:
     """True when the affected package is imported and reachable from an entry point.
 
@@ -176,6 +194,10 @@ def _package_in_use(graph: Graph, finding: Finding, dependency_usage: dict[str, 
 def _evidence_quality(graph: Graph, finding: Finding) -> str:
     if _is_llm_sourced(finding):
         return "llm_only"
+    if _is_runtime_confirmed(finding):
+        return "externally_verified"
+    if is_public_client_identifier(finding):
+        return "public_client_identifier"
     if finding.category == "secret" and _secret_kind(finding) == "provider_token":
         return "provider_verified"
     validation = finding.metadata.get("validation") or {}
@@ -191,6 +213,10 @@ def _evidence_quality(graph: Graph, finding: Finding) -> str:
 
 
 def _required_actions(finding: Finding) -> tuple[str, ...]:
+    if _is_runtime_confirmed(finding):
+        return RUNTIME_ACTIONS
+    if is_public_client_identifier(finding):
+        return PUBLIC_CLIENT_ACTIONS
     if finding.category == "secret":
         return SECRET_REMOVAL_ACTIONS
     if _is_dependency_finding(finding):
@@ -208,10 +234,19 @@ def _blocking_eligibility(
     dependency_usage: dict[str, Any] | None = None,
 ) -> str | None:
     """Return None when the category-specific conditions all hold, else the reason they do not."""
+    if _is_runtime_confirmed(finding):
+        # A DAST scanner observed the issue against the live endpoint; the
+        # remaining gates (severity, confidence, reachability, exposure) still
+        # apply.
+        return None
     if finding.category == "secret":
+        if is_public_client_identifier(finding):
+            return "public client identifier is not a secret"
         if _secret_kind(finding) != "provider_token":
             return "secret is not a format-verified provider token"
         return None
+    if finding.source in {"trivy", "cyclonedx"}:
+        return "package-level correlation does not prove the vulnerable code path"
     if _is_dependency_finding(finding):
         validation = finding.metadata.get("validation") or {}
         if not validation.get("known_exploited"):
@@ -233,7 +268,10 @@ def _blocking_eligibility(
 def evaluate_finding(graph: Graph, finding: Finding, dependency_usage: dict[str, Any] | None = None) -> PolicyResult:
     """Compute the enforcement decision for one finding. Deterministic."""
     exposure = classify_exposure(graph, finding)
-    if finding.category == "secret":
+    if finding.source in {"trivy", "cyclonedx"}:
+        exposure = finding.exposure
+        reachability = finding.reachability
+    elif finding.category == "secret":
         # A credential in source is exposed to anyone who can read the
         # repository or its built image; no code path is involved, so code
         # reachability does not apply.
@@ -277,12 +315,18 @@ def evaluate_finding(graph: Graph, finding: Finding, dependency_usage: dict[str,
             reason = f"mitigation status '{mitigation}' indicates a compensating control"
         elif exposure not in BLOCK_ELIGIBLE_EXPOSURES:
             reason = f"exposure '{exposure}' is not blocking-eligible"
-        elif finding.category not in HIGH_RISK_CATEGORIES and not _is_dependency_finding(finding):
+        elif (
+            finding.category not in HIGH_RISK_CATEGORIES
+            and not _is_dependency_finding(finding)
+            and not _is_runtime_confirmed(finding)
+        ):
             reason = "category is not in the approved high-risk scope"
 
     if reason is None:
         if finding.category == "secret":
             policy_reason = "Verified provider-specific secret exposed in source"
+        elif _is_runtime_confirmed(finding):
+            policy_reason = "Runtime-confirmed finding observed at a reachable endpoint"
         elif _is_dependency_finding(finding):
             policy_reason = "Known-exploited vulnerability in a used, reachable dependency"
         else:
@@ -363,6 +407,7 @@ def apply_policy(
         finding.required_actions = list(result.required_actions)
         risk = finding.metadata.get("risk") or {}
         finding.risk_score = float(risk.get("score", 0.0))
+        refresh_assessment(finding)
         if enforcement != "suppressed":
             summary.decisions[enforcement] = summary.decisions.get(enforcement, 0) + 1
             if enforcement == "block":

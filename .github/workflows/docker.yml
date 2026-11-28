@@ -35,10 +35,15 @@ jobs:
           push: false
           load: true
           tags: secdiagram:ci
+          # Refresh stable-branch OS security revisions even when an older
+          # runtime layer remains available through inherited GHA caches.
+          no-cache-filters: runtime
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test CLI
         run: docker run --rm secdiagram:ci --help
+      - name: Verify minimal offline Studio runtime
+        run: docker run --rm --network none --entrypoint python secdiagram:ci /app/scripts/verify_container_runtime.py
       - name: Verify containerized diagram generation
         run: |
           docker run --rm -v "${{ github.workspace }}:/repo" secdiagram:ci --dir /repo/tests/fixtures/sample_app --out /tmp/verify-out --format mermaid --image png --no-security

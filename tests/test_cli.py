@@ -54,8 +54,11 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             unfiltered = Path(tmp) / "unfiltered"
             filtered = Path(tmp) / "filtered"
-            self._run(["--dir", str(FIXTURE), "--out", str(unfiltered), "--format", "json", "--quiet"])
-            self._run(
+            code, _, err = self._run(
+                ["--dir", str(FIXTURE), "--out", str(unfiltered), "--format", "json", "--quiet"]
+            )
+            self.assertEqual(code, 0, err)
+            code, _, err = self._run(
                 [
                     "--dir",
                     str(FIXTURE),
@@ -68,19 +71,41 @@ class CliTests(unittest.TestCase):
                     "--quiet",
                 ]
             )
+            self.assertEqual(code, 0, err)
             everything = json.loads((unfiltered / "graph.json").read_text(encoding="utf-8"))
             survivors = json.loads((filtered / "graph.json").read_text(encoding="utf-8"))
             self.assertLess(len(survivors["findings"]), len(everything["findings"]))
             self.assertTrue(survivors["findings"])
-            self.assertTrue(all(item["confidence"] >= 0.9 for item in survivors["findings"]))
+            self.assertEqual(
+                {item["id"] for item in survivors["findings"]},
+                {item["id"] for item in everything["findings"] if item["confidence"] >= 0.9},
+            )
             self.assertEqual(survivors["meta"]["finding_confidence_floor"], 0.9)
 
     def test_fail_on_critical(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            code, _, _ = self._run(
-                ["--dir", str(FIXTURE), "--out", str(Path(tmp) / "out"), "--quiet", "--fail-on", "critical"]
-            )
-            self.assertEqual(code, 2)
+            for spelling in ("critical", "CRITICAL"):
+                with self.subTest(spelling=spelling):
+                    code, _, _ = self._run(
+                        [
+                            "--dir",
+                            str(FIXTURE),
+                            "--out",
+                            str(Path(tmp) / spelling),
+                            "--format",
+                            "json",
+                            "--quiet",
+                            "--fail-on",
+                            spelling,
+                        ]
+                    )
+                    self.assertEqual(code, 2)
+                    payload = json.loads(
+                        (Path(tmp) / spelling / "graph.json").read_text(encoding="utf-8")
+                    )
+                    self.assertIn(
+                        "critical", {finding["severity"] for finding in payload["findings"]}
+                    )
 
     def test_no_security(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,14 +196,6 @@ class CliTests(unittest.TestCase):
                     (out2 / name).read_bytes(),
                     f"{name} is not deterministic",
                 )
-
-
-    def test_fail_on_case_insensitive(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            code, _, _ = self._run(
-                ["--dir", str(FIXTURE), "--out", str(Path(tmp) / "out"), "--quiet", "--fail-on", "CRITICAL"]
-            )
-            self.assertEqual(code, 2)
 
     def test_format_alias_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

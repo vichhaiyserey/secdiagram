@@ -4,16 +4,16 @@
 
 ### *Small but Gold* — Deterministic Architecture Diagrams, Polyglot System Mapping, and Security Intelligence.
 
-[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14%20%7C%203.15-blue.svg?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Standard%20Library%20Only-success.svg?style=flat-square)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/Tests-653%2F653%20Passing-brightgreen.svg?style=flat-square)](tests/)
+[![Tests](https://github.com/vichhaiyserey/secdiagram/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/vichhaiyserey/secdiagram/actions/workflows/ci.yml?query=branch%3Adevelop)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=flat-square&logo=docker&logoColor=white)](Dockerfile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 [![Cross Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Ubuntu%20%7C%20RHEL%20%7C%20Windows-blueviolet.svg?style=flat-square)](docs/CONTAINER_AND_COMPOSE.md)
 
 <p align="center">
   <b>Transform codebases into clear, human-friendly system architecture diagrams, publication-quality images, security threat models, and AI reviews.</b><br>
-  <i>100% offline-first. Zero external Python runtime dependencies. Polyglot architecture and security analysis across <b>.NET (C#)</b>, <b>Java / Spring Boot</b>, <b>Node.js / TypeScript</b>, <b>PHP</b>, <b>Go</b>, <b>Python</b>, and <b>Docker / Kubernetes / Terraform</b>.</i>
+  <i>100% offline-first. Zero external Python runtime dependencies. Polyglot architecture and security analysis across <b>.NET (C#)</b>, <b>Java / Spring Boot</b>, <b>Node.js / TypeScript</b>, <b>PHP</b>, <b>Go</b>, <b>Rust</b>, <b>Dart / Flutter</b>, <b>Python</b>, and <b>Docker / Kubernetes / Terraform</b>.</i>
 </p>
 
 ---
@@ -22,10 +22,12 @@
 
 ## 🌟 Key Highlights
 
-- **Pure Python Standard Library (`zero dependencies`)**: Runs instantly without downloading hundreds of megabytes of third-party wheels. Zero supply chain attack surface.
+- **Pure Python Standard Library (`zero dependencies`)**: Core analysis requires no third-party Python packages. Optional renderers and developer tools have separate pinned dependencies.
 - **High-Level C4 System Diagrams**: Automatically compiles clean C4 tier diagrams (`diagram-highlevel.mmd` & `diagram-highlevel.png`) showing Ingress, Gateways, Core Services, Databases, Caches, Brokers, and External APIs.
 - **Multi-Format Image Rendering**: Export diagrams directly to **PNG**, **SVG**, or **PDF** offline via bundled Mermaid CLI (`mmdc`) or zero-dependency HTTP fallbacks (Kroki, mermaid.ink).
 - **Security & IaC SAST Overlay**: Discovers entrypoints, traces taint dataflows **across functions and files** (controller → service → repository) to dangerous sinks (CWE-78, CWE-89, CWE-502), draws them as an attack-path diagram, catches hardcoded secrets, and audits Dockerfile, Kubernetes, Terraform, and GitHub Actions configurations.
+- **Runtime DAST Evidence Correlation**: Import OWASP ZAP Traditional JSON and Nuclei JSONL/JSON reports and deterministically match observed requests (HTTP method + templated path) to static endpoint nodes. Matched endpoints gain `runtime_observed` metadata, runtime-only endpoints are reported instead of invented, and runtime-confirmed critical/high findings can satisfy the strict policy reachability gate -- all without launching a scanner or making network calls.
+- **Local Dependency Risk Correlation**: Builds a bounded offline Pub/Flutter inventory from `pubspec.yaml`, `pubspec.lock`, and `.dart_tool/package_config.json`, then correlates local Trivy and CycloneDX reports by scoped package and exact resolved version. Static imports and qualified package call paths supply reachability evidence, while a policy-owned reviewed symbol gate is required before a dependency finding can fail CI. Optional SHA-256 evidence bundles add reproducibility and freshness checks, and remediation details flow into Markdown, HTML, JSON, SARIF, and VEX. See [Dependency risk correlation](docs/DEPENDENCY_RISK_CORRELATION.md).
 - **Web/API Misconfiguration Checks**: Flags broken JWT validation (`alg=none`, signature/expiry checks off), CORS that trusts any origin **with credentials**, disabled CSRF protection, cookies without `HttpOnly`/`Secure`, XXE-prone XML parsers, non-cryptographic RNGs used for tokens, and JS prototype pollution across C#, JS/TS, PHP, Go, and Java.
 - **Risk-Ranked "Fix First" List**: Scores every finding 0–10 by impact × exposure (anonymous, authenticated, or internal entry point, detected from framework auth markers) × evidence × confidence × CISA KEV, and groups them P0–P3 in reports, SARIF, and diagrams.
 - **STRIDE Threat Model**: Generates `THREAT_MODEL.md` and `threat-model.json` with affected components, assets, source evidence, static flows, severity/confidence, and verification steps. Facts and assessments are separated; `secdiagram threat-diff` compares saved versions offline. See [Threat modeling](docs/THREAT_MODELING.md).
@@ -53,8 +55,14 @@ python secdiagram.py --dir="." --image
 # Generate high-level system overview as primary diagram:
 python secdiagram.py --dir="." --high-level --image
 
+# Correlate local Trivy/CycloneDX evidence with the Pub inventory (offline):
+python secdiagram.py --dir="." --offline --trivy-report trivy.json --sbom inventory.cdx.json --format json,sarif,vex
+
 # ATT&CK audit gate for CI/CD - exits 1 on policy violations:
 python secdiagram.py audit . --policy policy.yaml --json audit-result.json
+
+# Strict audit against a SHA-256 verified evidence bundle:
+python secdiagram.py audit . --offline --evidence-bundle evidence.json --require-evidence --json audit-result.json
 ```
 
 ### 2. Standalone Container Execution (Docker / Podman)
@@ -99,6 +107,18 @@ print(f"Discovered {len(result.graph.nodes)} nodes and {len(result.graph.finding
 # Native taint and package reachability query:
 if result.has_taint_at("app/api.py", line=42):
     print("Tainted dataflow detected at line 42!")
+
+# Correlate runtime DAST evidence with the static endpoint graph:
+runtime = analyze(
+    AnalysisConfig(root=".", zap_report="zap.json", nuclei_report="nuclei.jsonl")
+)
+print(runtime.graph.meta["runtime_analysis"]["matched_requests"], "runtime requests matched")
+
+# Correlate local Pub inventory with Trivy and CycloneDX evidence:
+deps = analyze(
+    AnalysisConfig(root=".", trivy_report="trivy.json", sbom="inventory.cdx.json")
+)
+print(deps.graph.meta["dependency_reports"])
 ```
 
 ---
@@ -111,6 +131,8 @@ if result.has_taint_at("app/api.py", line=42):
 | **Node.js / TypeScript** | `package.json`, workspaces, `schema.prisma`, `*.js`/`*.ts` | Express, Fastify, Koa, Hono, NestJS, Next.js routes & auth middleware; Prisma, TypeORM, Mongoose; interprocedural taint to SQL/NoSQL, `child_process`, `eval`, XSS, path, SSRF sinks; prototype pollution; JWT/CORS/cookie checks |
 | **PHP** | `composer.json`, `*.php` | Laravel routes & middleware, Symfony `#[Route]`/`#[IsGranted]`, Slim, legacy page scripts; constructor DI; taint to SQL, `system`/`exec`, `include`, `unserialize`, XSS, path, SSRF; CSRF/CORS/cookie/XXE checks |
 | **Go** | `go.mod`, `*.go` | `net/http` (incl. Go 1.22 `"GET /path"`), Gin, Echo, Chi routes & auth middleware; structs, receiver methods, `NewX` injection; taint to SQL, `exec.Command`, path, SSRF, XSS; JWT/CORS/cookie/TLS checks |
+| **Dart / Flutter** | `pubspec.yaml`, `pubspec.lock`, `.dart_tool/package_config.json`, `*.dart` | Flutter widgets, services, repositories, GoRouter/Shelf routes; Pub direct/dev/transitive inventory with resolved versions and scopes; interprocedural taint to SQLite, `Process.run`, WebView JS/HTML, filesystem and HTTP sinks; TLS and weak-crypto checks; Trivy/CycloneDX advisory correlation. |
+| **Rust** | `Cargo.toml`, `*.rs` | Structs/enums/traits, `impl` methods, Axum router and Actix attribute routes; request-to-SQLx, shell-command, filesystem and HTTP sink evidence; TLS/CORS and selected non-cryptographic RNG checks. Lexical coverage and limits: [Rust support](docs/RUST_SUPPORT.md). |
 | **Java / Spring Boot** | `pom.xml`, `build.gradle(.kts)` | Stereotypes (`@RestController`, `@Service`, `@Repository`), DI (`@Autowired`), injection/call edges, `@PreAuthorize`/`@PermitAll`; SQLi, command injection, deserialization, SSRF, XSS, XXE; JWT/CORS/CSRF/cookie checks |
 | **Python** | `pyproject.toml`, `requirements.txt`, `*.py` AST | FastAPI, Flask, Django, Celery; SQLAlchemy, Tortoise-ORM, asyncpg, pymongo; AST taint tracking from sources to dangerous execution sinks |
 | **Infrastructure & IaC** | `docker-compose.yml`, `Dockerfile`, K8s, Terraform | Compose service ports & links; Dockerfile unpinned tags & root user; Kubernetes capabilities & security contexts; Terraform public ACLs |
@@ -141,10 +163,10 @@ By default, all outputs are written deterministically to `<repo>/.secdiagram/`:
 - `ARCHITECTURE.md` — Complete markdown architecture report with embedded diagrams and a risk-ranked "Fix first" table.
 - `THREAT_MODEL.md` — STRIDE threat model per trust boundary, backed by findings and their risk priority.
 - `threat-model.json` — Versioned source-backed observations and coverage context; compare versions with `secdiagram threat-diff before/threat-model.json after/threat-model.json`.
-- `audit-result.json` — Machine-readable ATT&CK audit result (`secdiagram audit --json`): policy, per-technique status/evidence, and violations.
-- `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings with hop-by-hop `metadata.flow` and `metadata.risk`).
-- `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`; `rank` and `riskScore`/`riskPriority` follow the risk model.
-- `vex.json` — CycloneDX 1.6 VEX document with automated reachability justifications.
+- `audit-result.json` — Machine-readable ATT&CK audit result (`secdiagram audit --json`): policy, per-technique status/evidence, violations, evidence freshness, dependency report summaries/findings, and reviewed dependency violations.
+- `graph.json` — Machine-readable graph schema (nodes, edges, confidence, features, findings with hop-by-hop `metadata.flow` and `metadata.risk`); Pub inventory nodes and structured `dependency` details for Trivy/CycloneDX findings.
+- `security.sarif` — OASIS SARIF v2.1.0 code-scanning report with taint `codeFlows`; `rank` and `riskScore`/`riskPriority` follow the risk model, and dependency provenance is exposed in `properties.dependency`.
+- `vex.json` — CycloneDX 1.6 VEX document with automated reachability justifications, dependency components, in-triage/resolved states, and remediation properties.
 - `report.html` — Zero-dependency interactive HTML report with dark mode, filtering, and an "Attack paths" view.
 - `SECURITY_REVIEW.md` / `security-report.html` — Standalone security review (`--security-report md|html|both`).
 - `NARRATIVE.md` — Optional evidence-grounded AI review (`--llm` / `--ollama`).
@@ -160,18 +182,22 @@ For comprehensive guides, references, and deployment patterns, see:
 | :--- | :--- |
 | [**Architecture Diagrams & Image Rendering**](docs/ARCHITECTURE_DIAGRAMS.md) | C4 high-level diagrams, visual tiering, detail modes, PNG/SVG/PDF rendering, and providers. |
 | [**Container & Docker Compose Guide**](docs/CONTAINER_AND_COMPOSE.md) | Standalone Docker & Podman, Windows Git Bash tips, SELinux mode, and local Ollama Compose. |
-| [**Security & IaC Static Analysis**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, CycloneDX VEX. |
+| [**Security, IaC & Runtime Evidence**](docs/SECURITY_AND_IAC.md) | SAST and interprocedural taint rules per language, web/API misconfiguration checks, risk model, STRIDE threat model, MITRE ATT&CK audit gate, attack-path diagram, IaC checks, SonarQube/Xray import, ZAP/Nuclei runtime DAST correlation, CycloneDX VEX. |
+| [**Dependency Risk Correlation**](docs/DEPENDENCY_RISK_CORRELATION.md) | Offline Pub/Flutter inventory, Trivy/CycloneDX ingestion, SHA-256 evidence bundles, reviewed symbol gate, Pub advisory ranges, and remediation exports. |
+| [**Rust / Axum / Actix Support**](docs/RUST_SUPPORT.md) | Supported syntax, Cargo inventory, evidence-backed rules, offline examples and coverage limits. |
+| [**Threat Modeling & Diffs**](docs/THREAT_MODELING.md) | Facts versus assessments, source-linked STRIDE observations and version comparison. |
 | [**Hardened Platform Server & REST API**](docs/SERVER_API.md) | Daemon mode (`secdiagram serve`), authentication, rate limits, request caps, and config schema. |
 | [**Agentic Studio & AI-Skill Installer**](docs/STUDIO.md) | User-level install, portable agent skill, Studio UI, diagram overrides, SDLC evidence gates, handoffs, and local AI reviews. |
 | [**CLI Reference Manual**](docs/CLI_REFERENCE.md) | Complete command-line syntax, options breakdown table, and exit codes. |
 | [**Python Public Facade & Developer API**](docs/PYTHON_API.md) | Stable facade (`secdiagram_core`), taint/reachability queries, SCA bridge, and cache serialization. |
 | [**Task Tracking Guide**](docs/TASK_TRACKING.md) | GitHub Issues & Projects v2 task lifecycle tracking with `taskctl.py`. |
+| [**Test Contracts & Validation**](docs/TEST_VALIDATION.md) | Meaningful test conditions, isolated fault checks, cross-platform verification and known gaps. |
 
 ---
 
 ## 🧪 Verification & Testing
 
-`secdiagram` maintains a comprehensive test suite (653 unit tests) covering AST and lexical indexers for six application languages plus infrastructure-as-code, interprocedural taint, misconfiguration rules, risk scoring, the STRIDE threat model and MITRE ATT&CK audit gate, graph builders, image rendering, and deterministic CLI behaviors. The suite is enforced cross-platform: CI runs the unit-test matrix on Ubuntu **and** Windows for every supported Python version.
+`secdiagram` maintains behavior-focused tests covering the supported application languages, including Rust and Dart/Flutter, plus infrastructure-as-code, interprocedural taint, misconfiguration rules, risk scoring, the STRIDE threat model and MITRE ATT&CK audit gate, Pub dependency inventory and correlation, offline evidence verification, graph builders, image rendering, and deterministic CLI behaviors. Related conditions use named subtests; full-content checks and positive/negative controls take precedence over assertion counts. CI runs the suite on Ubuntu **and** Windows for every supported Python version. See [test contracts and validation](docs/TEST_VALIDATION.md) for the inventory, fault checks and coverage limits.
 
 ```bash
 # Run unit test suite:

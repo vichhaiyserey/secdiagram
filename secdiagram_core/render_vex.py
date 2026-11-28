@@ -11,6 +11,7 @@ import uuid
 from typing import Any
 
 from . import __version__
+from .dependency_remediation import dependency_details
 from .model import SEVERITY_RANK, DependencyReachabilitySummary, Finding, Graph
 
 CYCLONEDX_1_6_SCHEMA = "http://cyclonedx.org/schema/bom-1.6.schema.json"
@@ -22,6 +23,14 @@ def _vulnerability_analysis(
     dependency_usage: dict[str, DependencyReachabilitySummary] | None = None,
 ) -> dict[str, Any]:
     """Build the VEX analysis block with standardized state and justification."""
+    if finding.source == "trivy" and finding.metadata.get("fixed_in_inventory"):
+        return {"state": "resolved", "detail": "The scoped Pub lockfile resolves a release supported by local fix evidence."}
+    if finding.source in {"trivy", "cyclonedx"}:
+        return {"state": "in_triage", "detail": (
+            "Package-level evidence does not establish vulnerable-code reachability. "
+            f"Package correlation: {finding.reachability}."
+        )}
+
     # 1. Baseline suppressed
     if finding.baseline:
         return {
@@ -86,6 +95,7 @@ def render_vex(
     serial_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"secdiagram.vex.{repo_name}")
 
     vulnerabilities: list[dict[str, Any]] = []
+    components: dict[str, dict[str, Any]] = {}
 
     # Sort findings deterministically
     sorted_findings = graph.sorted_findings()
@@ -114,6 +124,24 @@ def render_vex(
                 }
             ],
         }
+
+        if details := dependency_details(finding):
+            vuln["properties"] = [
+                {"name": f"secdiagram:dependency:{key}",
+                 "value": value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)}
+                for key, value in sorted(details.items()) if value
+            ]
+            package = graph.nodes.get(finding.node_id or "")
+            ref = finding.node_id or finding.id
+            component: dict[str, Any] = {
+                "type": "library", "bom-ref": ref, "name": details["package"],
+            }
+            if version := details["resolved_version"] or details["reported_version"]:
+                component["version"] = version
+            if package and package.attrs.get("purl"):
+                component["purl"] = package.attrs["purl"]
+            components[ref] = component
+            vuln["affects"] = [{"ref": ref}]
 
         if finding.cwe and "CWE-" in finding.cwe:
             try:
@@ -154,4 +182,6 @@ def render_vex(
         "vulnerabilities": vulnerabilities,
     }
 
+    if components:
+        doc["components"] = [components[key] for key in sorted(components)]
     return json.dumps(doc, indent=2, sort_keys=False) + "\n"

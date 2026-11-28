@@ -94,12 +94,12 @@ class OfflineCliTests(unittest.TestCase):
             (root / "src").mkdir()
             (root / "src" / "same.py").write_text("x=1", encoding="utf-8")
             (root / "same.py").write_text("x=2", encoding="utf-8")
-            (root / "main.rs").write_text("fn main() {}", encoding="utf-8")
+            (root / "main.rb").write_text("puts 'hello'", encoding="utf-8")
             code, payload, stderr = self.run_cli("--dir", tmp, "--format", "json", "--verbose")
             self.assertEqual(code, 0, stderr)
             diagnostics = payload["health"]["diagnostics"]
             self.assertTrue(any(item["code"] == "parse_error" and item["path"] == "app.py" for item in diagnostics))
-            self.assertTrue(any(item["code"] == "not_parsed" and item["path"] == "main.rs" for item in diagnostics))
+            self.assertTrue(any(item["code"] == "not_parsed" and item["path"] == "main.rb" for item in diagnostics))
             self.assertTrue(any(item["code"] == "ambiguous_layout" for item in diagnostics))
             self.assertFalse(payload["health"]["complete"])
             self.assertIn("running Python version", stderr)
@@ -129,8 +129,13 @@ class OfflineCliTests(unittest.TestCase):
             self.assertTrue(any("unreadable file: a.py" in item for item in repo.skipped))
 
     def test_offline_never_calls_http_and_default_images_are_local(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch("urllib.request.urlopen", side_effect=AssertionError("network")):
-            code, _, stderr = self.run_cli("--dir", str(FIXTURE), "--out", tmp, "--format", "json,html", "--offline")
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("urllib.request.urlopen", side_effect=AssertionError("network")),
+        ):
+            code, _, stderr = self.run_cli(
+                "--dir", str(FIXTURE), "--out", tmp, "--format", "json,html", "--offline"
+            )
             self.assertEqual(code, 0, stderr)
             with mock.patch("secdiagram_core.cli.generate_narrative") as narrative:
                 code, payload, _ = self.run_cli("--dir", str(FIXTURE), "--offline", "--ollama")
@@ -140,7 +145,12 @@ class OfflineCliTests(unittest.TestCase):
             with mock.patch("secdiagram_core.cli.render_image") as renderer:
                 code, _, _ = self.run_cli("--dir", str(FIXTURE), "--out", tmp, "--image")
                 self.assertEqual(code, 0)
-                self.assertTrue(all(call.kwargs["provider"] == "local" for call in renderer.call_args_list))
+                self.assertGreaterEqual(
+                    renderer.call_count, 2, "both architecture images must be requested"
+                )
+                self.assertTrue(
+                    all(call.kwargs["provider"] == "local" for call in renderer.call_args_list)
+                )
 
     def test_config_validation_and_explicit_cli_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -140,6 +140,16 @@ class PolicyParsingTests(unittest.TestCase):
         self.assertFalse(policy.include_review)
         self.assertEqual(policy.techniques, ())
         self.assertEqual(policy.ignore_techniques, ())
+        self.assertEqual(
+            policy.to_dict(),
+            {
+                "fail_priorities": ["P0", "P1"],
+                "min_score": 6.0,
+                "include_review": False,
+                "techniques": [],
+                "ignore_techniques": [],
+            },
+        )
 
     def test_full_policy_document(self) -> None:
         text = "\n".join(
@@ -168,30 +178,21 @@ class PolicyParsingTests(unittest.TestCase):
         self.assertEqual(policy.min_score, 6.0)
         self.assertFalse(policy.include_review)
 
-    def test_tabs_are_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_policy("fail_priorities:\n\t- P0\n")
-
-    def test_unknown_priority_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_policy("fail_priorities: [P9]\n")
-
-    def test_unknown_technique_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_policy("ignore_techniques: [T9999]\n")
-
-    def test_min_score_range_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_policy("min_score: 11.0\n")
-
-    def test_malformed_line_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_policy("just some text\n")
-
-    def test_policy_to_dict_round_trip(self) -> None:
-        policy = parse_policy(DEFAULT_POLICY_YAML)
-        data = policy.to_dict()
-        self.assertEqual(data["fail_priorities"], ["P0", "P1"])
+    def test_invalid_policy_conditions_report_the_correct_error(self) -> None:
+        for condition, document, error in (
+            ("tab indentation", "fail_priorities:\n\t- P0\n", "tabs are not allowed"),
+            ("tab before mapping", "\tmin_score: 6\n", "tabs are not allowed"),
+            ("mixed indentation", " \tmin_score: 6\n", "tabs are not allowed"),
+            ("unknown priority", "fail_priorities: [P9]\n", "unknown priority"),
+            ("unknown technique", "ignore_techniques: [T9999]\n", "unknown technique"),
+            ("score too high", "min_score: 11.0\n", "min_score must be a number"),
+            ("score negative", "min_score: -0.1\n", "min_score must be a number"),
+            ("malformed mapping", "just some text\n", "expected 'key: value'"),
+            ("orphan list item", "- P0\n", "list item without a list key"),
+        ):
+            with self.subTest(condition=condition):
+                with self.assertRaisesRegex(ValueError, error):
+                    parse_policy(document)
 
 
 class PolicyGateTests(unittest.TestCase):

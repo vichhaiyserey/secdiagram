@@ -2,6 +2,10 @@
 
 `secdiagram` provides a deterministic command-line interface for architecture discovery, security analysis, and diagram rendering.
 
+Rust `.rs` files and Cargo projects use the same scan, output, filtering and
+offline options as other languages. See [Rust support](RUST_SUPPORT.md) for
+Axum/Actix route patterns, security rules and lexical coverage limits.
+
 ---
 
 ## 1. Synopsis
@@ -17,6 +21,7 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
            [--security] [--no-security]
            [--security-report {html,md,both}]
            [--sonarqube-report PATH] [--xray-report PATH]
+           [--zap-report PATH] [--nuclei-report PATH]
            [--advisory-db PATH]
            [--link-base LINK_BASE]
            [--image [FORMAT]] [--image-format {png,svg,pdf}]
@@ -75,6 +80,8 @@ secdiagram [-h] [--dir DIR] [--out OUT] [--format FORMAT]
 | `--security-report {html,md,both}` | `none` | Write a standalone `security-report.html` and/or `SECURITY_REVIEW.md` |
 | `--sonarqube-report PATH` | `none` | Import a SonarQube issues JSON export as security findings |
 | `--xray-report PATH` | `none` | Import JFrog Xray violations JSON as dependency findings |
+| `--zap-report PATH` | `none` | Import an OWASP ZAP Traditional JSON report as runtime findings and endpoint evidence. Reports are correlated with static routes; no scanner process or network target is used |
+| `--nuclei-report PATH` | `none` | Import Nuclei JSONL/JSON output as runtime findings and endpoint evidence. HTTP observations annotate matched endpoint nodes and `graph.meta.runtime_analysis` |
 | `--advisory-db PATH` | `none` | Validate imported CVEs against a local CISA KEV/NVD/OSV JSON file or directory (repeatable) |
 | `--min-confidence SCORE` | `0.5` | Drop call/inheritance edges below this confidence (`0.0`-`1.0`) |
 | `--min-finding-confidence SCORE` | `0.0` | Drop security findings below this confidence (`0.0`-`1.0`) |
@@ -203,6 +210,15 @@ secdiagram --dir . --policy strict --format sarif,json
 secdiagram --dir . --sonarqube-report sonar.json --xray-report xray.json --format vex
 ```
 
+### Runtime DAST Evidence Correlation
+```bash
+# Import ZAP and Nuclei output; runtime requests are matched to static endpoints
+secdiagram --dir . --zap-report zap.json --nuclei-report nuclei.jsonl \
+  --security-report both --format json,sarif
+```
+
+Runtime-confirmed critical/high findings carry `runtimeConfirmed` in SARIF and can satisfy the strict policy reachability gate; endpoints observed at runtime are annotated in `graph.json` under `runtime_observed` and summarized in `meta.runtime_analysis`.
+
 ### Scale-Optimized Monorepo Analysis with Shared Cache
 ```bash
 secdiagram --dir /path/to/monorepo --jobs 8 --cache-dir ~/.cache/secdiagram
@@ -265,3 +281,5 @@ secdiagram studio serve   [--dir DIR] [server flags...]
 ```
 
 Installs a user-level Studio home with a private virtual environment, portable launchers, and the `secdiagram-diagramming` agent skill. `serve` forwards to `secdiagram serve` and exposes the Studio at `/studio`. The default home is `~/.secdiagram/studio`; set `SECDIAGRAM_STUDIO_HOME` to override it. Installer writes are CLI-only. See [Agentic Studio](STUDIO.md).
+
+See [Dependency risk correlation](DEPENDENCY_RISK_CORRELATION.md) for offline Pub inventory, --trivy-report and --sbom.

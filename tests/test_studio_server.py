@@ -8,8 +8,11 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
+from urllib.parse import quote
 
 from secdiagram_core.config import SecdiagramConfig
+from secdiagram_core.render_image import ImageRenderError
 from secdiagram_core.server import create_server
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample_app"
@@ -82,8 +85,12 @@ class StudioServerTests(unittest.TestCase):
         self.assertIn('class="skip-link"', html)
         self.assertIn('role="tablist"', html)
 
-        self.assertEqual(self.studio.get("/studio/app.css")[0], 200)
-        self.assertEqual(self.studio.get("/studio/app.js")[0], 200)
+        asset_dir = Path(__file__).resolve().parent.parent / "secdiagram_core" / "studio_ui"
+        for name in ("app.css", "app.js"):
+            with self.subTest(asset=name):
+                status, content = self.studio.get(f"/studio/{name}")
+                self.assertEqual(status, 200)
+                self.assertEqual(content, (asset_dir / name).read_text(encoding="utf-8"))
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.studio.get("/studio/../server.py")
         self.assertEqual(ctx.exception.code, 404)
@@ -114,6 +121,40 @@ class StudioServerTests(unittest.TestCase):
         nodes = json.loads(body)
         self.assertEqual(status, 200)
         self.assertGreater(nodes["total"], 0)
+
+    def test_studio_csp_allows_blob_preview(self) -> None:
+        with urllib.request.urlopen(self.studio.base_url + "/studio", timeout=60) as response:
+            csp = response.headers.get("Content-Security-Policy", "")
+        self.assertIn("img-src 'self' data: blob:", csp)
+        self.assertIn("script-src 'self';", csp)
+        self.assertNotIn("cdn.jsdelivr.net", csp)
+
+        with urllib.request.urlopen(self.studio.base_url + "/studio/app.js", timeout=60) as response:
+            asset_csp = response.headers.get("Content-Security-Policy", "")
+        self.assertEqual(asset_csp, csp)
+
+    def test_nodes_are_bounded_and_filterable(self) -> None:
+        _, body = self.studio.get("/api/v1/studio/nodes?limit=1000")
+        all_nodes = json.loads(body)
+        self.assertGreater(all_nodes["total"], 2)
+        target = all_nodes["nodes"][0]["id"]
+
+        status, body = self.studio.get("/api/v1/studio/nodes?limit=2&offset=1")
+        page = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(page["limit"], 2)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["total"], all_nodes["total"])
+        self.assertEqual(page["returned"], min(2, page["total"] - 1))
+        self.assertEqual(len(page["nodes"]), page["returned"])
+
+        status, body = self.studio.get(
+            f"/api/v1/studio/nodes?q={quote(target)}&limit=1"
+        )
+        filtered = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(filtered["returned"], 1)
+        self.assertEqual(filtered["nodes"][0]["id"], target)
 
     def test_sdlc_phase_flow_and_gate(self) -> None:
         status, body = self.studio.post(
@@ -180,6 +221,28 @@ class StudioServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertFalse(json.loads(body)["summary"]["has_changes"])
 
+    def test_hidden_nodes_remain_editable(self) -> None:
+        _, body = self.studio.get("/api/v1/studio/nodes")
+        before = json.loads(body)
+        hidden_id = before["nodes"][0]["id"]
+
+        status, _ = self.studio.post(
+            "/api/v1/studio/overrides",
+            {"renames": {}, "hidden": [hidden_id]},
+        )
+        self.assertEqual(status, 200)
+
+        _, body = self.studio.get("/api/v1/studio/nodes")
+        after = json.loads(body)
+        self.assertEqual(after["total"], before["total"])
+        self.assertIn(hidden_id, {node["id"] for node in after["nodes"]})
+
+        status, _ = self.studio.post(
+            "/api/v1/studio/overrides",
+            {"renames": {}, "hidden": []},
+        )
+        self.assertEqual(status, 200)
+
     def test_post_guards(self) -> None:
         status, body = self.studio.post("/api/v1/studio/installer", {})
         self.assertEqual(status, 403)
@@ -243,15 +306,34 @@ class StudioServerTests(unittest.TestCase):
         self.assertTrue((studio_dir / "HANDOFF.md").is_file())
         self.assertTrue((studio_dir / "handoff.json").is_file())
 
-    def test_render_returns_image_or_service_unavailable(self) -> None:
-        try:
-            status, body = self.studio.get("/api/v1/studio/render?format=svg&detail=high-level")
-        except urllib.error.HTTPError as exc:
-            self.assertEqual(exc.code, 503)
-            exc.close()
-            return
-        self.assertEqual(status, 200)
-        self.assertIn("<svg", body)
+    def test_render_success_and_unavailability_follow_renderer_outcome(self) -> None:
+        for image_format, payload, content_type in (
+            ("svg", b'<svg xmlns="http://www.w3.org/2000/svg"><text>mock diagram</text></svg>', "image/svg+xml"),
+            ("png", b"\x89PNG\r\n\x1a\nmock_image_data", "image/png"),
+        ):
+            with self.subTest(format=image_format):
+                def render(source, output, payload=payload, **kwargs):
+                    output.write_bytes(payload)
+
+                with mock.patch("secdiagram_core.server.render_image", side_effect=render) as renderer:
+                    with urllib.request.urlopen(self.studio.base_url + f"/api/v1/studio/render?format={image_format}&detail=high-level", timeout=60) as response:
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.headers["Content-Type"], content_type)
+                        self.assertEqual(response.read(), payload)
+                renderer.assert_called_once()
+                self.assertIn("flowchart", renderer.call_args.args[0])
+                self.assertEqual(renderer.call_args.kwargs, {"image_format": image_format, "provider": "local", "timeout": 30.0, "offline": True})
+
+        with mock.patch("secdiagram_core.server.render_image", side_effect=ImageRenderError("mock renderer unavailable")) as renderer:
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.studio.get("/api/v1/studio/render?format=svg&detail=high-level")
+            try:
+                self.assertEqual(caught.exception.code, 503)
+                error = json.loads(caught.exception.read())
+                self.assertEqual(error, {"error": "RenderUnavailable", "message": "mock renderer unavailable"})
+            finally:
+                caught.exception.close()
+        renderer.assert_called_once()
 
 
 class StudioReadOnlyTests(unittest.TestCase):

@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .assessment import canonical_exposure, canonical_reachability, is_public_client_identifier
+from .exploitability import assess_graph
 from .model import Finding, Graph, Node
 from .taint_flows import TaintFlow, build_taint_flows
 
@@ -64,7 +66,18 @@ IMPACT: dict[str, float] = {
     "misconfig": 4.0,
 }
 SEVERITY_IMPACT = {"critical": 9.0, "high": 7.0, "medium": 5.0, "low": 3.0, "info": 1.0}
-EXPOSURE = {"public": 1.0, "unknown": 0.9, "authenticated": 0.65, "local": 0.45, "internal": 0.4}
+EXPOSURE = {
+    "public": 1.0,
+    "privileged": 0.65,
+    "sensitive_data": 0.9,
+    "internal_high_impact": 0.5,
+    "isolated": 0.4,
+    "unknown": 0.9,
+    # Legacy aliases retained for callers that still pass the older taxonomy.
+    "authenticated": 0.65,
+    "local": 0.45,
+    "internal": 0.4,
+}
 CONFIG_CATEGORIES = frozenset(
     {"jwt", "cors", "csrf", "cookie", "xxe", "randomness", "misconfig", "tls", "crypto", "container", "cloud",
      "ci", "supply-chain", "supply_chain", "secret", "auth"}
@@ -82,6 +95,7 @@ class RiskScore:
     priority: str
     impact: float
     exposure: str
+    reachability: str
     evidence: str
     entry: str | None
     known_exploited: bool
@@ -92,6 +106,7 @@ class RiskScore:
             "priority": self.priority,
             "impact": self.impact,
             "exposure": self.exposure,
+            "reachability": self.reachability,
             "evidence": self.evidence,
             "entry": self.entry,
             "known_exploited": self.known_exploited,
@@ -130,45 +145,57 @@ def _known_exploited(finding: Finding) -> bool:
 def score_finding(graph: Graph, finding: Finding, flow: TaintFlow | None) -> RiskScore:
     impact = IMPACT.get(finding.category, SEVERITY_IMPACT.get(finding.severity, 5.0))
     entry: str | None = None
-    if flow is not None and flow.node_path:
+    exposure = canonical_exposure(graph, finding, flow)
+    reachability = canonical_reachability(graph, finding, flow)
+    if finding.source in {"trivy", "cyclonedx"}:
+        evidence, evidence_factor = {
+            "reachable": ("package-call-path", 0.85),
+            "potentially_reachable": ("package-import", 0.55),
+        }.get(finding.reachability, ("inventory-only", 0.25))
+        impact = SEVERITY_IMPACT.get(finding.severity, 5.0)
+        if finding.metadata.get("fixed_in_inventory"):
+            evidence, evidence_factor = "resolved-fix", 0.0
+    elif flow is not None and flow.node_path:
         entry = flow.node_path[0]
-        exposure = endpoint_exposure(graph.nodes.get(entry))
         evidence = "proven-flow"
         evidence_factor = 1.0
-    else:
-        node = graph.nodes.get(finding.node_id or "")
-        node_exposure = endpoint_exposure(node)
-        if finding.category == "secret":
-            # A credential in source is definitive: anyone with the repo or image has it.
+    elif is_public_client_identifier(finding):
+        exposure = "unknown"
+        evidence, evidence_factor = "public-client-identifier", 0.2
+        impact *= SEVERITY_SCALE.get(finding.severity, 0.8)
+    elif finding.metadata.get("runtime_confirmed") and exposure not in {"isolated", "unknown"}:
+        # A DAST scanner reached this endpoint at runtime, so risk ranking
+        # must not treat an unknown exposure as merely theoretical.
+        evidence, evidence_factor = "runtime-observed", 1.0
+    elif finding.category == "secret":
+        # A credential in source is definitive: anyone with the repo or image has it.
+        evidence, evidence_factor = "credential-in-source", 0.95
+        impact *= SEVERITY_SCALE.get(finding.severity, 0.8)
+    elif finding.category in CONFIG_CATEGORIES:
+        # Application-wide configuration: reachable wherever the app is.
+        if exposure not in {"public", "privileged", "sensitive_data"}:
             exposure = "unknown"
-            evidence, evidence_factor = "credential-in-source", 0.95
-            impact *= SEVERITY_SCALE.get(finding.severity, 0.8)
-        elif finding.category in CONFIG_CATEGORIES:
-            # Application-wide configuration: reachable wherever the app is.
-            exposure = node_exposure if node_exposure in ("public", "authenticated") else "unknown"
-            evidence, evidence_factor = "unsafe-configuration", 0.9
-            impact *= SEVERITY_SCALE.get(finding.severity, 0.8)
-        elif finding.metadata.get("tainted") or finding.trace:
-            exposure = node_exposure
-            evidence, evidence_factor = "proven-flow", 1.0
-        elif finding.category in INJECTION_CATEGORIES:
-            exposure = node_exposure
-            evidence, evidence_factor = "dynamic-construction", 0.5
-        else:
-            exposure = node_exposure if node_exposure != "internal" else "unknown"
-            evidence, evidence_factor = "pattern", 0.7
-            impact *= SEVERITY_SCALE.get(finding.severity, 0.8)
+        evidence, evidence_factor = "unsafe-configuration", 0.9
+        impact *= SEVERITY_SCALE.get(finding.severity, 0.8)
+    elif finding.metadata.get("tainted") or finding.trace:
+        evidence, evidence_factor = "proven-flow", 1.0
+    elif finding.category in INJECTION_CATEGORIES:
+        evidence, evidence_factor = "dynamic-construction", 0.5
+    else:
+        evidence, evidence_factor = "pattern", 0.7
+        impact *= SEVERITY_SCALE.get(finding.severity, 0.8)
     known_exploited = _known_exploited(finding)
     confidence = 0.7 + 0.3 * max(0.0, min(1.0, float(finding.confidence)))
-    raw = impact * EXPOSURE[exposure] * evidence_factor * confidence * (1.2 if known_exploited else 1.0)
+    raw = impact * EXPOSURE.get(exposure, 0.9) * evidence_factor * confidence * (1.2 if known_exploited else 1.0)
     score = round(min(10.0, raw), 1)
-    if known_exploited:
+    if known_exploited and finding.source not in {"trivy", "cyclonedx"}:
         score = max(score, 8.0)
     return RiskScore(
         score=score,
         priority=_priority(score),
         impact=round(impact, 2),
         exposure=exposure,
+        reachability=reachability,
         evidence=evidence,
         entry=entry,
         known_exploited=known_exploited,
@@ -191,10 +218,11 @@ def score_findings(graph: Graph, flows: list[TaintFlow] | None = None) -> list[t
         "by_priority": {label: sum(1 for r in active if r.priority == label) for label in ("P0", "P1", "P2", "P3")},
         "by_exposure": {
             label: sum(1 for r in active if r.exposure == label)
-            for label in ("public", "unknown", "authenticated", "local", "internal")
+            for label in ("public", "privileged", "sensitive_data", "internal_high_impact", "isolated", "unknown")
         },
         "top": [finding.id for finding, _ in ranked if not finding.baseline][:10],
     }
+    assess_graph(graph, flows)
     return ranked
 
 

@@ -192,7 +192,9 @@ def attach_threat_records(graph: Graph, threats: list[Threat]) -> None:
                     "finding_ids": [finding.id],
                     "severity": finding.severity,
                     "confidence": round(max(0.0, min(1.0, finding.confidence)), 2),
-                    "exploitability": "static-flow" if flow else "unverified",
+                    "exploitability": finding.exploitability
+                    or ("static-flow" if flow else "unverified"),
+                    "exploitability_score": round(float(finding.exploitability_score), 2),
                     "priority": risk.get("priority"),
                     "risk_score": risk.get("score", 0.0),
                     "components": sorted(components),
@@ -441,7 +443,7 @@ def validate_snapshot(payload: Any) -> None:
         counts[record["catalog_id"]] += 1
         if record["severity"] not in {"critical", "high", "medium", "low", "info"} or record[
             "exploitability"
-        ] not in {"unverified", "static-flow"}:
+        ] not in {"unverified", "static-flow", "likely", "plausible", "unlikely", "informational"}:
             raise ValueError("invalid severity or exploitability")
         for field in ("confidence", "risk_score"):
             value = record.get(field)

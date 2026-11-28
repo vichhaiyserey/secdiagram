@@ -20,6 +20,7 @@ BLOCK_CONFIDENCE_THRESHOLD = 0.90
 # Evidence-quality factors applied to the detector's base confidence.
 EVIDENCE_FACTORS: dict[str, float] = {
     "provider_verified": 1.0,
+    "public_client_identifier": 0.2,
     "externally_verified": 1.0,
     "proven_flow": 1.0,
     "unsafe_configuration": 0.92,

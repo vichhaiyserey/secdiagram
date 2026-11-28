@@ -248,7 +248,7 @@ class IntegrationTests(unittest.TestCase):
     def test_coverage_metadata(self) -> None:
         result = run_analysis(AnalysisConfig(root=FIXTURES, security=True))
         meta = result.graph.meta
-        self.assertEqual(meta["polyglot_files"], {"csharp": 6, "go": 2, "php": 5, "typescript": 7})
+        self.assertEqual(meta["polyglot_files"], {"csharp": 6, "dart": 5, "go": 2, "php": 5, "rust": 3, "typescript": 7})
         self.assertEqual(meta["unsupported_security_languages"], [])
 
     def test_graph_json_is_deterministic(self) -> None:

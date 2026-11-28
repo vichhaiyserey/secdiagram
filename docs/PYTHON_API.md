@@ -25,7 +25,19 @@ config = AnalysisConfig(
 
 # Run full analysis:
 result = analyze(config)
+
+# Import runtime DAST evidence without launching a scanner:
+runtime = analyze(
+    AnalysisConfig(
+        root=".",
+        zap_report="zap-traditional.json",
+        nuclei_report="nuclei.jsonl",
+    )
+)
+summary = runtime.graph.meta["runtime_analysis"]
 ```
+
+`AnalysisConfig` accepts `sonarqube_report`, `xray_report`, `zap_report`, and `nuclei_report` local paths. DAST observations are correlated to endpoint nodes; matched nodes gain `runtime_observed` attributes and `runtime.graph.meta["runtime_analysis"]` summarizes matched, runtime-only, and unobserved endpoints.
 
 > [!NOTE]
 > For backward compatibility, legacy imports from `secdiagram_core.analyzer` (`AnalysisConfig`, `run_analysis`) and `secdiagram_core.high_level` (`build_high_level_architecture`, `render_mermaid_highlevel`) remain fully supported via internal re-exports and module shims.
@@ -69,6 +81,29 @@ else:
 for pkg, summary in result.dependency_usage.items():
     print(f"{pkg}: reachable={summary.is_reachable}, imports={summary.import_count}, sinks={summary.sinks_invoked}")
 ```
+
+### Canonical finding assessment
+
+`score_findings(graph)` (also run by `run_analysis`) attaches a canonical, additive assessment to every finding. The existing `metadata["risk"]` and `metadata["exploitability"]` objects remain available; the new fields remove the need to reconcile their taxonomies:
+
+```python
+from secdiagram_core.risk import score_findings
+
+score_findings(result.graph)
+for finding in result.graph.sorted_findings():
+    assessment = finding.assessment
+    print(
+        assessment["priority"],
+        assessment["level"],
+        assessment["reachability"],
+        assessment["exposure"],
+        assessment["blocking"],
+    )
+    print(finding.rule["id"], finding.provenance["trust"])
+    print(finding.remediation["commands"])
+```
+
+The same objects appear in `graph.to_dict()["findings"]` and the REST API. `schema_version` remains `1`; `schema_features` lists the additive fields (`finding.assessment/v1`, `finding.rule/v1`, `finding.provenance/v1`, `finding.remediation/v1`).
 
 ---
 
@@ -137,30 +172,33 @@ c4_mermaid_text = render_mermaid_highlevel(high_level_arch)
 Extend `secdiagram` privately, commercially, or internally without forking or modifying the core open-source engine.
 
 ### A. Custom Language Indexers (`LanguageIndexer`)
-Index proprietary or new languages (e.g. Go, Rust, Kotlin, COBOL) and attach their definitions, endpoints, and calls to the unified graph:
+Index additional languages (e.g. Kotlin or COBOL) and attach their definitions,
+endpoints, and calls to the unified graph. Go and [Rust](RUST_SUPPORT.md) already
+have built-in lexical indexers.
 
 ```python
 from pathlib import Path
 from secdiagram_core import Graph, Node, register_indexer
 
-class GoLanguageIndexer:
+class KotlinLanguageIndexer:
     @property
     def name(self) -> str:
-        return "go"
+        return "kotlin"
 
     @property
     def supported_suffixes(self) -> tuple[str, ...]:
-        return (".go",)
+        return (".kt",)
 
     def index_repo(self, root: Path, rel_files: list[str], graph: Graph) -> None:
         for rel in rel_files:
-            if rel.endswith(".go"):
-                # Parse Go file and attach nodes/edges to graph
-                node = Node(id=f"go:{rel}", kind="module", name=rel, qualname=rel, path=rel)
+            if rel.endswith(".kt"):
+                # Add a module observation; a real indexer would parse definitions.
+                from secdiagram_core.model import stable_id
+                node = Node(id=stable_id("kotlin", rel), kind="module", name=rel, qualname=rel, path=rel)
                 graph.add_node(node)
 
 # Register before running analysis:
-register_indexer(GoLanguageIndexer())
+register_indexer(KotlinLanguageIndexer())
 ```
 
 ### B. Custom Security Rule Providers (`SecurityRuleProvider`)
